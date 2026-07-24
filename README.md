@@ -225,6 +225,25 @@ admin has never called `set_max_advance_percent`. `request_advance`
 reads this value and panics with `AdvanceExceedsMax` if the requested
 `advance_percent` is greater than the cap.
 
+### NFT mint hook toggle
+Admin-only feature flag, disabled by default, that controls whether a
+shipment's final milestone completion also emits an `nft_mint_hook`
+event.
+
+- `set_nft_hook_enabled(admin, enabled: bool)` — turns the hook on or
+  off. Emits `nft_hook_config_updated` with the new value.
+- `get_nft_hook_enabled() → bool` *(read-only)* — returns the current
+  setting.
+
+When enabled, completing a shipment's last milestone (in addition to
+the usual collateral return and `milestone_confirmed` event) publishes
+an `nft_mint_hook` event containing the buyer, supplier, total shipment
+amount, ledger sequence, and metadata hash. The event is purely
+informational: it does not change contract state or call another
+contract. It exists so an off-chain service can listen for it and mint
+a provenance/completion NFT for the buyer — the contract itself never
+mints or holds NFTs.
+
 ---
 
 ## Events
@@ -239,6 +258,8 @@ The contract emits the following events (subscribe via Horizon or RPC):
 | `dispute_raised` | `(shipment_id, milestone_index)` | Buyer disputes a milestone |
 | `dispute_resolved` | `(shipment_id, milestone_index, approved)` | Arbiter resolves dispute |
 | `shipment_cancelled` | `(shipment_id, refund_amount)` | Shipment cancelled |
+| `nft_hook_config_updated` | `(admin, enabled, ledger_sequence)` | Admin toggled the NFT mint hook via `set_nft_hook_enabled` |
+| `nft_mint_hook` | `(shipment_id)` topic, `(buyer, supplier, total_amount, ledger_sequence, metadata_hash)` data | Final milestone completed while the NFT mint hook is enabled |
 
 The backend service (`chainsetttle-backend`) listens for these events and
 sends push notifications to the relevant parties.
