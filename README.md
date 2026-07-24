@@ -403,6 +403,70 @@ unbounded number of simultaneous disputes, tying up several payment
 releases at once and dumping all of that resolution work on one arbiter
 at the same time.
 
+### Admin Action Audit Trail
+
+The contract maintains an immutable audit log of all administrative actions
+for transparency and governance accountability. Every admin function call
+(pause, fee changes, blacklist operations, etc.) is automatically recorded
+with context about who performed the action and when.
+
+#### `get_admin_log() → Vec<AuditEntry>` *(read-only)*
+
+Returns the complete history of admin actions performed on the contract.
+Each `AuditEntry` contains:
+
+```rust
+pub struct AuditEntry {
+    pub action: Symbol,      // Admin function called (e.g. "pause", "set_fee_config")
+    pub caller: Address,     // Admin address who performed the action
+    pub ledger: u32,         // Ledger sequence number (timestamp proxy)
+    pub detail: Symbol,      // Context detail (e.g. "contract_paused", "fee_config_updated")
+}
+```
+
+**Logged actions include:**
+
+| Action | Triggered by | Detail |
+|--------|--------------|--------|
+| `pause` | `pause()` | `contract_paused` |
+| `unpause` | `unpause()` | `contract_unpaused` |
+| `set_fee_config` | `set_fee_config()` | `fee_config_updated` |
+| `set_max_concurrent_disputes` | `set_max_concurrent_disputes()` | `limit_updated` |
+| `set_min_milestone_percent` | `set_min_milestone_percent()` | `percent_updated` |
+| `set_max_advance_percent` | `set_max_advance_percent()` | `percent_updated` |
+| `set_nft_hook_enabled` | `set_nft_hook_enabled()` | `nft_hook_updated` |
+| `blacklist_address` | `blacklist_address()` | `address_blacklisted` |
+| `remove_from_blacklist` | `remove_from_blacklist()` | `address_whitelisted` |
+| `add_allowed_token` | `add_allowed_token()` | `allowed_token_added` |
+| `remove_allowed_token` | `remove_allowed_token()` | `allowed_token_removed` |
+| `add_arbiter_to_pool` | `add_arbiter_to_pool()` | `arbiter_added` |
+| `remove_arbiter_from_pool` | `remove_arbiter_from_pool()` | `arbiter_removed` |
+
+**Usage example:**
+
+```bash
+# Query the admin audit log via CLI
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  -- get_admin_log
+```
+
+**Why this matters:**
+
+- **Transparency**: Anyone can verify when contract parameters were changed
+  and by whom
+- **Governance**: Off-chain tools can monitor the log and alert stakeholders
+  to admin actions
+- **Forensics**: If a dispute arises about contract configuration, the audit
+  trail provides a tamper-proof record
+- **Accountability**: Admin actions are permanently recorded on-chain, making
+  unilateral changes visible to all participants
+
+The audit log uses persistent storage and is retained for the lifetime of
+the contract. Unlike events (which may be pruned by Horizon), these entries
+remain queryable indefinitely.
+
 ---
 
 ## Events
