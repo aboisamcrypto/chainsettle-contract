@@ -124,6 +124,93 @@ pub struct Shipment {
 }
 ```
 
+### `ReputationScore`
+
+`get_reputation(supplier)` returns cumulative supplier outcome counters. It is
+not a single weighted score; applications can use these counters to calculate
+their own supplier rating:
+
+```rust
+pub struct ReputationScore {
+    pub completed: u32,  // shipments completed successfully
+    pub disputed: u32,   // disputes raised against the supplier
+    pub cancelled: u32,  // shipments cancelled or expired
+}
+```
+
+The counters are updated automatically:
+
+- `completed` increases once when all milestones in a shipment reach a
+  completed state, including successful dispute resolution.
+- `disputed` increases when a buyer raises a full or partial dispute. Resolving
+  the dispute does not remove the historical count.
+- `cancelled` increases when a shipment is cancelled by the buyer or supplier,
+  or when the buyer claims a deadline refund.
+
+All counters start at `0` for a supplier with no reputation record and are
+monotonically increasing (with saturating `u32` arithmetic).
+
+#### Interpreting supplier reputation
+
+`get_reputation` intentionally exposes raw on-chain facts instead of imposing
+one platform-wide rating formula. A frontend, marketplace, or backend can
+choose how much weight to give each outcome, while different applications can
+use the same contract data for different purposes.
+
+Important details for scoring integrations:
+
+- `completed` is incremented once per shipment, not once per milestone. A
+  shipment completed after an approved dispute still counts as completed.
+- `disputed` is incremented once whenever a dispute is opened against one of
+  the supplier's milestones. A shipment with disputes on several milestones
+  can therefore contribute more than one disputed count.
+- `cancelled` is incremented once when the shipment becomes cancelled or
+  expired. This includes buyer cancellation, eligible supplier cancellation,
+  and a successful deadline refund claim.
+- A dispute that is later rejected or automatically resolved does not erase
+  the historical `disputed` counter. Applications should treat it as an
+  activity or risk signal rather than proof that the supplier lost the
+  dispute.
+- The counters do not include payment volume, delivery speed, milestone
+  size, dispute outcome, or the identity of the party that raised the dispute.
+  Fetch shipment records separately when those dimensions are required.
+
+For example, an application may calculate a simple historical completion rate
+from the returned counters:
+
+```
+outcomes = completed + disputed + cancelled
+completion_rate = completed / outcomes       // when outcomes > 0
+```
+
+This is only an application-level metric, not a value returned or enforced by
+the contract. Because `disputed` counts milestone dispute events while the
+other fields count shipment outcomes, the ratio should be labelled clearly
+and should not be presented as an official ChainSettle score. A safer UI can
+show the three counters separately and display `Not enough history` until a
+minimum number of completed shipments has been reached.
+
+Example read-only response:
+
+```json
+{
+  "completed": 18,
+  "disputed": 2,
+  "cancelled": 1
+}
+```
+
+The example represents 18 completed shipments, two disputed milestones, and
+one cancelled or expired shipment. It does not mean that 18 of 21 shipments
+were completed, because the disputed value is not a shipment-level count.
+
+The getter requires no supplier signature and does not create a reputation
+record. A supplier with no stored record returns the default value with all
+fields set to zero. Reputation storage uses a persistent entry with a
+renewable Soroban TTL, so indexers should periodically refresh their cached
+value and should not assume that an absent record proves the supplier has
+never used the contract.
+
 ### `MilestoneStatus` state machine
 
 ```
@@ -258,6 +345,12 @@ Returns the full shipment record.
 
 ### `get_milestone(shipment_id, milestone_index) → Milestone` *(read-only)*
 Returns a single milestone.
+
+### `get_reputation(supplier) → ReputationScore` *(read-only)*
+Returns the supplier's cumulative `completed`, `disputed`, and `cancelled`
+shipment counters. The call requires no authorization and returns zeroes when
+the supplier has no recorded activity; it does not calculate or persist a
+separate weighted rating.
 
 ### `get_escrow_balance(shipment_id) → i128` *(read-only)*
 Returns the amount of USDC still locked in escrow.
