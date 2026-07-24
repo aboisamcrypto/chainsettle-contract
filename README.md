@@ -213,6 +213,18 @@ Returns a single milestone.
 ### `get_escrow_balance(shipment_id) → i128` *(read-only)*
 Returns the amount of USDC still locked in escrow.
 
+### `set_max_advance_percent(admin, percent: u32)`
+Admin-only. Sets the maximum percentage of a milestone's payment that a
+supplier may request as an advance via `request_advance`. `percent` must
+not exceed `100`, or the call panics with `"max advance percent must not
+exceed 100"`.
+
+### `get_max_advance_percent() → u32` *(read-only)*
+Returns the current advance percentage cap, defaulting to `30` if the
+admin has never called `set_max_advance_percent`. `request_advance`
+reads this value and panics with `AdvanceExceedsMax` if the requested
+`advance_percent` is greater than the cap.
+
 ---
 
 ## Events
