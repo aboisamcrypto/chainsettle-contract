@@ -225,6 +225,18 @@ admin has never called `set_max_advance_percent`. `request_advance`
 reads this value and panics with `AdvanceExceedsMax` if the requested
 `advance_percent` is greater than the cap.
 
+### `set_max_concurrent_disputes(admin, limit: u32)`
+Admin-only. Sets how many milestones on a single shipment can be under
+dispute at the same time. Defaults to `1` if never called. `raise_dispute`
+and `raise_partial_dispute` check the shipment's open dispute count
+against this cap and panic with `"DisputeAlreadyOpen"` once it's reached.
+
+This is what stops a buyer from disputing several milestones of the same
+shipment all at once. Without a cap, one shipment could rack up an
+unbounded number of simultaneous disputes, tying up several payment
+releases at once and dumping all of that resolution work on one arbiter
+at the same time.
+
 ---
 
 ## Events
