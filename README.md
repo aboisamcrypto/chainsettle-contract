@@ -162,9 +162,29 @@ Parameters:
 Returns: shipment_id (same as input, for confirmation)
 ```
 
-### `submit_proof(caller, shipment_id, milestone_index, proof_hash)`
-Supplier or logistics submits an IPFS hash as proof for a milestone.
+### `submit_proof(caller, shipment_id, milestone_index, proof_hash, proof_type)`
+Supplier or logistics submits proof for a milestone (`proof_hash` is the payload reference, e.g. an IPFS CID; `proof_type` is a short symbol naming the content scheme, e.g. `ipfs`, `sha256`, or `url`).
 Milestone must be in `Pending` status. Moves status to `ProofSubmitted`.
+
+#### Proof content-type whitelist
+
+The buyer can constrain which `proof_type` values are valid for each milestone before anyone submits proof. This is enforced inside `submit_proof`: if a non-empty whitelist is stored for that milestone, the supplied `proof_type` must appear in the list or the call panics (`proof type not in whitelist`). If no whitelist was configured, or the buyer cleared it with an empty list, any `proof_type` is accepted.
+
+| Function | Who | When |
+|---|---|---|
+| `set_proof_whitelist(buyer, shipment_id, milestone_index, allowed_types)` | Buyer | Shipment `Active`, milestone still `Pending` (before first submission) |
+| `get_proof_whitelist(shipment_id, milestone_index) → Vec<Symbol>` | Anyone (read-only) | Returns allowed types; empty vector means “any type” |
+| `get_milestone_proof_type(shipment_id, milestone_index) → Option<Symbol>` | Anyone (read-only) | Type recorded at submission, or `None` if not submitted yet |
+
+Example: the buyer allows only IPFS proofs on milestone 0:
+
+```
+set_proof_whitelist(buyer, "SHIP-001", 0, [ipfs])
+submit_proof(supplier, "SHIP-001", 0, "<cid>", ipfs)   // ok
+submit_proof(supplier, "SHIP-001", 0, "<hash>", sha256) // fails — not whitelisted
+```
+
+Pass an empty `allowed_types` vector to `set_proof_whitelist` to remove the restriction for that milestone.
 
 ### `confirm_milestone(buyer, shipment_id, milestone_index)`
 Buyer confirms a `ProofSubmitted` milestone. Automatically calculates
