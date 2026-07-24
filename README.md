@@ -23,6 +23,7 @@ This is **Repo 1 of 3** in the ChainSettle project:
 - [Architecture](#architecture)
 - [Data Structures](#data-structures)
 - [Contract Functions](#contract-functions)
+  - [rebalance_milestones](#rebalance_milestonesbuyer-shipment_id-new_percents)
 - [Events](#events)
 - [Error Codes](#error-codes)
 - [Project Structure](#project-structure)
@@ -253,6 +254,56 @@ Arbiter resolves a `Disputed` milestone.
 Cancels the shipment if no milestones have been confirmed yet.
 Returns all locked funds to the buyer.
 
+### `rebalance_milestones(buyer, shipment_id, new_percents)`
+Allows the buyer to redistribute the payment percentages across milestones
+**before any proof has been submitted**. This is useful when the agreed
+split needs to change after shipment creation — for example, if a milestone
+scope changes during negotiation — without having to cancel and recreate the
+shipment.
+
+```
+Parameters:
+  buyer         Address   — must be the shipment's registered buyer
+  shipment_id   String    — shipment to operate on
+  new_percents  Vec<u32>  — new payment percentage for each milestone,
+                            in the same order as the milestones array
+```
+
+**Constraints:**
+
+- The shipment must be `Active`.
+- **Every** milestone must still be in `Pending` status — i.e. no supplier or
+  logistics proof has been submitted on any milestone yet. The moment a single
+  milestone moves to `ProofSubmitted` (or beyond), rebalancing is permanently
+  blocked for that shipment.
+- `new_percents` must contain exactly as many entries as there are milestones.
+- The values must **sum to exactly 100**. The call panics with
+  `"milestone percentages must sum to 100"` if they don't.
+- Each individual percentage must be ≥ the `MinMilestonePercent` threshold
+  configured by the admin (default **5**). A value below the threshold panics
+  with `InvalidPercentages`.
+
+**Effect:** Updates each `Milestone.payment_percent` in-place and emits a
+`milestones_rebalanced` event. The actual USDC amounts paid out at confirmation
+time are recalculated from the new percentages, so no funds need to move at
+rebalance time.
+
+Example — shift weight to the final delivery milestone:
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source buyer-account \
+  --network testnet \
+  -- rebalance_milestones \
+  --buyer <BUYER_ADDRESS> \
+  --shipment_id "SHIP-001" \
+  --new_percents '[20, 30, 50]'
+```
+
+The three values `20 + 30 + 50 = 100` — valid. Passing `[20, 30, 40]` would
+panic because they only sum to 90.
+
 ### `get_shipment(shipment_id) → Shipment` *(read-only)*
 Returns the full shipment record.
 
@@ -324,6 +375,7 @@ The contract emits the following events (subscribe via Horizon or RPC):
 | `dispute_raised` | `(shipment_id, milestone_index)` | Buyer disputes a milestone |
 | `dispute_resolved` | `(shipment_id, milestone_index, approved)` | Arbiter resolves dispute |
 | `shipment_cancelled` | `(shipment_id, refund_amount)` | Shipment cancelled |
+| `milestones_rebalanced` | `(buyer, new_percents)` | Buyer rebalanced milestone percentages |
 | `nft_hook_config_updated` | `(admin, enabled, ledger_sequence)` | Admin toggled the NFT mint hook via `set_nft_hook_enabled` |
 | `nft_mint_hook` | `(shipment_id)` topic, `(buyer, supplier, total_amount, ledger_sequence, metadata_hash)` data | Final milestone completed while the NFT mint hook is enabled |
 
