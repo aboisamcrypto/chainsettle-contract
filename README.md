@@ -23,6 +23,7 @@ This is **Repo 1 of 3** in the ChainSettle project:
 - [Architecture](#architecture)
 - [Data Structures](#data-structures)
 - [Contract Functions](#contract-functions)
+  - [rebalance_milestones](#rebalance_milestonesbuyer-shipment_id-new_percents)
 - [Events](#events)
 - [Error Codes](#error-codes)
 - [Project Structure](#project-structure)
@@ -526,6 +527,7 @@ The contract emits the following events (subscribe via Horizon or RPC):
 | `dispute_escalated` | `(shipment_id)` topic, `(milestone_index, opened_ledger, current_ledger)` data | Dispute open duration surpassed escalation threshold |
 | `escalation_threshold_set` | `threshold_ledgers` | Admin configured escalation threshold |
 | `shipment_cancelled` | `(shipment_id, refund_amount)` | Shipment cancelled |
+| `milestones_rebalanced` | `(buyer, new_percents)` | Buyer rebalanced milestone percentages |
 | `nft_hook_config_updated` | `(admin, enabled, ledger_sequence)` | Admin toggled the NFT mint hook via `set_nft_hook_enabled` |
 | `nft_mint_hook` | `(shipment_id)` topic, `(buyer, supplier, total_amount, ledger_sequence, metadata_hash)` data | Final milestone completed while the NFT mint hook is enabled |
 
