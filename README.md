@@ -361,6 +361,31 @@ unbounded number of simultaneous disputes, tying up several payment
 releases at once and dumping all of that resolution work on one arbiter
 at the same time.
 
+### `set_min_milestone_percent(admin, percent: u32)`
+Admin-only. Sets the floor on how small any single milestone's
+`payment_percent` can be. Defaults to **5** if never called. `percent`
+must be between 1 and 100 inclusive, or the call panics with
+`"min_milestone_percent must be between 1 and 100"`.
+
+**Where this is enforced:**
+
+- `create_shipment` — every milestone in the `milestones` vec is checked
+  against this floor before the shipment is created and funds are locked.
+  Any milestone below the threshold causes the transaction to panic with
+  `InvalidPercentages`.
+- `rebalance_milestones` — the same check runs against each value in
+  `new_percents` before the rebalance is applied.
+
+The two constraints work together: all percentages must **sum to exactly
+100** *and* each individual value must be **≥ `MinMilestonePercent`**.
+This prevents degenerate configurations like a single 1 % milestone that
+would pay out a dust amount on confirmation.
+
+Example: with the default floor of 5 and a three-milestone shipment, the
+valid range for any one milestone is **5 – 90** (the other two must each
+hold at least 5). Setting `percent = 0` or `percent = 101` panics
+immediately.
+
 ---
 
 ## Events
