@@ -249,6 +249,18 @@ admin has never called `set_max_advance_percent`. `request_advance`
 reads this value and panics with `AdvanceExceedsMax` if the requested
 `advance_percent` is greater than the cap.
 
+### `set_max_concurrent_disputes(admin, limit: u32)`
+Admin-only. Sets how many milestones on a single shipment can be under
+dispute at the same time. Defaults to `1` if never called. `raise_dispute`
+and `raise_partial_dispute` check the shipment's open dispute count
+against this cap and panic with `"DisputeAlreadyOpen"` once it's reached.
+
+This is what stops a buyer from disputing several milestones of the same
+shipment all at once. Without a cap, one shipment could rack up an
+unbounded number of simultaneous disputes, tying up several payment
+releases at once and dumping all of that resolution work on one arbiter
+at the same time.
+
 ---
 
 ## Events
@@ -263,8 +275,8 @@ The contract emits the following events (subscribe via Horizon or RPC):
 | `dispute_raised` | `(shipment_id, milestone_index)` | Buyer disputes a milestone |
 | `dispute_resolved` | `(shipment_id, milestone_index, approved)` | Arbiter resolves dispute |
 | `shipment_cancelled` | `(shipment_id, refund_amount)` | Shipment cancelled |
-| `contract_paused` | `ledger_sequence` | Admin called `pause` — all state-changing calls now blocked |
-| `contract_unpaused` | `ledger_sequence` | Admin called `unpause` — normal operation resumed |
+| `nft_hook_config_updated` | `(admin, enabled, ledger_sequence)` | Admin toggled the NFT mint hook via `set_nft_hook_enabled` |
+| `nft_mint_hook` | `(shipment_id)` topic, `(buyer, supplier, total_amount, ledger_sequence, metadata_hash)` data | Final milestone completed while the NFT mint hook is enabled |
 
 The backend service (`chainsetttle-backend`) listens for these events and
 sends push notifications to the relevant parties.
