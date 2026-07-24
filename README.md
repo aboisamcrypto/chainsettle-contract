@@ -225,6 +225,97 @@ admin has never called `set_max_advance_percent`. `request_advance`
 reads this value and panics with `AdvanceExceedsMax` if the requested
 `advance_percent` is greater than the cap.
 
+### `set_escalation_threshold(admin, threshold_ledgers: u32)`
+
+Admin-only. Configures the number of ledgers that must elapse without
+arbiter action before a dispute is considered eligible for escalation.
+
+When a dispute reaches or exceeds `threshold_ledgers` without being
+resolved by the arbiter, calling `check_escalation` on that dispute will
+emit a `dispute_escalated` event that off-chain monitoring services
+(e.g. the `chainsetttle-backend` notification system) can listen for.
+The event payload includes the `milestone_index`, `dispute_opened_ledger`,
+and the `current_ledger` at which escalation was detected.
+
+This acts as a safeguard against stalled disputes — if an arbiter goes
+unresponsive or a dispute is intentionally ignored, the parties involved
+(or an automated backend) can call `check_escalation` periodically to
+surface the delay. Once the event is emitted, the dispute must still be
+resolved via `resolve_dispute` (or `resolve_dispute_timeout` if
+configured). The escalation itself does **not** automatically resolve
+the dispute; it is purely a monitoring and accountability mechanism.
+
+- `threshold_ledgers = 0` disables escalation monitoring entirely (the
+  default at contract initialisation via `init`).
+- The value is stored under `DataKey::EscalationThreshold` (instance
+  storage), initialised to `0` in `init`.
+- On set, emits the `escalation_threshold_set` event with the new value.
+- The admin may update the threshold at any time; changes apply
+  prospectively to all subsequent `check_escalation` calls.
+
+The `check_escalation` function itself is permissionless — anyone may
+call it for any dispute on any shipment. This allows third-party
+monitoring services (or the affected buyer/supplier) to independently
+verify whether escalation should be triggered.
+
+**Example via Stellar CLI:**
+
+```bash
+# Set escalation threshold to 10,000 ledgers (~14 hours at ~5s/ledger)
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source admin-account \
+  --network testnet \
+  -- set_escalation_threshold \
+  --admin <ADMIN_ADDRESS> \
+  --threshold_ledgers 10000
+```
+
+```bash
+# Check escalation on a specific dispute
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source any-account \
+  --network testnet \
+  -- check_escalation \
+  --shipment_id "SHIP-001" \
+  --milestone_index 1
+```
+
+### `get_escalation_threshold() → u32` *(read-only)*
+
+Returns the current escalation threshold in ledgers. Read by
+`check_escalation` to determine whether a dispute has exceeded the
+allowed window.
+
+If the admin has never called `set_escalation_threshold`, or if the
+contract was freshly initialised, this function returns `0` — meaning
+escalation monitoring is disabled for all disputes.
+
+- Stored as `DataKey::EscalationThreshold` (instance-level), initialised
+  to `0` by `init`.
+- The value is never automatically reset; only an explicit admin call to
+  `set_escalation_threshold` changes it.
+- Once the threshold is set to a positive value, all existing and future
+  disputes become eligible for escalation checking as soon as they
+  exceed the configured ledger window.
+
+**Storage note:** In the storage layer (`storage.rs`), the value is
+persisted under the `DataKey::V1EscalationThreshold` variant using the
+versioned key schema to support future contract upgrades without data
+loss. The higher-level function reads from the same underlying instance
+storage.
+
+**Example via Stellar CLI:**
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source any-account \
+  --network testnet \
+  -- get_escalation_threshold
+```
+
 ---
 
 ## Events
