@@ -3,100 +3,22 @@
 extern crate std;
 
 use super::*;
+use crate::test_common::{build_milestones, default_options, single_buyer_vec, TestSetup};
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
-    token, vec, Address, BytesN, Env, String,
+    Address, Env, String, Symbol,
 };
-use std::format;
 
 // ============================================================
 // TEST SETUP
 // ============================================================
 
-struct TestSetup {
-    env: Env,
-    contract_id: Address,
-    token_id: Address,
-    buyer: Address,
-    supplier: Address,
-    logistics: Address,
-    arbiter: Address,
-}
-
 fn setup() -> TestSetup {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register(ChainSettleContract, ());
-
-    let token_admin = Address::generate(&env);
-    let token_id = env
-        .register_stellar_asset_contract_v2(token_admin.clone())
-        .address();
-    let token_client = token::StellarAssetClient::new(&env, &token_id);
-
-    let buyer = Address::generate(&env);
-    let supplier = Address::generate(&env);
-    let logistics = Address::generate(&env);
-    let arbiter = Address::generate(&env);
-
-    token_client.mint(&buyer, &10_000_000_000);
-
-    let client = ChainSettleContractClient::new(&env, &contract_id);
-    client.init(&buyer);
-
-    TestSetup {
-        env,
-        contract_id,
-        token_id,
-        buyer,
-        supplier,
-        logistics,
-        arbiter,
-    }
+    crate::test_common::setup()
 }
 
-fn build_milestones(env: &Env) -> soroban_sdk::Vec<Milestone> {
-    vec![
-        env,
-        Milestone {
-            name: String::from_str(env, "Goods Dispatched"),
-            payment_percent: 100,
-            proof_hash: String::from_str(env, ""),
-            status: MilestoneStatus::Pending,
-            release_after_ledger: 0,
-            proof_submitted_ledger: None,
-            dispute_opened_ledger: None,
-            deadline_ledger: 0,
-            penalty_bps_per_ledger: 0,
-        },
-    ]
-}
-
-fn single_buyer_vec(env: &Env, buyer: &Address) -> soroban_sdk::Vec<Address> {
-    vec![env, buyer.clone()]
-}
-
-fn default_options(_env: &Env) -> ShipmentOptions {
-    ShipmentOptions {
-        response_deadline: 0,
-        penalty_bps: 0,
-        milestone_mode: MilestoneMode::Parallel,
-        holdback_ledgers: 0,
-        dispute_cooldown_ledgers: 0,
-        late_penalty_bps_per_ledger: 0,
-        auto_confirm_ledgers: 0,
-        dispute_bond_amount: 0,
-        arbiter_fee_bps: 0,
-        logistics_fee_bps: 0,
-        supplier_collateral: 0,
-        expires_at_ledger: None,
-        metadata_hash: None,
-        referrer: None,
-        buyer_cancel_fee_bps: 0,
-        early_bonus_pool: 0,
-        review_window_ledgers: None,
-    }
+fn proof_type(env: &Env) -> Symbol {
+    Symbol::new(env, "ipfs")
 }
 
 // ============================================================
@@ -127,7 +49,7 @@ fn test_arbiter_cannot_resolve_pending_milestone() {
 
     // Arbiter attempts to resolve dispute on Pending milestone (not Disputed)
     // Should panic: milestone is not in disputed status
-    client.resolve_dispute(&shipment_id, &0u32, &true);
+    client.resolve_dispute(&t.arbiter, &shipment_id, &0u32, &true);
 }
 
 // ============================================================
@@ -158,11 +80,11 @@ fn test_arbiter_cannot_resolve_proof_submitted_milestone() {
     );
 
     // Submit proof - milestone now in ProofSubmitted state
-    client.submit_proof(&shipment_id, &0u32, &proof_hash);
+    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
 
     // Arbiter attempts to resolve dispute on ProofSubmitted milestone
     // Should panic: milestone is not in disputed status
-    client.resolve_dispute(&shipment_id, &0u32, &true);
+    client.resolve_dispute(&t.arbiter, &shipment_id, &0u32, &true);
 }
 
 // ============================================================
@@ -193,13 +115,13 @@ fn test_arbiter_cannot_resolve_confirmed_milestone() {
     );
 
     // Submit proof and confirm milestone
-    client.submit_proof(&shipment_id, &0u32, &proof_hash);
+    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
     t.env.ledger().set_sequence_number(t.env.ledger().sequence() + 100);
-    client.confirm_milestone(&shipment_id, &0u32);
+    client.confirm_milestone(&t.buyer, &shipment_id, &0u32);
 
     // Arbiter attempts to resolve dispute on Confirmed milestone
     // Should panic: milestone is not in disputed status
-    client.resolve_dispute(&shipment_id, &0u32, &true);
+    client.resolve_dispute(&t.arbiter, &shipment_id, &0u32, &true);
 }
 
 // ============================================================
@@ -233,13 +155,13 @@ fn test_arbiter_cannot_resolve_confirmed_held_milestone() {
     );
 
     // Submit proof and confirm milestone - will go to ConfirmedHeld
-    client.submit_proof(&shipment_id, &0u32, &proof_hash);
+    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
     t.env.ledger().set_sequence_number(t.env.ledger().sequence() + 100);
-    client.confirm_milestone(&shipment_id, &0u32);
+    client.confirm_milestone(&t.buyer, &shipment_id, &0u32);
 
     // Arbiter attempts to resolve dispute on ConfirmedHeld milestone
     // Should panic: milestone is not in disputed status
-    client.resolve_dispute(&shipment_id, &0u32, &true);
+    client.resolve_dispute(&t.arbiter, &shipment_id, &0u32, &true);
 }
 
 // ============================================================
@@ -270,15 +192,15 @@ fn test_arbiter_cannot_resolve_resolved_milestone() {
     );
 
     // Submit proof and raise dispute
-    client.submit_proof(&shipment_id, &0u32, &proof_hash);
-    client.raise_dispute(&shipment_id, &0u32);
+    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
+    client.raise_dispute(&t.buyer, &shipment_id, &0u32);
 
     // Resolve the dispute - milestone now in Resolved state
-    client.resolve_dispute(&shipment_id, &0u32, &true);
+    client.resolve_dispute(&t.arbiter, &shipment_id, &0u32, &true);
 
     // Arbiter attempts to resolve dispute AGAIN on Resolved milestone
     // Should panic: milestone is not in disputed status
-    client.resolve_dispute(&shipment_id, &0u32, &true);
+    client.resolve_dispute(&t.arbiter, &shipment_id, &0u32, &true);
 }
 
 // ============================================================
@@ -309,13 +231,13 @@ fn test_arbiter_cannot_call_confirm_milestone() {
     );
 
     // Submit proof
-    client.submit_proof(&shipment_id, &0u32, &proof_hash);
+    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
 
     // Arbiter (non-buyer) attempts to confirm milestone
     // Should panic: unauthorized
     // Note: This test uses arbiter as caller to confirm_milestone
     // Soroban's mock_all_auths() allows this, but the contract should reject it
-    client.confirm_milestone(&shipment_id, &0u32);
+    client.confirm_milestone(&t.arbiter, &shipment_id, &0u32);
 }
 
 // ============================================================
@@ -346,7 +268,7 @@ fn test_arbiter_cannot_call_cancel_shipment() {
 
     // Arbiter (non-buyer) attempts to cancel shipment
     // Should panic: unauthorized
-    client.cancel_shipment(&shipment_id);
+    client.cancel_shipment(&t.arbiter, &shipment_id);
 }
 
 // ============================================================
@@ -376,17 +298,17 @@ fn test_only_arbiter_can_resolve_after_buyer_raises_dispute() {
     );
 
     // Buyer submits proof
-    client.submit_proof(&shipment_id, &0u32, &proof_hash);
+    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
 
     // Buyer raises dispute
-    client.raise_dispute(&shipment_id, &0u32);
+    client.raise_dispute(&t.buyer, &shipment_id, &0u32);
 
     // Verify milestone is now Disputed
     let shipment = client.get_shipment(&shipment_id);
     assert_eq!(shipment.milestones.get(0).unwrap().status, MilestoneStatus::Disputed);
 
     // Arbiter resolves dispute (should succeed)
-    client.resolve_dispute(&shipment_id, &0u32, &true);
+    client.resolve_dispute(&t.arbiter, &shipment_id, &0u32, &true);
 
     // Verify milestone is now Resolved
     let shipment = client.get_shipment(&shipment_id);
@@ -421,12 +343,12 @@ fn test_arbiter_cannot_bypass_dispute_process_for_payment_redirect() {
     );
 
     // Submit proof (milestone now in ProofSubmitted)
-    client.submit_proof(&shipment_id, &0u32, &proof_hash);
+    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
 
     // Arbiter attempts to directly resolve without buyer raising dispute
     // This is a security attack: arbiter trying to bypass buyer oversight
     // Should panic: milestone is not in disputed status
-    client.resolve_dispute(&shipment_id, &0u32, &true);
+    client.resolve_dispute(&t.arbiter, &shipment_id, &0u32, &true);
 }
 
 // ============================================================
@@ -436,7 +358,7 @@ fn test_arbiter_cannot_bypass_dispute_process_for_payment_redirect() {
 #[test]
 fn test_arbiter_security_covers_all_milestone_states() {
     let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let _client = ChainSettleContractClient::new(&t.env, &t.contract_id);
 
     // Test that we have covered:
     // 1. Pending - test_arbiter_cannot_resolve_pending_milestone ✓
@@ -447,7 +369,7 @@ fn test_arbiter_security_covers_all_milestone_states() {
     // 6. Disputed - test_only_arbiter_can_resolve_after_buyer_raises_dispute ✓
 
     // All 6 MilestoneStatus variants are covered:
-    let milestone_states = vec![
+    let milestone_states = std::vec![
         "Pending",
         "ProofSubmitted",
         "Confirmed",
@@ -469,4 +391,106 @@ fn test_arbiter_security_covers_all_milestone_states() {
     // 10. This state coverage test
 
     assert_eq!(milestone_states.len(), 6);
+}
+
+// ============================================================
+// SECURITY TEST 11: Non-Designated Address Cannot Resolve Dispute
+// ============================================================
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_non_designated_arbiter_cannot_resolve_dispute() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let shipment_id = String::from_str(&t.env, "SHIP-010");
+    let total_amount: i128 = 1_000_000_000;
+    let proof_hash = String::from_str(&t.env, "proof_hash_010");
+
+    client.create_shipment(
+        &shipment_id,
+        &single_buyer_vec(&t.env, &t.buyer),
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &total_amount,
+        &build_milestones(&t.env),
+        &default_options(&t.env),
+    );
+
+    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
+    client.raise_dispute(&t.buyer, &shipment_id, &0u32);
+
+    // A random third party (not the shipment's designated arbiter) attempts to resolve.
+    // Should panic: unauthorized
+    let impostor = Address::generate(&t.env);
+    client.resolve_dispute(&impostor, &shipment_id, &0u32, &true);
+}
+
+// ============================================================
+// SECURITY TEST 12: Arbiter Cannot Raise a Dispute
+// ============================================================
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_arbiter_cannot_raise_dispute() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let shipment_id = String::from_str(&t.env, "SHIP-011");
+    let total_amount: i128 = 1_000_000_000;
+    let proof_hash = String::from_str(&t.env, "proof_hash_011");
+
+    client.create_shipment(
+        &shipment_id,
+        &single_buyer_vec(&t.env, &t.buyer),
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &total_amount,
+        &build_milestones(&t.env),
+        &default_options(&t.env),
+    );
+
+    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
+
+    // Arbiter (not the buyer) attempts to raise a dispute on its own milestone.
+    // Should panic: unauthorized
+    client.raise_dispute(&t.arbiter, &shipment_id, &0u32);
+}
+
+// ============================================================
+// SECURITY TEST 13: Supplier Cannot Resolve Dispute
+// ============================================================
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_supplier_cannot_resolve_dispute() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let shipment_id = String::from_str(&t.env, "SHIP-012");
+    let total_amount: i128 = 1_000_000_000;
+    let proof_hash = String::from_str(&t.env, "proof_hash_012");
+
+    client.create_shipment(
+        &shipment_id,
+        &single_buyer_vec(&t.env, &t.buyer),
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &total_amount,
+        &build_milestones(&t.env),
+        &default_options(&t.env),
+    );
+
+    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
+    client.raise_dispute(&t.buyer, &shipment_id, &0u32);
+
+    // Supplier (a stakeholder, but not the arbiter) attempts to resolve the dispute in its own favor.
+    // Should panic: unauthorized
+    client.resolve_dispute(&t.supplier, &shipment_id, &0u32, &true);
 }
