@@ -225,24 +225,17 @@ admin has never called `set_max_advance_percent`. `request_advance`
 reads this value and panics with `AdvanceExceedsMax` if the requested
 `advance_percent` is greater than the cap.
 
-### NFT mint hook toggle
-Admin-only feature flag, disabled by default, that controls whether a
-shipment's final milestone completion also emits an `nft_mint_hook`
-event.
+### `set_max_concurrent_disputes(admin, limit: u32)`
+Admin-only. Sets how many milestones on a single shipment can be under
+dispute at the same time. Defaults to `1` if never called. `raise_dispute`
+and `raise_partial_dispute` check the shipment's open dispute count
+against this cap and panic with `"DisputeAlreadyOpen"` once it's reached.
 
-- `set_nft_hook_enabled(admin, enabled: bool)` — turns the hook on or
-  off. Emits `nft_hook_config_updated` with the new value.
-- `get_nft_hook_enabled() → bool` *(read-only)* — returns the current
-  setting.
-
-When enabled, completing a shipment's last milestone (in addition to
-the usual collateral return and `milestone_confirmed` event) publishes
-an `nft_mint_hook` event containing the buyer, supplier, total shipment
-amount, ledger sequence, and metadata hash. The event is purely
-informational: it does not change contract state or call another
-contract. It exists so an off-chain service can listen for it and mint
-a provenance/completion NFT for the buyer — the contract itself never
-mints or holds NFTs.
+This is what stops a buyer from disputing several milestones of the same
+shipment all at once. Without a cap, one shipment could rack up an
+unbounded number of simultaneous disputes, tying up several payment
+releases at once and dumping all of that resolution work on one arbiter
+at the same time.
 
 ---
 
