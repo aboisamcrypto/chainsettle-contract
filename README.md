@@ -217,9 +217,12 @@ never used the contract.
 Pending
   └─ submit_proof()  ──→ ProofSubmitted
        ├─ confirm_milestone() ──→ Confirmed  (payment released)
-       └─ raise_dispute()     ──→ Disputed
-               ├─ resolve_dispute(approve=true)  ──→ Resolved (payment released)
-               └─ resolve_dispute(approve=false) ──→ Pending  (supplier resubmits)
+       ├─ raise_dispute()     ──→ Disputed (full 100%)
+       │       ├─ resolve_dispute(approve=true)  ──→ Resolved (payment released)
+       │       └─ resolve_dispute(approve=false) ──→ Pending  (supplier resubmits)
+       └─ raise_partial_dispute() ──→ Disputed (uncontested released)
+               ├─ resolve_dispute(approve=true)  ──→ Resolved (contested paid to supplier)
+               └─ resolve_dispute(approve=false) ──→ Resolved (contested refunded to buyer)
 ```
 
 ---
@@ -328,17 +331,56 @@ stellar contract invoke \
 ```
 
 ### `raise_dispute(buyer, shipment_id, milestone_index)`
-Buyer disputes a `ProofSubmitted` milestone. Freezes the milestone in
-`Disputed` state — no payment can be released until arbiter resolves.
+Buyer disputes 100% of a `ProofSubmitted` or `ConfirmedHeld` milestone's payment. Freezes the milestone in `Disputed` state — no payment can be released until arbiter resolves.
+
+### `raise_partial_dispute(buyer, shipment_id, milestone_index, contested_percent: u32)`
+Buyer contests only a specified percentage (`contested_percent` from `1` to `99`) of a milestone's value. The uncontested portion `(100 - contested_percent)%` is immediately calculated and released to the supplier, while the contested portion is held in escrow in `Disputed` state pending arbiter resolution. Panics if an approved advance exists for the milestone.
 
 ### `resolve_dispute(arbiter, shipment_id, milestone_index, approve: bool)`
-Arbiter resolves a `Disputed` milestone.
-- `approve = true` → releases payment, status → `Resolved`
-- `approve = false` → resets status → `Pending` (supplier must resubmit)
+Arbiter resolves a `Disputed` milestone (full or partial).
+- For **full disputes**:
+  - `approve = true` → releases payment to supplier (minus arbiter fee), status → `Resolved`
+  - `approve = false` → refunds buyer / rejects proof, status → `Pending` (supplier must resubmit)
+- For **partial disputes**:
+  - `approve = true` → releases contested portion to supplier (minus arbiter fee), status → `Resolved`
+  - `approve = false` → refunds contested portion to buyer (minus arbiter fee), status → `Resolved`
+
+### `check_escalation(shipment_id, milestone_index)`
+Checks whether an open dispute on a milestone has exceeded the admin-configured escalation threshold without arbiter resolution. Emits `dispute_escalated` event if the threshold is met or exceeded. Callable by anyone.
+
+### `set_escalation_threshold(admin, threshold_ledgers: u32)`
+Admin-only. Sets the dispute escalation threshold in ledgers (`0` = disabled). `get_escalation_threshold() → u32` returns the current threshold.
 
 ### `cancel_shipment(buyer, shipment_id)`
 Cancels the shipment if no milestones have been confirmed yet.
 Returns all locked funds to the buyer.
+
+---
+
+### Partial Disputes & Escalation Checks
+
+#### Partial Disputes Mechanics
+In real-world supply chain transactions, delivered goods may be partially damaged, incomplete, or slightly off-specification without justifying a total transaction freeze. ChainSettle supports partial disputes via `raise_partial_dispute()`:
+
+- **1–99% Contested Split**: The buyer specifies `contested_percent` (must be between `1` and `99`). The contract calculates:
+  - **Uncontested share**: `(100 - contested_percent)%` of milestone value.
+  - **Contested share**: `contested_percent%` of milestone value.
+- **Immediate Uncontested Payout**: The uncontested portion is immediately released to the supplier at dispute-raising time (net of standard platform fees), updating the shipment's `released_amount` and reducing total escrow balance (`TotalEscrowed`).
+- **Advance Request Constraint**: If an approved advance request already exists on the milestone, `raise_partial_dispute()` panics with `"partial dispute not allowed when an approved advance exists for this milestone"`. Buyers must use full `raise_dispute()` when an advance has been approved.
+- **Resolution Path (`resolve_dispute`)**:
+  - **Arbiter Approves (`approve = true`)**: Supplier receives the contested portion minus the arbiter fee. Dispute bond is returned to the buyer. Milestone status transitions to `Resolved`.
+  - **Arbiter Rejects (`approve = false`)**: Buyer receives a refund of the contested portion minus the arbiter fee. Milestone status transitions to `Resolved` (unlike full disputes where rejection resets status to `Pending`, partial disputes finalize at `Resolved` because the uncontested portion was already paid out).
+
+#### Dispute Escalation & Escalation Threshold
+To ensure disputes do not stall indefinitely without arbiter action, ChainSettle provides a dispute escalation check mechanism:
+
+- **Configuring the Threshold**: The contract admin configures the global escalation threshold using `set_escalation_threshold(admin, threshold_ledgers)`. Setting `threshold_ledgers = 0` disables escalation checks (default).
+- **Checking Escalation (`check_escalation`)**: Anyone (buyer, supplier, arbiter, or automated backend services) can invoke `check_escalation(shipment_id, milestone_index)`.
+- **Ledger Sequence Comparison**: `check_escalation()` inspects the target milestone:
+  1. Verifies the milestone is in `MilestoneStatus::Disputed`.
+  2. Compares the current ledger sequence (`env.ledger().sequence()`) against `opened_ledger + threshold` (where `opened_ledger` is recorded in `dispute_opened_ledger` when the dispute was raised).
+  3. If `current_ledger >= opened_ledger + threshold`, the contract emits a `dispute_escalated` event containing `(milestone_index, opened_ledger, current_ledger)`.
+- **Off-Chain Handling**: The backend service (`chainsetttle-backend`) monitors `dispute_escalated` events to alert platform administrators, notify the assigned arbiter, or trigger automated resolution escalation workflows.
 
 ### `get_shipment(shipment_id) → Shipment` *(read-only)*
 Returns the full shipment record.
@@ -479,7 +521,10 @@ The contract emits the following events (subscribe via Horizon or RPC):
 | `proof_submitted` | `(shipment_id, milestone_index)` | Proof submitted for a milestone |
 | `milestone_confirmed` | `(shipment_id, milestone_index, payment_amount)` | Milestone confirmed, payment released |
 | `dispute_raised` | `(shipment_id, milestone_index)` | Buyer disputes a milestone |
+| `partial_uncontested_released` | `(shipment_id)` topic, `(milestone_index, uncontested_amount, fee_amount)` data | Uncontested portion released immediately at partial dispute time |
 | `dispute_resolved` | `(shipment_id, milestone_index, approved)` | Arbiter resolves dispute |
+| `dispute_escalated` | `(shipment_id)` topic, `(milestone_index, opened_ledger, current_ledger)` data | Dispute open duration surpassed escalation threshold |
+| `escalation_threshold_set` | `threshold_ledgers` | Admin configured escalation threshold |
 | `shipment_cancelled` | `(shipment_id, refund_amount)` | Shipment cancelled |
 | `nft_hook_config_updated` | `(admin, enabled, ledger_sequence)` | Admin toggled the NFT mint hook via `set_nft_hook_enabled` |
 | `nft_mint_hook` | `(shipment_id)` topic, `(buyer, supplier, total_amount, ledger_sequence, metadata_hash)` data | Final milestone completed while the NFT mint hook is enabled |
