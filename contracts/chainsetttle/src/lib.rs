@@ -482,7 +482,13 @@ pub enum DataKey {
     ReferralFeeBps,
     /// Global default auto-confirm review window in ledgers (0 = globally disabled).
     AutoConfirmThreshold,
+}
 
+// `#[contracttype]` union enums are capped at 50 cases by the Soroban XDR spec
+// (`ScSpecUdtUnionV0::cases: VecM<_, 50>`), so newer storage keys live here
+// once `DataKey` is full.
+#[contracttype]
+pub enum DataKeyExt {
     // ── #113 Fee tiers ─────────────────────────────────────────
     /// Admin-configured fee tier list (up to 5 entries).
     FeeTiers,
@@ -1149,7 +1155,7 @@ impl ChainSettleContract {
         if tiers.len() > 5 {
             panic!("max 5 fee tiers");
         }
-        env.storage().instance().set(&DataKey::FeeTiers, &tiers);
+        env.storage().instance().set(&DataKeyExt::FeeTiers, &tiers);
         env.events().publish((Symbol::new(&env, "fee_tiers_set"),), tiers.len() as u32);
     }
 
@@ -1159,12 +1165,12 @@ impl ChainSettleContract {
         let volume: i128 = env
             .storage()
             .persistent()
-            .get(&DataKey::LifetimeVolume(address.clone()))
+            .get(&DataKeyExt::LifetimeVolume(address.clone()))
             .unwrap_or(0);
         let tiers: Vec<FeeTier> = env
             .storage()
             .instance()
-            .get(&DataKey::FeeTiers)
+            .get(&DataKeyExt::FeeTiers)
             .unwrap_or_else(|| Vec::new(&env));
         let mut best: Option<u32> = None;
         for i in 0..tiers.len() {
@@ -1207,7 +1213,7 @@ impl ChainSettleContract {
         if milestone_index as usize >= shipment.milestones.len() as usize {
             panic!("invalid milestone index");
         }
-        let key = DataKey::MilestoneInvoiceHash(shipment_id.clone(), milestone_index);
+        let key = DataKeyExt::MilestoneInvoiceHash(shipment_id.clone(), milestone_index);
         if env.storage().persistent().has(&key) {
             panic!("invoice hash already set and is immutable");
         }
@@ -1227,7 +1233,7 @@ impl ChainSettleContract {
     pub fn get_invoice_hash(env: Env, shipment_id: String, milestone_index: u32) -> Option<BytesN<32>> {
         env.storage()
             .persistent()
-            .get(&DataKey::MilestoneInvoiceHash(shipment_id, milestone_index))
+            .get(&DataKeyExt::MilestoneInvoiceHash(shipment_id, milestone_index))
     }
 
     // ----------------------------------------------------------
@@ -1238,7 +1244,7 @@ impl ChainSettleContract {
     pub fn get_amendment_log(env: Env, shipment_id: String, milestone_index: u32) -> Vec<AmendmentEntry> {
         env.storage()
             .persistent()
-            .get(&DataKey::AmendmentLog(shipment_id, milestone_index))
+            .get(&DataKeyExt::AmendmentLog(shipment_id, milestone_index))
             .unwrap_or_else(|| Vec::new(&env))
     }
 
@@ -1264,7 +1270,7 @@ impl ChainSettleContract {
         if milestone_index as usize >= shipment.milestones.len() as usize {
             panic!("invalid milestone index");
         }
-        let key = DataKey::ExtensionRequest(shipment_id.clone(), milestone_index);
+        let key = DataKeyExt::ExtensionRequest(shipment_id.clone(), milestone_index);
         if env.storage().persistent().has(&key) {
             panic!("extension request already pending");
         }
@@ -1289,14 +1295,14 @@ impl ChainSettleContract {
             panic!("shipment is not active");
         }
         Self::require_buyer_auth(&shipment, &buyer);
-        let key = DataKey::ExtensionRequest(shipment_id.clone(), milestone_index);
+        let key = DataKeyExt::ExtensionRequest(shipment_id.clone(), milestone_index);
         let req: ExtensionReq = env
             .storage()
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic!("no pending extension request"));
         env.storage().persistent().remove(&key);
-        let deadline_key = DataKey::MilestoneDeadline(shipment_id.clone(), milestone_index);
+        let deadline_key = DataKeyExt::MilestoneDeadline(shipment_id.clone(), milestone_index);
         let current_deadline: u32 = env
             .storage()
             .persistent()
@@ -1324,7 +1330,7 @@ impl ChainSettleContract {
             panic!("shipment is not active");
         }
         Self::require_buyer_auth(&shipment, &buyer);
-        let key = DataKey::ExtensionRequest(shipment_id.clone(), milestone_index);
+        let key = DataKeyExt::ExtensionRequest(shipment_id.clone(), milestone_index);
         if !env.storage().persistent().has(&key) {
             panic!("no pending extension request");
         }
@@ -1339,7 +1345,7 @@ impl ChainSettleContract {
     pub fn get_milestone_deadline(env: Env, shipment_id: String, milestone_index: u32) -> u32 {
         env.storage()
             .persistent()
-            .get(&DataKey::MilestoneDeadline(shipment_id, milestone_index))
+            .get(&DataKeyExt::MilestoneDeadline(shipment_id, milestone_index))
             .unwrap_or(0)
     }
 
@@ -1762,9 +1768,9 @@ impl ChainSettleContract {
         if milestone_splits.len() > 0 {
             env.storage()
                 .persistent()
-                .set(&DataKey::MilestoneSplits(shipment_id.clone()), &milestone_splits);
+                .set(&DataKeyExt::MilestoneSplits(shipment_id.clone()), &milestone_splits);
             env.storage().persistent().extend_ttl(
-                &DataKey::MilestoneSplits(shipment_id.clone()),
+                &DataKeyExt::MilestoneSplits(shipment_id.clone()),
                 100_000,
                 6_300_000,
             );
@@ -1774,9 +1780,9 @@ impl ChainSettleContract {
         if deadlines.len() > 0 {
             env.storage()
                 .persistent()
-                .set(&DataKey::MilestoneTimestampDeadlines(shipment_id.clone()), &deadlines);
+                .set(&DataKeyExt::MilestoneTimestampDeadlines(shipment_id.clone()), &deadlines);
             env.storage().persistent().extend_ttl(
-                &DataKey::MilestoneTimestampDeadlines(shipment_id.clone()),
+                &DataKeyExt::MilestoneTimestampDeadlines(shipment_id.clone()),
                 100_000,
                 6_300_000,
             );
@@ -1788,7 +1794,7 @@ impl ChainSettleContract {
             let effective_bps = Self::resolve_fee_bps_for(&env, &primary_buyer);
             env.storage()
                 .persistent()
-                .set(&DataKey::ShipmentFeeBps(shipment_id.clone()), &effective_bps);
+                .set(&DataKeyExt::ShipmentFeeBps(shipment_id.clone()), &effective_bps);
         }
 
         // Index by supplier for supplier-facing dashboards.
@@ -2419,7 +2425,7 @@ impl ChainSettleContract {
             // #113: Accumulate lifetime volume for the primary buyer.
             {
                 let primary_buyer = shipment.buyers.get(0).unwrap();
-                let vol_key = DataKey::LifetimeVolume(primary_buyer.clone());
+                let vol_key = DataKeyExt::LifetimeVolume(primary_buyer.clone());
                 let prev: i128 = env.storage().persistent().get(&vol_key).unwrap_or(0);
                 env.storage().persistent().set(&vol_key, &(prev + payment));
             }
@@ -3020,7 +3026,7 @@ impl ChainSettleContract {
         milestone.status = MilestoneStatus::Disputed;
         milestone.dispute_opened_ledger = Some(env.ledger().sequence());
         // #165: Store Unix timestamp so resolve_dispute_timeout can check elapsed seconds.
-        let dispute_opened_at_key = DataKey::DisputeOpenedAt(shipment_id.clone(), milestone_index);
+        let dispute_opened_at_key = DataKeyExt::DisputeOpenedAt(shipment_id.clone(), milestone_index);
         env.storage().persistent().set(&dispute_opened_at_key, &env.ledger().timestamp());
         env.storage().persistent().extend_ttl(&dispute_opened_at_key, 100_000, 6_300_000);
         shipment.milestones.set(milestone_index, milestone);
@@ -3209,7 +3215,7 @@ impl ChainSettleContract {
         milestone.status = MilestoneStatus::Disputed;
         milestone.dispute_opened_ledger = Some(env.ledger().sequence());
         // #165: Store Unix timestamp so resolve_dispute_timeout can check elapsed seconds.
-        let dispute_opened_at_key = DataKey::DisputeOpenedAt(shipment_id.clone(), milestone_index);
+        let dispute_opened_at_key = DataKeyExt::DisputeOpenedAt(shipment_id.clone(), milestone_index);
         env.storage().persistent().set(&dispute_opened_at_key, &env.ledger().timestamp());
         env.storage().persistent().extend_ttl(&dispute_opened_at_key, 100_000, 6_300_000);
         shipment.milestones.set(milestone_index, milestone);
@@ -3826,7 +3832,7 @@ impl ChainSettleContract {
             env.storage().temporary().remove(&amendment_key);
 
             // #111: Append to amendment log (capped at 20, FIFO eviction).
-            let log_key = DataKey::AmendmentLog(shipment_id.clone(), milestone_index);
+            let log_key = DataKeyExt::AmendmentLog(shipment_id.clone(), milestone_index);
             let mut log: Vec<AmendmentEntry> = env
                 .storage()
                 .persistent()
@@ -4401,7 +4407,7 @@ impl ChainSettleContract {
         let opened_at: u64 = env
             .storage()
             .persistent()
-            .get(&DataKey::DisputeOpenedAt(shipment_id.clone(), milestone_index))
+            .get(&DataKeyExt::DisputeOpenedAt(shipment_id.clone(), milestone_index))
             .unwrap_or_else(|| panic!("dispute opened timestamp not recorded"));
 
         let current_timestamp = env.ledger().timestamp();
@@ -4473,7 +4479,7 @@ impl ChainSettleContract {
         }
         env.storage()
             .persistent()
-            .remove(&DataKey::DisputeOpenedAt(shipment_id.clone(), milestone_index));
+            .remove(&DataKeyExt::DisputeOpenedAt(shipment_id.clone(), milestone_index));
 
         milestone.status = MilestoneStatus::Resolved;
         shipment.milestones.set(milestone_index, milestone);
@@ -4567,7 +4573,7 @@ impl ChainSettleContract {
         let deadlines: Vec<u64> = env
             .storage()
             .persistent()
-            .get(&DataKey::MilestoneTimestampDeadlines(shipment_id.clone()))
+            .get(&DataKeyExt::MilestoneTimestampDeadlines(shipment_id.clone()))
             .unwrap_or_else(|| Vec::new(&env));
 
         if (milestone_index as usize) >= deadlines.len() as usize {
@@ -4854,11 +4860,11 @@ impl ChainSettleContract {
     /// #160: Returns gross payment for a milestone using stored basis-point splits when available,
     /// otherwise falls back to the milestone's payment_percent field.
     fn milestone_gross_payment(env: &Env, shipment: &Shipment, milestone_index: u32) -> i128 {
-        let splits_key = DataKey::MilestoneSplits(shipment.id.clone());
+        let splits_key = DataKeyExt::MilestoneSplits(shipment.id.clone());
         if let Some(splits) = env
             .storage()
             .persistent()
-            .get::<DataKey, Vec<u32>>(&splits_key)
+            .get::<DataKeyExt, Vec<u32>>(&splits_key)
         {
             if (milestone_index as usize) < splits.len() as usize {
                 let bps = splits.get(milestone_index).unwrap();
@@ -5261,7 +5267,7 @@ impl ChainSettleContract {
 
     /// #113: Deducts the fee using the shipment's locked tier bps (falls back to FeeConfig).
     fn deduct_fee_for_shipment(env: &Env, gross: i128, token: &Address, shipment_id: &String, fee_out: &mut i128) -> i128 {
-        let locked_bps: Option<u32> = env.storage().persistent().get(&DataKey::ShipmentFeeBps(shipment_id.clone()));
+        let locked_bps: Option<u32> = env.storage().persistent().get(&DataKeyExt::ShipmentFeeBps(shipment_id.clone()));
         if let Some(config) = env.storage().instance().get::<DataKey, FeeConfig>(&DataKey::FeeConfig) {
             let bps = locked_bps.unwrap_or(config.fee_bps);
             let fee = (gross * bps as i128) / 10_000;
@@ -5280,12 +5286,12 @@ impl ChainSettleContract {
         let volume: i128 = env
             .storage()
             .persistent()
-            .get(&DataKey::LifetimeVolume(address.clone()))
+            .get(&DataKeyExt::LifetimeVolume(address.clone()))
             .unwrap_or(0);
         let tiers: Vec<FeeTier> = env
             .storage()
             .instance()
-            .get(&DataKey::FeeTiers)
+            .get(&DataKeyExt::FeeTiers)
             .unwrap_or_else(|| Vec::new(env));
         let mut best: Option<u32> = None;
         for i in 0..tiers.len() {

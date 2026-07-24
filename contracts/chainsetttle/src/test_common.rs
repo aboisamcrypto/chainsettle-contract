@@ -3,11 +3,7 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
-    token, vec, Address, BytesN, Env, String,
-};
-use std::format;
+use soroban_sdk::{testutils::Address as _, token, vec, Address, Env, String};
 
 // ============================================================
 // TEST SETUP & SHARED FIXTURES
@@ -125,6 +121,10 @@ pub fn default_options(_env: &Env) -> ShipmentOptions {
         buyer_cancel_fee_bps: 0,
         early_bonus_pool: 0,
         review_window_ledgers: None,
+        milestone_splits: vec![_env],
+        deadlines: vec![_env],
+        dispute_timeout_seconds: 0,
+        default_resolution: Resolution::Buyer,
     }
 }
 
