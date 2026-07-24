@@ -345,6 +345,7 @@ sends push notifications to the relevant parties.
 | 7 | `InvalidPercentages` — milestone percentages don't sum to 100 |
 | 8 | `InvalidAmount` — amount must be > 0 |
 | 9 | `DisputeAlreadyOpen` — dispute already exists for this milestone |
+| 18 | `MaxShipmentValueExceeded` — `total_amount` exceeds the admin-configured cap |
 
 ---
 
