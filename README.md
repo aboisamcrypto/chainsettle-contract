@@ -213,6 +213,30 @@ Returns a single milestone.
 ### `get_escrow_balance(shipment_id) → i128` *(read-only)*
 Returns the amount of USDC still locked in escrow.
 
+### Emergency pause (circuit breaker)
+Admin-only kill switch that halts state-changing calls across every
+shipment without touching any stored data. Locked funds stay in escrow
+untouched while paused — this only blocks new actions, it never moves
+or seizes funds itself.
+
+- `pause(admin)` — sets the paused flag and emits `contract_paused`.
+- `unpause(admin)` — clears the paused flag and emits `contract_unpaused`.
+- `is_paused() → bool` *(read-only)* — returns the current state.
+
+While paused, every function that guards on `assert_not_paused` panics
+with `"contract is paused"`. That covers the full shipment lifecycle:
+`create_shipment`, `submit_proof`, `confirm_milestone`,
+`raise_dispute`/`raise_partial_dispute`, `resolve_dispute`,
+`cancel_shipment`/`supplier_cancel`, escrow top-ups, advances,
+extensions, amendments, transfers, and claims. Read-only getters,
+admin configuration setters (fees, thresholds, whitelists, etc.), and
+admin succession (`nominate_admin`/`accept_admin`) are **not** gated by
+pause and keep working normally.
+
+Only the current admin can call `pause`/`unpause` — same
+`assert_admin` check used everywhere else. To resume normal operation,
+the admin simply calls `unpause`; no other recovery steps are needed.
+
 ### `set_max_advance_percent(admin, percent: u32)`
 Admin-only. Sets the maximum percentage of a milestone's payment that a
 supplier may request as an advance via `request_advance`. `percent` must
@@ -239,6 +263,8 @@ The contract emits the following events (subscribe via Horizon or RPC):
 | `dispute_raised` | `(shipment_id, milestone_index)` | Buyer disputes a milestone |
 | `dispute_resolved` | `(shipment_id, milestone_index, approved)` | Arbiter resolves dispute |
 | `shipment_cancelled` | `(shipment_id, refund_amount)` | Shipment cancelled |
+| `contract_paused` | `ledger_sequence` | Admin called `pause` — all state-changing calls now blocked |
+| `contract_unpaused` | `ledger_sequence` | Admin called `unpause` — normal operation resumed |
 
 The backend service (`chainsetttle-backend`) listens for these events and
 sends push notifications to the relevant parties.
