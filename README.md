@@ -191,6 +191,55 @@ Buyer confirms a `ProofSubmitted` milestone. Automatically calculates
 and transfers the milestone's payment percentage to the supplier.
 If all milestones are confirmed, shipment status becomes `Completed`.
 
+### `batch_confirm_milestones(buyer, shipment_id, milestone_indices)`
+Confirms multiple milestones in a single transaction. Functionally equivalent
+to calling `confirm_milestone` once per index, but saves transaction fees and
+reduces the number of on-chain round-trips when several milestones are ready
+to approve at once.
+
+```
+Parameters:
+  buyer              Address   — must be the shipment's registered buyer
+  shipment_id        String    — shipment to operate on
+  milestone_indices  Vec<u32>  — ordered list of milestone indices to confirm
+```
+
+**Behavior:**
+- The call is **atomic** — if any index is invalid or any milestone is not in
+  `ProofSubmitted` status, the entire transaction is reverted and no payments
+  are released.
+- All indices are validated before any state is mutated, so partial application
+  never occurs.
+- Each confirmed milestone triggers its own `milestone_confirmed` event and
+  releases that milestone's proportional payment to the supplier (same fee and
+  advance-deduction logic as `confirm_milestone`).
+- Passing an **empty** `milestone_indices` list is a no-op — the call returns
+  without error or side-effects.
+- If all milestones end up confirmed after the batch, shipment status
+  automatically transitions to `Completed` (same as `confirm_milestone`).
+
+**vs. `confirm_milestone`:**
+
+| | `confirm_milestone` | `batch_confirm_milestones` |
+|---|---|---|
+| Milestones per call | 1 | Many |
+| Atomicity | Single milestone | All-or-nothing across the batch |
+| Partial failure | N/A | Reverts entire batch |
+| Gas / fee cost | Per milestone | One transaction for all |
+
+Example — confirm all three milestones at once after all proofs are in:
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source buyer-account \
+  --network testnet \
+  -- batch_confirm_milestones \
+  --buyer <BUYER_ADDRESS> \
+  --shipment_id "SHIP-001" \
+  --milestone_indices '[0, 1, 2]'
+```
+
 ### `raise_dispute(buyer, shipment_id, milestone_index)`
 Buyer disputes a `ProofSubmitted` milestone. Freezes the milestone in
 `Disputed` state — no payment can be released until arbiter resolves.
@@ -213,6 +262,30 @@ Returns a single milestone.
 ### `get_escrow_balance(shipment_id) → i128` *(read-only)*
 Returns the amount of USDC still locked in escrow.
 
+### Emergency pause (circuit breaker)
+Admin-only kill switch that halts state-changing calls across every
+shipment without touching any stored data. Locked funds stay in escrow
+untouched while paused — this only blocks new actions, it never moves
+or seizes funds itself.
+
+- `pause(admin)` — sets the paused flag and emits `contract_paused`.
+- `unpause(admin)` — clears the paused flag and emits `contract_unpaused`.
+- `is_paused() → bool` *(read-only)* — returns the current state.
+
+While paused, every function that guards on `assert_not_paused` panics
+with `"contract is paused"`. That covers the full shipment lifecycle:
+`create_shipment`, `submit_proof`, `confirm_milestone`,
+`raise_dispute`/`raise_partial_dispute`, `resolve_dispute`,
+`cancel_shipment`/`supplier_cancel`, escrow top-ups, advances,
+extensions, amendments, transfers, and claims. Read-only getters,
+admin configuration setters (fees, thresholds, whitelists, etc.), and
+admin succession (`nominate_admin`/`accept_admin`) are **not** gated by
+pause and keep working normally.
+
+Only the current admin can call `pause`/`unpause` — same
+`assert_admin` check used everywhere else. To resume normal operation,
+the admin simply calls `unpause`; no other recovery steps are needed.
+
 ### `set_max_advance_percent(admin, percent: u32)`
 Admin-only. Sets the maximum percentage of a milestone's payment that a
 supplier may request as an advance via `request_advance`. `percent` must
@@ -225,22 +298,17 @@ admin has never called `set_max_advance_percent`. `request_advance`
 reads this value and panics with `AdvanceExceedsMax` if the requested
 `advance_percent` is greater than the cap.
 
-### `set_max_shipment_value(admin, max_value: i128)`
-Admin-only. Sets a hard cap on the `total_amount` that any single
-shipment may lock in escrow. This limits the contract's exposure should
-a buyer address be compromised or a rogue transaction be submitted.
+### `set_max_concurrent_disputes(admin, limit: u32)`
+Admin-only. Sets how many milestones on a single shipment can be under
+dispute at the same time. Defaults to `1` if never called. `raise_dispute`
+and `raise_partial_dispute` check the shipment's open dispute count
+against this cap and panic with `"DisputeAlreadyOpen"` once it's reached.
 
-- `max_value > 0` — any `create_shipment` call whose `total_amount`
-  exceeds `max_value` panics with `"total amount exceeds maximum
-  shipment value"` (error code `18 — MaxShipmentValueExceeded`).
-- `max_value = 0` — the cap is disabled; shipments of any size are
-  accepted. This is also the default before the admin ever calls this
-  function.
-
-Emits a `max_shipment_value_set` event with the new cap value.
-
-### `get_max_shipment_value() → i128` *(read-only)*
-Returns the current cap. `0` means no cap is in effect.
+This is what stops a buyer from disputing several milestones of the same
+shipment all at once. Without a cap, one shipment could rack up an
+unbounded number of simultaneous disputes, tying up several payment
+releases at once and dumping all of that resolution work on one arbiter
+at the same time.
 
 ---
 
@@ -256,6 +324,8 @@ The contract emits the following events (subscribe via Horizon or RPC):
 | `dispute_raised` | `(shipment_id, milestone_index)` | Buyer disputes a milestone |
 | `dispute_resolved` | `(shipment_id, milestone_index, approved)` | Arbiter resolves dispute |
 | `shipment_cancelled` | `(shipment_id, refund_amount)` | Shipment cancelled |
+| `nft_hook_config_updated` | `(admin, enabled, ledger_sequence)` | Admin toggled the NFT mint hook via `set_nft_hook_enabled` |
+| `nft_mint_hook` | `(shipment_id)` topic, `(buyer, supplier, total_amount, ledger_sequence, metadata_hash)` data | Final milestone completed while the NFT mint hook is enabled |
 
 The backend service (`chainsetttle-backend`) listens for these events and
 sends push notifications to the relevant parties.
