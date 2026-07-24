@@ -29,6 +29,7 @@ This is **Repo 1 of 3** in the ChainSettle project:
 - [Prerequisites](#prerequisites)
 - [Setup & Installation](#setup--installation)
 - [Running Tests](#running-tests)
+- [Milestone Amendment History Tracking](#milestone-amendment-history-tracking)
 - [Building](#building)
 - [Deploying to Testnet](#deploying-to-testnet)
 - [Deploying to Mainnet](#deploying-to-mainnet)
@@ -224,6 +225,46 @@ Returns the current advance percentage cap, defaulting to `30` if the
 admin has never called `set_max_advance_percent`. `request_advance`
 reads this value and panics with `AdvanceExceedsMax` if the requested
 `advance_percent` is greater than the cap.
+
+### `Milestone Amendment History Tracking`
+
+The contract maintains an immutable, append-only log of all successful milestone amendments. This provides a transparent audit trail of how milestone payment percentages and names have changed over time.
+
+#### `get_amendment_log(shipment_id, milestone_index) → Vec<AmendmentEntry>`
+
+Returns the chronological history of accepted amendments for a specific milestone.
+
+**When amendments are logged:**
+Amendments are only recorded when **both** the Buyer and the Supplier have called `propose_amendment` with identical terms (new percentage and name) for a `Pending` milestone. At the moment of mutual agreement:
+1. The shipment's milestone data is mutated.
+2. An `AmendmentEntry` is appended to the log.
+3. The log is capped at the last 20 entries (FIFO eviction).
+
+#### `AmendmentEntry` Schema
+
+| Property | Type | Description |
+|---|---|---|
+| `proposer` | `Address` | The address that submitted the final agreeing proposal |
+| `old_payment_percent` | `u32` | The payment percentage before this amendment was applied |
+| `new_payment_percent` | `u32` | The new payment percentage after the amendment |
+| `ledger` | `u32` | The ledger sequence number (timestamp) when the amendment was authorized |
+
+**Usage Example:**
+
+```rust
+// Retrieve history for milestone 0 of shipment "SHIP-123"
+let log = get_amendment_log("SHIP-123", 0);
+
+// Result structure:
+// [
+//   { 
+//     proposer: "GB...", 
+//     old_payment_percent: 25, 
+//     new_payment_percent: 30, 
+//     ledger: 123456 
+//   }
+// ]
+```
 
 ---
 
