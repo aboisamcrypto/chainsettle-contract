@@ -5376,6 +5376,7 @@ mod test_arbiter_pool;
 // mod test_issues;
 mod test_arbiter_security;
 mod test_boundary_validation;
+mod test_supplier_collateral;
 // mod test_oracle;
 // mod test_upgrade;
 // mod test_concurrent_disputes;
