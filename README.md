@@ -251,6 +251,8 @@ The contract emits the following events (subscribe via Horizon or RPC):
 | `dispute_raised` | `(shipment_id, milestone_index)` | Buyer disputes a milestone |
 | `dispute_resolved` | `(shipment_id, milestone_index, approved)` | Arbiter resolves dispute |
 | `shipment_cancelled` | `(shipment_id, refund_amount)` | Shipment cancelled |
+| `nft_hook_config_updated` | `(admin, enabled, ledger_sequence)` | Admin toggled the NFT mint hook via `set_nft_hook_enabled` |
+| `nft_mint_hook` | `(shipment_id)` topic, `(buyer, supplier, total_amount, ledger_sequence, metadata_hash)` data | Final milestone completed while the NFT mint hook is enabled |
 
 The backend service (`chainsetttle-backend`) listens for these events and
 sends push notifications to the relevant parties.
