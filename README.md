@@ -191,6 +191,55 @@ Buyer confirms a `ProofSubmitted` milestone. Automatically calculates
 and transfers the milestone's payment percentage to the supplier.
 If all milestones are confirmed, shipment status becomes `Completed`.
 
+### `batch_confirm_milestones(buyer, shipment_id, milestone_indices)`
+Confirms multiple milestones in a single transaction. Functionally equivalent
+to calling `confirm_milestone` once per index, but saves transaction fees and
+reduces the number of on-chain round-trips when several milestones are ready
+to approve at once.
+
+```
+Parameters:
+  buyer              Address   — must be the shipment's registered buyer
+  shipment_id        String    — shipment to operate on
+  milestone_indices  Vec<u32>  — ordered list of milestone indices to confirm
+```
+
+**Behavior:**
+- The call is **atomic** — if any index is invalid or any milestone is not in
+  `ProofSubmitted` status, the entire transaction is reverted and no payments
+  are released.
+- All indices are validated before any state is mutated, so partial application
+  never occurs.
+- Each confirmed milestone triggers its own `milestone_confirmed` event and
+  releases that milestone's proportional payment to the supplier (same fee and
+  advance-deduction logic as `confirm_milestone`).
+- Passing an **empty** `milestone_indices` list is a no-op — the call returns
+  without error or side-effects.
+- If all milestones end up confirmed after the batch, shipment status
+  automatically transitions to `Completed` (same as `confirm_milestone`).
+
+**vs. `confirm_milestone`:**
+
+| | `confirm_milestone` | `batch_confirm_milestones` |
+|---|---|---|
+| Milestones per call | 1 | Many |
+| Atomicity | Single milestone | All-or-nothing across the batch |
+| Partial failure | N/A | Reverts entire batch |
+| Gas / fee cost | Per milestone | One transaction for all |
+
+Example — confirm all three milestones at once after all proofs are in:
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source buyer-account \
+  --network testnet \
+  -- batch_confirm_milestones \
+  --buyer <BUYER_ADDRESS> \
+  --shipment_id "SHIP-001" \
+  --milestone_indices '[0, 1, 2]'
+```
+
 ### `raise_dispute(buyer, shipment_id, milestone_index)`
 Buyer disputes a `ProofSubmitted` milestone. Freezes the milestone in
 `Disputed` state — no payment can be released until arbiter resolves.
