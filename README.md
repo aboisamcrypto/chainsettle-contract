@@ -225,6 +225,23 @@ admin has never called `set_max_advance_percent`. `request_advance`
 reads this value and panics with `AdvanceExceedsMax` if the requested
 `advance_percent` is greater than the cap.
 
+### `set_max_shipment_value(admin, max_value: i128)`
+Admin-only. Sets a hard cap on the `total_amount` that any single
+shipment may lock in escrow. This limits the contract's exposure should
+a buyer address be compromised or a rogue transaction be submitted.
+
+- `max_value > 0` — any `create_shipment` call whose `total_amount`
+  exceeds `max_value` panics with `"total amount exceeds maximum
+  shipment value"` (error code `18 — MaxShipmentValueExceeded`).
+- `max_value = 0` — the cap is disabled; shipments of any size are
+  accepted. This is also the default before the admin ever calls this
+  function.
+
+Emits a `max_shipment_value_set` event with the new cap value.
+
+### `get_max_shipment_value() → i128` *(read-only)*
+Returns the current cap. `0` means no cap is in effect.
+
 ---
 
 ## Events
@@ -258,6 +275,7 @@ sends push notifications to the relevant parties.
 | 7 | `InvalidPercentages` — milestone percentages don't sum to 100 |
 | 8 | `InvalidAmount` — amount must be > 0 |
 | 9 | `DisputeAlreadyOpen` — dispute already exists for this milestone |
+| 18 | `MaxShipmentValueExceeded` — `total_amount` exceeds the admin-configured cap |
 
 ---
 
