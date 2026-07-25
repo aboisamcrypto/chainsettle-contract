@@ -30,6 +30,7 @@ This is **Repo 1 of 3** in the ChainSettle project:
 - [Prerequisites](#prerequisites)
 - [Setup & Installation](#setup--installation)
 - [Running Tests](#running-tests)
+- [Milestone Amendment History Tracking](#milestone-amendment-history-tracking)
 - [Building](#building)
 - [Deploying to Testnet](#deploying-to-testnet)
 - [Deploying to Mainnet](#deploying-to-mainnet)
