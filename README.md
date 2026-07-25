@@ -399,6 +399,34 @@ separate weighted rating.
 ### `get_escrow_balance(shipment_id) → i128` *(read-only)*
 Returns the amount of USDC still locked in escrow.
 
+### Milestone Deadline Extensions
+
+Suppliers can ask for more ledger time on an active shipment milestone,
+and buyers decide whether to accept that new deadline. The flow is
+single-request: each milestone can have only one pending extension
+request at a time.
+
+- `request_extension(caller, shipment_id, milestone_index, extra_ledgers)`
+  — supplier-only. Creates a pending request to add `extra_ledgers` to
+  the milestone deadline and emits `extension_requested`. The shipment
+  must be active, the milestone index must exist, and the call fails if
+  that milestone already has a pending extension request.
+- `approve_extension(buyer, shipment_id, milestone_index)` — buyer-only.
+  Approves the pending request, clears it, and writes the effective
+  milestone deadline. If a deadline already exists, the contract adds
+  the requested extra ledgers to it; otherwise, it starts from the
+  current ledger sequence and adds the requested extra ledgers. The call
+  emits `extension_approved`.
+- `deny_extension(buyer, shipment_id, milestone_index)` — buyer-only.
+  Denies the pending request, clears it, leaves the current deadline
+  unchanged, and emits `extension_denied`.
+- `get_milestone_deadline(shipment_id, milestone_index) → u32`
+  *(read-only)* — returns the stored effective deadline ledger for the
+  milestone, or `0` when no deadline has been set.
+
+Extension request, approval, and denial calls are paused by the emergency
+circuit breaker; `get_milestone_deadline` remains available while paused.
+
 ### Emergency pause (circuit breaker)
 Admin-only kill switch that halts state-changing calls across every
 shipment without touching any stored data. Locked funds stay in escrow
