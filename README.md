@@ -30,6 +30,7 @@ This is **Repo 1 of 3** in the ChainSettle project:
 - [Prerequisites](#prerequisites)
 - [Setup & Installation](#setup--installation)
 - [Running Tests](#running-tests)
+- [Milestone Amendment History Tracking](#milestone-amendment-history-tracking)
 - [Building](#building)
 - [Deploying to Testnet](#deploying-to-testnet)
 - [Deploying to Mainnet](#deploying-to-mainnet)
@@ -398,6 +399,34 @@ separate weighted rating.
 ### `get_escrow_balance(shipment_id) → i128` *(read-only)*
 Returns the amount of USDC still locked in escrow.
 
+### Milestone Deadline Extensions
+
+Suppliers can ask for more ledger time on an active shipment milestone,
+and buyers decide whether to accept that new deadline. The flow is
+single-request: each milestone can have only one pending extension
+request at a time.
+
+- `request_extension(caller, shipment_id, milestone_index, extra_ledgers)`
+  — supplier-only. Creates a pending request to add `extra_ledgers` to
+  the milestone deadline and emits `extension_requested`. The shipment
+  must be active, the milestone index must exist, and the call fails if
+  that milestone already has a pending extension request.
+- `approve_extension(buyer, shipment_id, milestone_index)` — buyer-only.
+  Approves the pending request, clears it, and writes the effective
+  milestone deadline. If a deadline already exists, the contract adds
+  the requested extra ledgers to it; otherwise, it starts from the
+  current ledger sequence and adds the requested extra ledgers. The call
+  emits `extension_approved`.
+- `deny_extension(buyer, shipment_id, milestone_index)` — buyer-only.
+  Denies the pending request, clears it, leaves the current deadline
+  unchanged, and emits `extension_denied`.
+- `get_milestone_deadline(shipment_id, milestone_index) → u32`
+  *(read-only)* — returns the stored effective deadline ledger for the
+  milestone, or `0` when no deadline has been set.
+
+Extension request, approval, and denial calls are paused by the emergency
+circuit breaker; `get_milestone_deadline` remains available while paused.
+
 ### Emergency pause (circuit breaker)
 Admin-only kill switch that halts state-changing calls across every
 shipment without touching any stored data. Locked funds stay in escrow
@@ -421,6 +450,60 @@ pause and keep working normally.
 Only the current admin can call `pause`/`unpause` — same
 `assert_admin` check used everywhere else. To resume normal operation,
 the admin simply calls `unpause`; no other recovery steps are needed.
+
+### Rate-limiting circuit breaker
+
+A sliding-window rate limiter that caps total token outflow over a rolling
+period of ledger sequences. It is separate from the emergency pause and
+protects against abnormal drain scenarios (e.g. exploit, compromised key)
+without halting the entire contract.
+
+#### `set_circuit_breaker(admin, limit: i128, window_ledgers: u32)`
+
+Admin-only. Configures the circuit breaker parameters and immediately
+resets the current window counter to zero.
+
+| Parameter | Description |
+|-----------|-------------|
+| `limit` | Maximum cumulative outflow (in token smallest units) allowed within one window. Pass `0` to **disable** the circuit breaker entirely. |
+| `window_ledgers` | Duration of the tracking window in ledger sequences. After this many ledgers have elapsed since the window start, the counter resets automatically. |
+
+When the breaker is active, every payment that moves tokens out of escrow
+(`confirm_milestone`, `resolve_dispute`, partial dispute uncontested
+release, advance payouts, claim payouts, and amendments that release
+funds) is checked against the window:
+
+1. If the current ledger has moved past `window_start + window_ledgers`,
+   the window resets — outflow counter returns to zero and the window
+   start updates to the current ledger.
+2. The pending payment is added to the running `window_outflow` counter.
+3. If the new total would exceed `limit`, the call panics with
+   `"circuit breaker triggered: outflow limit exceeded"` and no state
+   is mutated.
+
+Because the check runs **before** the payment executes, a triggered
+breaker leaves all funds exactly where they were — no partial transfers
+occur.
+
+#### `get_circuit_breaker() → (i128, u32, u32, i128)` *(read-only)*
+
+Returns the current circuit breaker configuration and window state:
+`(limit, window_ledgers, window_start, window_outflow)`. When `limit`
+is `0`, the circuit breaker is disabled and the other fields are
+irrelevant.
+
+**Example — set a 100,000 USDC per 1,000-ledger cap:**
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source admin-account \
+  --network testnet \
+  -- set_circuit_breaker \
+  --admin <ADMIN_ADDRESS> \
+  --limit 10000000000000 \
+  --window_ledgers 1000
+```
 
 ### `set_max_advance_percent(admin, percent: u32)`
 Admin-only. Sets the maximum percentage of a milestone's payment that a
@@ -529,6 +612,7 @@ The contract emits the following events (subscribe via Horizon or RPC):
 | `shipment_cancelled` | `(shipment_id, refund_amount)` | Shipment cancelled |
 | `milestones_rebalanced` | `(buyer, new_percents)` | Buyer rebalanced milestone percentages |
 | `nft_hook_config_updated` | `(admin, enabled, ledger_sequence)` | Admin toggled the NFT mint hook via `set_nft_hook_enabled` |
+| `circuit_breaker_set` | `(limit, window_ledgers)` | Admin configured rate-limiting circuit breaker |
 | `nft_mint_hook` | `(shipment_id)` topic, `(buyer, supplier, total_amount, ledger_sequence, metadata_hash)` data | Final milestone completed while the NFT mint hook is enabled |
 
 The backend service (`chainsetttle-backend`) listens for these events and
@@ -550,6 +634,7 @@ sends push notifications to the relevant parties.
 | 8 | `InvalidAmount` — amount must be > 0 |
 | 9 | `DisputeAlreadyOpen` — dispute already exists for this milestone |
 | 18 | `MaxShipmentValueExceeded` — `total_amount` exceeds the admin-configured cap |
+| 19 | `CircuitBreakerTripped` — payment would exceed the rate-limiting outflow cap |
 
 ---
 

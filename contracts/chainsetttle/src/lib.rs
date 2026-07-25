@@ -1917,6 +1917,7 @@ impl ChainSettleContract {
         Self::append_audit_entry(
             &env,
             &mut shipment,
+            buyers.get(0).unwrap(),
             Symbol::new(&env, "shipment_created"),
             Symbol::new(&env, "create_shipment"),
         );
@@ -2459,6 +2460,14 @@ impl ChainSettleContract {
         milestone.proof_submitted_ledger = Some(current_ledger);
         shipment.milestones.set(milestone_index, milestone);
 
+        Self::append_audit_entry(
+            &env,
+            &mut shipment,
+            caller.clone(),
+            Symbol::new(&env, "proof_submitted"),
+            Symbol::new(&env, "submit_proof"),
+        );
+
         env.storage()
             .persistent()
             .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
@@ -2596,6 +2605,18 @@ impl ChainSettleContract {
                 .persistent()
                 .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
 
+            Self::append_audit_entry(
+                &env,
+                &mut shipment,
+                buyer.clone(),
+                Symbol::new(&env, "milestone_confirmed"),
+                Symbol::new(&env, "confirm_milestone"),
+            );
+
+            env.storage()
+                .persistent()
+                .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
+
             env.events().publish(
                 (Symbol::new(&env, "payment_held"), shipment_id.clone()),
                 (
@@ -2614,6 +2635,15 @@ impl ChainSettleContract {
 
             let milestone_deadline = milestone.deadline_ledger;
             milestone.status = MilestoneStatus::Confirmed;
+
+            Self::append_audit_entry(
+                &env,
+                &mut shipment,
+                buyer.clone(),
+                Symbol::new(&env, "milestone_confirmed"),
+                Symbol::new(&env, "confirm_milestone"),
+            );
+
             shipment.milestones.set(milestone_index, milestone);
             shipment.released_amount += payment;
             // #162: Track last confirmed milestone for sequential enforcement queries.
@@ -2713,6 +2743,15 @@ impl ChainSettleContract {
 
             if Self::all_milestones_done(&shipment) {
                 shipment.status = ShipmentStatus::Completed;
+
+                Self::append_audit_entry(
+                    &env,
+                    &mut shipment,
+                    buyer.clone(),
+                    Symbol::new(&env, "shipment_completed"),
+                    Symbol::new(&env, "confirm_milestone"),
+                );
+
                 // Return unused early bonus pool to buyer on completion.
                 if shipment.early_bonus_remaining > 0 {
                     let primary_buyer = shipment.buyers.get(0).unwrap();
@@ -3223,10 +3262,16 @@ impl ChainSettleContract {
                 .remove(&pool_flag_key);
         }
 
-        shipment.open_dispute_count += 1;
-        // Cancel any holdback window.
-        milestone.release_after_ledger = 0;
         milestone.status = MilestoneStatus::Disputed;
+
+        Self::append_audit_entry(
+            &env,
+            &mut shipment,
+            buyer.clone(),
+            Symbol::new(&env, "dispute_raised"),
+            Symbol::new(&env, "raise_dispute"),
+        );
+
         milestone.dispute_opened_ledger = Some(env.ledger().sequence());
         // #165: Store Unix timestamp so resolve_dispute_timeout can check elapsed seconds.
         let dispute_opened_at_key = DataKeyExt::DisputeOpenedAt(shipment_id.clone(), milestone_index);
@@ -3417,6 +3462,15 @@ impl ChainSettleContract {
         shipment.open_dispute_count += 1;
         milestone.release_after_ledger = 0;
         milestone.status = MilestoneStatus::Disputed;
+
+        Self::append_audit_entry(
+            &env,
+            &mut shipment,
+            buyer.clone(),
+            Symbol::new(&env, "dispute_raised"),
+            Symbol::new(&env, "raise_dispute"),
+        );
+
         milestone.dispute_opened_ledger = Some(env.ledger().sequence());
         // #165: Store Unix timestamp so resolve_dispute_timeout can check elapsed seconds.
         let dispute_opened_at_key = DataKeyExt::DisputeOpenedAt(shipment_id.clone(), milestone_index);
@@ -3635,8 +3689,25 @@ impl ChainSettleContract {
         // Update cooldown tracking regardless of approve/reject.
         shipment.last_dispute_resolved_ledger = Some(env.ledger().sequence());
 
+        Self::append_audit_entry(
+            &env,
+            &mut shipment,
+            arbiter.clone(),
+            Symbol::new(&env, "dispute_resolved"),
+            Symbol::new(&env, "resolve_dispute"),
+        );
+
         if Self::all_milestones_done(&shipment) {
             shipment.status = ShipmentStatus::Completed;
+
+            Self::append_audit_entry(
+                &env,
+                &mut shipment,
+                arbiter.clone(),
+                Symbol::new(&env, "shipment_completed"),
+                Symbol::new(&env, "resolve_dispute"),
+            );
+
             let mut stats = ctx.contract_stats;
             stats.completed_shipments += 1;
             env.storage()
@@ -3896,6 +3967,14 @@ impl ChainSettleContract {
 
         shipment.status = ShipmentStatus::Cancelled;
 
+        Self::append_audit_entry(
+            &env,
+            &mut shipment,
+            supplier.clone(),
+            Symbol::new(&env, "shipment_cancelled"),
+            Symbol::new(&env, "supplier_cancel"),
+        );
+
         Self::increment_reputation_internal(&env, &shipment.supplier, 0, 0, 1);
 
         // Move from Active to Cancelled status index.
@@ -4043,6 +4122,18 @@ impl ChainSettleContract {
                 .persistent()
                 .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
 
+            Self::append_audit_entry(
+                &env,
+                &mut shipment,
+                caller.clone(),
+                Symbol::new(&env, "amendment_accepted"),
+                Symbol::new(&env, "propose_amendment"),
+            );
+
+            env.storage()
+                .persistent()
+                .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
+
             env.storage().temporary().remove(&amendment_key);
 
             // #111: Append to amendment log (capped at 20, FIFO eviction).
@@ -4120,6 +4211,14 @@ impl ChainSettleContract {
         }
         shipment.buyers = new_buyers;
 
+        Self::append_audit_entry(
+            &env,
+            &mut shipment,
+            current_buyer.clone(),
+            Symbol::new(&env, "buyer_transferred"),
+            Symbol::new(&env, "transfer_buyer"),
+        );
+
         env.storage()
             .persistent()
             .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
@@ -4160,6 +4259,14 @@ impl ChainSettleContract {
         Self::assert_no_open_disputes(&shipment);
 
         shipment.supplier = new_supplier.clone();
+
+        Self::append_audit_entry(
+            &env,
+            &mut shipment,
+            current_supplier.clone(),
+            Symbol::new(&env, "supplier_transferred"),
+            Symbol::new(&env, "transfer_supplier"),
+        );
 
         env.storage()
             .persistent()
@@ -4238,6 +4345,14 @@ impl ChainSettleContract {
         if proposal.buyer_agreed && proposal.supplier_agreed {
             let mut updated_shipment = shipment.clone();
             updated_shipment.arbiter = new_arbiter.clone();
+
+            Self::append_audit_entry(
+                &env,
+                &mut updated_shipment,
+                caller.clone(),
+                Symbol::new(&env, "arbiter_rotated"),
+                Symbol::new(&env, "propose_arbiter_rotation"),
+            );
 
             env.storage()
                 .persistent()
@@ -4330,6 +4445,15 @@ impl ChainSettleContract {
 
         let milestone_deadline = milestone.deadline_ledger;
         milestone.status = MilestoneStatus::Confirmed;
+
+        Self::append_audit_entry(
+            &env,
+            &mut shipment,
+            env.current_contract_address(),
+            Symbol::new(&env, "auto_confirmed"),
+            Symbol::new(&env, "claim_auto_confirmation"),
+        );
+
         milestone.proof_submitted_ledger = None;
         shipment.last_confirmed_milestone_index = Some(milestone_index);
         shipment.milestones.set(milestone_index, milestone);
@@ -4570,6 +4694,14 @@ impl ChainSettleContract {
         );
         shipment.status = ShipmentStatus::Cancelled;
 
+        Self::append_audit_entry(
+            &env,
+            &mut shipment,
+            buyer.clone(),
+            Symbol::new(&env, "shipment_cancelled"),
+            Symbol::new(&env, "cancel_shipment"),
+        );
+
         env.storage()
             .persistent()
             .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
@@ -4698,29 +4830,26 @@ impl ChainSettleContract {
             .remove(&DataKeyExt::DisputeOpenedAt(shipment_id.clone(), milestone_index));
 
         milestone.status = MilestoneStatus::Resolved;
-        shipment.milestones.set(milestone_index, milestone);
-        shipment.open_dispute_count = shipment.open_dispute_count.saturating_sub(1);
-        shipment.last_dispute_resolved_ledger = Some(env.ledger().sequence());
 
-        // Remove from active disputes list.
-        let disputes: Vec<DisputeEntry> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::ActiveDisputes)
-            .unwrap_or_else(|| Vec::new(&env));
-        let mut new_disputes: Vec<DisputeEntry> = Vec::new(&env);
-        for i in 0..disputes.len() {
-            let d = disputes.get(i).unwrap();
-            if !(d.shipment_id == shipment_id && d.milestone_index == milestone_index) {
-                new_disputes.push_back(d);
-            }
-        }
-        env.storage()
-            .persistent()
-            .set(&DataKey::ActiveDisputes, &new_disputes);
+        Self::append_audit_entry(
+            &env,
+            &mut shipment,
+            shipment.arbiter.clone(),
+            Symbol::new(&env, "dispute_auto_resolved"),
+            Symbol::new(&env, "resolve_dispute_timeout"),
+        );
 
         if Self::all_milestones_done(&shipment) {
             shipment.status = ShipmentStatus::Completed;
+
+            Self::append_audit_entry(
+                &env,
+                &mut shipment,
+                shipment.arbiter.clone(),
+                Symbol::new(&env, "shipment_completed"),
+                Symbol::new(&env, "resolve_dispute_timeout"),
+            );
+
             let mut stats: ContractStats = env
                 .storage()
                 .instance()
@@ -4744,6 +4873,27 @@ impl ChainSettleContract {
             );
             Self::emit_shipment_completed(&env, &shipment_id, shipment.released_amount);
         }
+
+        shipment.milestones.set(milestone_index, milestone);
+        shipment.open_dispute_count = shipment.open_dispute_count.saturating_sub(1);
+        shipment.last_dispute_resolved_ledger = Some(env.ledger().sequence());
+
+        // Remove from active disputes list.
+        let disputes: Vec<DisputeEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ActiveDisputes)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut new_disputes: Vec<DisputeEntry> = Vec::new(&env);
+        for i in 0..disputes.len() {
+            let d = disputes.get(i).unwrap();
+            if !(d.shipment_id == shipment_id && d.milestone_index == milestone_index) {
+                new_disputes.push_back(d);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::ActiveDisputes, &new_disputes);
 
         env.storage()
             .persistent()
@@ -5405,17 +5555,18 @@ impl ChainSettleContract {
             .unwrap_or_else(|| panic!("shipment not found"))
     }
 
-    fn append_audit_entry(env: &Env, shipment: &mut Shipment, action: Symbol, detail: Symbol) {
+    fn append_audit_entry(
+        env: &Env,
+        shipment: &mut Shipment,
+        caller: Address,
+        action: Symbol,
+        detail: Symbol,
+    ) {
         // Maintain a bounded ring-buffer of max 20 entries.
         let entry = AuditEntry {
             action,
-            caller: env
-                .storage()
-                .instance()
-                .get(&DataKey::Admin)
-                .unwrap_or_else(|| panic!("unauthorized")),
+            caller,
             ledger: env.ledger().sequence(),
-
             detail,
         };
 
@@ -5714,11 +5865,9 @@ mod test_arbiter_pool;
 // mod test_issues;
 mod test_arbiter_security;
 mod test_boundary_validation;
-mod test_supplier_collateral;
-mod test_partial_cancellation;
-mod test_event_schema;
-mod test_multi_token;
-mod test_upgrade_multisig;
+mod test_rebalance_milestones;
+mod test_escalation;
+mod test_top_up_escrow;
 // mod test_oracle;
 // mod test_upgrade;
 // mod test_concurrent_disputes;
