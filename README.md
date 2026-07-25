@@ -23,6 +23,7 @@ This is **Repo 1 of 3** in the ChainSettle project:
 - [Architecture](#architecture)
 - [Data Structures](#data-structures)
 - [Contract Functions](#contract-functions)
+  - [rebalance_milestones](#rebalance_milestonesbuyer-shipment_id-new_percents)
 - [Events](#events)
 - [Error Codes](#error-codes)
 - [Project Structure](#project-structure)
@@ -125,15 +126,105 @@ pub struct Shipment {
 }
 ```
 
+### `ReputationScore`
+
+`get_reputation(supplier)` returns cumulative supplier outcome counters. It is
+not a single weighted score; applications can use these counters to calculate
+their own supplier rating:
+
+```rust
+pub struct ReputationScore {
+    pub completed: u32,  // shipments completed successfully
+    pub disputed: u32,   // disputes raised against the supplier
+    pub cancelled: u32,  // shipments cancelled or expired
+}
+```
+
+The counters are updated automatically:
+
+- `completed` increases once when all milestones in a shipment reach a
+  completed state, including successful dispute resolution.
+- `disputed` increases when a buyer raises a full or partial dispute. Resolving
+  the dispute does not remove the historical count.
+- `cancelled` increases when a shipment is cancelled by the buyer or supplier,
+  or when the buyer claims a deadline refund.
+
+All counters start at `0` for a supplier with no reputation record and are
+monotonically increasing (with saturating `u32` arithmetic).
+
+#### Interpreting supplier reputation
+
+`get_reputation` intentionally exposes raw on-chain facts instead of imposing
+one platform-wide rating formula. A frontend, marketplace, or backend can
+choose how much weight to give each outcome, while different applications can
+use the same contract data for different purposes.
+
+Important details for scoring integrations:
+
+- `completed` is incremented once per shipment, not once per milestone. A
+  shipment completed after an approved dispute still counts as completed.
+- `disputed` is incremented once whenever a dispute is opened against one of
+  the supplier's milestones. A shipment with disputes on several milestones
+  can therefore contribute more than one disputed count.
+- `cancelled` is incremented once when the shipment becomes cancelled or
+  expired. This includes buyer cancellation, eligible supplier cancellation,
+  and a successful deadline refund claim.
+- A dispute that is later rejected or automatically resolved does not erase
+  the historical `disputed` counter. Applications should treat it as an
+  activity or risk signal rather than proof that the supplier lost the
+  dispute.
+- The counters do not include payment volume, delivery speed, milestone
+  size, dispute outcome, or the identity of the party that raised the dispute.
+  Fetch shipment records separately when those dimensions are required.
+
+For example, an application may calculate a simple historical completion rate
+from the returned counters:
+
+```
+outcomes = completed + disputed + cancelled
+completion_rate = completed / outcomes       // when outcomes > 0
+```
+
+This is only an application-level metric, not a value returned or enforced by
+the contract. Because `disputed` counts milestone dispute events while the
+other fields count shipment outcomes, the ratio should be labelled clearly
+and should not be presented as an official ChainSettle score. A safer UI can
+show the three counters separately and display `Not enough history` until a
+minimum number of completed shipments has been reached.
+
+Example read-only response:
+
+```json
+{
+  "completed": 18,
+  "disputed": 2,
+  "cancelled": 1
+}
+```
+
+The example represents 18 completed shipments, two disputed milestones, and
+one cancelled or expired shipment. It does not mean that 18 of 21 shipments
+were completed, because the disputed value is not a shipment-level count.
+
+The getter requires no supplier signature and does not create a reputation
+record. A supplier with no stored record returns the default value with all
+fields set to zero. Reputation storage uses a persistent entry with a
+renewable Soroban TTL, so indexers should periodically refresh their cached
+value and should not assume that an absent record proves the supplier has
+never used the contract.
+
 ### `MilestoneStatus` state machine
 
 ```
 Pending
   └─ submit_proof()  ──→ ProofSubmitted
        ├─ confirm_milestone() ──→ Confirmed  (payment released)
-       └─ raise_dispute()     ──→ Disputed
-               ├─ resolve_dispute(approve=true)  ──→ Resolved (payment released)
-               └─ resolve_dispute(approve=false) ──→ Pending  (supplier resubmits)
+       ├─ raise_dispute()     ──→ Disputed (full 100%)
+       │       ├─ resolve_dispute(approve=true)  ──→ Resolved (payment released)
+       │       └─ resolve_dispute(approve=false) ──→ Pending  (supplier resubmits)
+       └─ raise_partial_dispute() ──→ Disputed (uncontested released)
+               ├─ resolve_dispute(approve=true)  ──→ Resolved (contested paid to supplier)
+               └─ resolve_dispute(approve=false) ──→ Resolved (contested refunded to buyer)
 ```
 
 ---
@@ -192,18 +283,106 @@ Buyer confirms a `ProofSubmitted` milestone. Automatically calculates
 and transfers the milestone's payment percentage to the supplier.
 If all milestones are confirmed, shipment status becomes `Completed`.
 
+### `batch_confirm_milestones(buyer, shipment_id, milestone_indices)`
+Confirms multiple milestones in a single transaction. Functionally equivalent
+to calling `confirm_milestone` once per index, but saves transaction fees and
+reduces the number of on-chain round-trips when several milestones are ready
+to approve at once.
+
+```
+Parameters:
+  buyer              Address   — must be the shipment's registered buyer
+  shipment_id        String    — shipment to operate on
+  milestone_indices  Vec<u32>  — ordered list of milestone indices to confirm
+```
+
+**Behavior:**
+- The call is **atomic** — if any index is invalid or any milestone is not in
+  `ProofSubmitted` status, the entire transaction is reverted and no payments
+  are released.
+- All indices are validated before any state is mutated, so partial application
+  never occurs.
+- Each confirmed milestone triggers its own `milestone_confirmed` event and
+  releases that milestone's proportional payment to the supplier (same fee and
+  advance-deduction logic as `confirm_milestone`).
+- Passing an **empty** `milestone_indices` list is a no-op — the call returns
+  without error or side-effects.
+- If all milestones end up confirmed after the batch, shipment status
+  automatically transitions to `Completed` (same as `confirm_milestone`).
+
+**vs. `confirm_milestone`:**
+
+| | `confirm_milestone` | `batch_confirm_milestones` |
+|---|---|---|
+| Milestones per call | 1 | Many |
+| Atomicity | Single milestone | All-or-nothing across the batch |
+| Partial failure | N/A | Reverts entire batch |
+| Gas / fee cost | Per milestone | One transaction for all |
+
+Example — confirm all three milestones at once after all proofs are in:
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source buyer-account \
+  --network testnet \
+  -- batch_confirm_milestones \
+  --buyer <BUYER_ADDRESS> \
+  --shipment_id "SHIP-001" \
+  --milestone_indices '[0, 1, 2]'
+```
+
 ### `raise_dispute(buyer, shipment_id, milestone_index)`
-Buyer disputes a `ProofSubmitted` milestone. Freezes the milestone in
-`Disputed` state — no payment can be released until arbiter resolves.
+Buyer disputes 100% of a `ProofSubmitted` or `ConfirmedHeld` milestone's payment. Freezes the milestone in `Disputed` state — no payment can be released until arbiter resolves.
+
+### `raise_partial_dispute(buyer, shipment_id, milestone_index, contested_percent: u32)`
+Buyer contests only a specified percentage (`contested_percent` from `1` to `99`) of a milestone's value. The uncontested portion `(100 - contested_percent)%` is immediately calculated and released to the supplier, while the contested portion is held in escrow in `Disputed` state pending arbiter resolution. Panics if an approved advance exists for the milestone.
 
 ### `resolve_dispute(arbiter, shipment_id, milestone_index, approve: bool)`
-Arbiter resolves a `Disputed` milestone.
-- `approve = true` → releases payment, status → `Resolved`
-- `approve = false` → resets status → `Pending` (supplier must resubmit)
+Arbiter resolves a `Disputed` milestone (full or partial).
+- For **full disputes**:
+  - `approve = true` → releases payment to supplier (minus arbiter fee), status → `Resolved`
+  - `approve = false` → refunds buyer / rejects proof, status → `Pending` (supplier must resubmit)
+- For **partial disputes**:
+  - `approve = true` → releases contested portion to supplier (minus arbiter fee), status → `Resolved`
+  - `approve = false` → refunds contested portion to buyer (minus arbiter fee), status → `Resolved`
+
+### `check_escalation(shipment_id, milestone_index)`
+Checks whether an open dispute on a milestone has exceeded the admin-configured escalation threshold without arbiter resolution. Emits `dispute_escalated` event if the threshold is met or exceeded. Callable by anyone.
+
+### `set_escalation_threshold(admin, threshold_ledgers: u32)`
+Admin-only. Sets the dispute escalation threshold in ledgers (`0` = disabled). `get_escalation_threshold() → u32` returns the current threshold.
 
 ### `cancel_shipment(buyer, shipment_id)`
 Cancels the shipment if no milestones have been confirmed yet.
 Returns all locked funds to the buyer.
+
+---
+
+### Partial Disputes & Escalation Checks
+
+#### Partial Disputes Mechanics
+In real-world supply chain transactions, delivered goods may be partially damaged, incomplete, or slightly off-specification without justifying a total transaction freeze. ChainSettle supports partial disputes via `raise_partial_dispute()`:
+
+- **1–99% Contested Split**: The buyer specifies `contested_percent` (must be between `1` and `99`). The contract calculates:
+  - **Uncontested share**: `(100 - contested_percent)%` of milestone value.
+  - **Contested share**: `contested_percent%` of milestone value.
+- **Immediate Uncontested Payout**: The uncontested portion is immediately released to the supplier at dispute-raising time (net of standard platform fees), updating the shipment's `released_amount` and reducing total escrow balance (`TotalEscrowed`).
+- **Advance Request Constraint**: If an approved advance request already exists on the milestone, `raise_partial_dispute()` panics with `"partial dispute not allowed when an approved advance exists for this milestone"`. Buyers must use full `raise_dispute()` when an advance has been approved.
+- **Resolution Path (`resolve_dispute`)**:
+  - **Arbiter Approves (`approve = true`)**: Supplier receives the contested portion minus the arbiter fee. Dispute bond is returned to the buyer. Milestone status transitions to `Resolved`.
+  - **Arbiter Rejects (`approve = false`)**: Buyer receives a refund of the contested portion minus the arbiter fee. Milestone status transitions to `Resolved` (unlike full disputes where rejection resets status to `Pending`, partial disputes finalize at `Resolved` because the uncontested portion was already paid out).
+
+#### Dispute Escalation & Escalation Threshold
+To ensure disputes do not stall indefinitely without arbiter action, ChainSettle provides a dispute escalation check mechanism:
+
+- **Configuring the Threshold**: The contract admin configures the global escalation threshold using `set_escalation_threshold(admin, threshold_ledgers)`. Setting `threshold_ledgers = 0` disables escalation checks (default).
+- **Checking Escalation (`check_escalation`)**: Anyone (buyer, supplier, arbiter, or automated backend services) can invoke `check_escalation(shipment_id, milestone_index)`.
+- **Ledger Sequence Comparison**: `check_escalation()` inspects the target milestone:
+  1. Verifies the milestone is in `MilestoneStatus::Disputed`.
+  2. Compares the current ledger sequence (`env.ledger().sequence()`) against `opened_ledger + threshold` (where `opened_ledger` is recorded in `dispute_opened_ledger` when the dispute was raised).
+  3. If `current_ledger >= opened_ledger + threshold`, the contract emits a `dispute_escalated` event containing `(milestone_index, opened_ledger, current_ledger)`.
+- **Off-Chain Handling**: The backend service (`chainsetttle-backend`) monitors `dispute_escalated` events to alert platform administrators, notify the assigned arbiter, or trigger automated resolution escalation workflows.
 
 ### `get_shipment(shipment_id) → Shipment` *(read-only)*
 Returns the full shipment record.
@@ -211,8 +390,38 @@ Returns the full shipment record.
 ### `get_milestone(shipment_id, milestone_index) → Milestone` *(read-only)*
 Returns a single milestone.
 
+### `get_reputation(supplier) → ReputationScore` *(read-only)*
+Returns the supplier's cumulative `completed`, `disputed`, and `cancelled`
+shipment counters. The call requires no authorization and returns zeroes when
+the supplier has no recorded activity; it does not calculate or persist a
+separate weighted rating.
+
 ### `get_escrow_balance(shipment_id) → i128` *(read-only)*
 Returns the amount of USDC still locked in escrow.
+
+### Emergency pause (circuit breaker)
+Admin-only kill switch that halts state-changing calls across every
+shipment without touching any stored data. Locked funds stay in escrow
+untouched while paused — this only blocks new actions, it never moves
+or seizes funds itself.
+
+- `pause(admin)` — sets the paused flag and emits `contract_paused`.
+- `unpause(admin)` — clears the paused flag and emits `contract_unpaused`.
+- `is_paused() → bool` *(read-only)* — returns the current state.
+
+While paused, every function that guards on `assert_not_paused` panics
+with `"contract is paused"`. That covers the full shipment lifecycle:
+`create_shipment`, `submit_proof`, `confirm_milestone`,
+`raise_dispute`/`raise_partial_dispute`, `resolve_dispute`,
+`cancel_shipment`/`supplier_cancel`, escrow top-ups, advances,
+extensions, amendments, transfers, and claims. Read-only getters,
+admin configuration setters (fees, thresholds, whitelists, etc.), and
+admin succession (`nominate_admin`/`accept_admin`) are **not** gated by
+pause and keep working normally.
+
+Only the current admin can call `pause`/`unpause` — same
+`assert_admin` check used everywhere else. To resume normal operation,
+the admin simply calls `unpause`; no other recovery steps are needed.
 
 ### `set_max_advance_percent(admin, percent: u32)`
 Admin-only. Sets the maximum percentage of a milestone's payment that a
@@ -226,45 +435,81 @@ admin has never called `set_max_advance_percent`. `request_advance`
 reads this value and panics with `AdvanceExceedsMax` if the requested
 `advance_percent` is greater than the cap.
 
-### `Milestone Amendment History Tracking`
+### `set_max_concurrent_disputes(admin, limit: u32)`
+Admin-only. Sets how many milestones on a single shipment can be under
+dispute at the same time. Defaults to `1` if never called. `raise_dispute`
+and `raise_partial_dispute` check the shipment's open dispute count
+against this cap and panic with `"DisputeAlreadyOpen"` once it's reached.
 
-The contract maintains an immutable, append-only log of all successful milestone amendments. This provides a transparent audit trail of how milestone payment percentages and names have changed over time.
+This is what stops a buyer from disputing several milestones of the same
+shipment all at once. Without a cap, one shipment could rack up an
+unbounded number of simultaneous disputes, tying up several payment
+releases at once and dumping all of that resolution work on one arbiter
+at the same time.
 
-#### `get_amendment_log(shipment_id, milestone_index) → Vec<AmendmentEntry>`
+### Admin Action Audit Trail
 
-Returns the chronological history of accepted amendments for a specific milestone.
+The contract maintains an immutable audit log of all administrative actions
+for transparency and governance accountability. Every admin function call
+(pause, fee changes, blacklist operations, etc.) is automatically recorded
+with context about who performed the action and when.
 
-**When amendments are logged:**
-Amendments are only recorded when **both** the Buyer and the Supplier have called `propose_amendment` with identical terms (new percentage and name) for a `Pending` milestone. At the moment of mutual agreement:
-1. The shipment's milestone data is mutated.
-2. An `AmendmentEntry` is appended to the log.
-3. The log is capped at the last 20 entries (FIFO eviction).
+#### `get_admin_log() → Vec<AuditEntry>` *(read-only)*
 
-#### `AmendmentEntry` Schema
-
-| Property | Type | Description |
-|---|---|---|
-| `proposer` | `Address` | The address that submitted the final agreeing proposal |
-| `old_payment_percent` | `u32` | The payment percentage before this amendment was applied |
-| `new_payment_percent` | `u32` | The new payment percentage after the amendment |
-| `ledger` | `u32` | The ledger sequence number (timestamp) when the amendment was authorized |
-
-**Usage Example:**
+Returns the complete history of admin actions performed on the contract.
+Each `AuditEntry` contains:
 
 ```rust
-// Retrieve history for milestone 0 of shipment "SHIP-123"
-let log = get_amendment_log("SHIP-123", 0);
-
-// Result structure:
-// [
-//   { 
-//     proposer: "GB...", 
-//     old_payment_percent: 25, 
-//     new_payment_percent: 30, 
-//     ledger: 123456 
-//   }
-// ]
+pub struct AuditEntry {
+    pub action: Symbol,      // Admin function called (e.g. "pause", "set_fee_config")
+    pub caller: Address,     // Admin address who performed the action
+    pub ledger: u32,         // Ledger sequence number (timestamp proxy)
+    pub detail: Symbol,      // Context detail (e.g. "contract_paused", "fee_config_updated")
+}
 ```
+
+**Logged actions include:**
+
+| Action | Triggered by | Detail |
+|--------|--------------|--------|
+| `pause` | `pause()` | `contract_paused` |
+| `unpause` | `unpause()` | `contract_unpaused` |
+| `set_fee_config` | `set_fee_config()` | `fee_config_updated` |
+| `set_max_concurrent_disputes` | `set_max_concurrent_disputes()` | `limit_updated` |
+| `set_min_milestone_percent` | `set_min_milestone_percent()` | `percent_updated` |
+| `set_max_advance_percent` | `set_max_advance_percent()` | `percent_updated` |
+| `set_nft_hook_enabled` | `set_nft_hook_enabled()` | `nft_hook_updated` |
+| `blacklist_address` | `blacklist_address()` | `address_blacklisted` |
+| `remove_from_blacklist` | `remove_from_blacklist()` | `address_whitelisted` |
+| `add_allowed_token` | `add_allowed_token()` | `allowed_token_added` |
+| `remove_allowed_token` | `remove_allowed_token()` | `allowed_token_removed` |
+| `add_arbiter_to_pool` | `add_arbiter_to_pool()` | `arbiter_added` |
+| `remove_arbiter_from_pool` | `remove_arbiter_from_pool()` | `arbiter_removed` |
+
+**Usage example:**
+
+```bash
+# Query the admin audit log via CLI
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  -- get_admin_log
+```
+
+**Why this matters:**
+
+- **Transparency**: Anyone can verify when contract parameters were changed
+  and by whom
+- **Governance**: Off-chain tools can monitor the log and alert stakeholders
+  to admin actions
+- **Forensics**: If a dispute arises about contract configuration, the audit
+  trail provides a tamper-proof record
+- **Accountability**: Admin actions are permanently recorded on-chain, making
+  unilateral changes visible to all participants
+
+The audit log uses persistent storage and is retained for the lifetime of
+the contract. Unlike events (which may be pruned by Horizon), these entries
+remain queryable indefinitely.
 
 ---
 
@@ -278,8 +523,14 @@ The contract emits the following events (subscribe via Horizon or RPC):
 | `proof_submitted` | `(shipment_id, milestone_index)` | Proof submitted for a milestone |
 | `milestone_confirmed` | `(shipment_id, milestone_index, payment_amount)` | Milestone confirmed, payment released |
 | `dispute_raised` | `(shipment_id, milestone_index)` | Buyer disputes a milestone |
+| `partial_uncontested_released` | `(shipment_id)` topic, `(milestone_index, uncontested_amount, fee_amount)` data | Uncontested portion released immediately at partial dispute time |
 | `dispute_resolved` | `(shipment_id, milestone_index, approved)` | Arbiter resolves dispute |
+| `dispute_escalated` | `(shipment_id)` topic, `(milestone_index, opened_ledger, current_ledger)` data | Dispute open duration surpassed escalation threshold |
+| `escalation_threshold_set` | `threshold_ledgers` | Admin configured escalation threshold |
 | `shipment_cancelled` | `(shipment_id, refund_amount)` | Shipment cancelled |
+| `milestones_rebalanced` | `(buyer, new_percents)` | Buyer rebalanced milestone percentages |
+| `nft_hook_config_updated` | `(admin, enabled, ledger_sequence)` | Admin toggled the NFT mint hook via `set_nft_hook_enabled` |
+| `nft_mint_hook` | `(shipment_id)` topic, `(buyer, supplier, total_amount, ledger_sequence, metadata_hash)` data | Final milestone completed while the NFT mint hook is enabled |
 
 The backend service (`chainsetttle-backend`) listens for these events and
 sends push notifications to the relevant parties.
@@ -299,6 +550,7 @@ sends push notifications to the relevant parties.
 | 7 | `InvalidPercentages` — milestone percentages don't sum to 100 |
 | 8 | `InvalidAmount` — amount must be > 0 |
 | 9 | `DisputeAlreadyOpen` — dispute already exists for this milestone |
+| 18 | `MaxShipmentValueExceeded` — `total_amount` exceeds the admin-configured cap |
 
 ---
 

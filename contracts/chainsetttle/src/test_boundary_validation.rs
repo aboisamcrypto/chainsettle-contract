@@ -3,58 +3,20 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
-    token, vec, Address, BytesN, Env, String,
-};
-use std::format;
+use crate::test_common::{default_options, single_buyer_vec, TestSetup};
+use soroban_sdk::{vec, Env, String};
 
 // ============================================================
 // TEST SETUP
 // ============================================================
 
-struct TestSetup {
-    env: Env,
-    contract_id: Address,
-    token_id: Address,
-    buyer: Address,
-    supplier: Address,
-    logistics: Address,
-    arbiter: Address,
-}
-
 fn setup() -> TestSetup {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register(ChainSettleContract, ());
-
-    let token_admin = Address::generate(&env);
-    let token_id = env
-        .register_stellar_asset_contract_v2(token_admin.clone())
-        .address();
-    let token_client = token::StellarAssetClient::new(&env, &token_id);
-
-    let buyer = Address::generate(&env);
-    let supplier = Address::generate(&env);
-    let logistics = Address::generate(&env);
-    let arbiter = Address::generate(&env);
-
-    // Mint sufficient tokens for all test scenarios
-    token_client.mint(&buyer, &1_000_000_000_000);
-
-    let client = ChainSettleContractClient::new(&env, &contract_id);
-    client.init(&buyer);
-
-    TestSetup {
-        env,
-        contract_id,
-        token_id,
-        buyer,
-        supplier,
-        logistics,
-        arbiter,
-    }
+    let t = crate::test_common::setup();
+    // This file mints a much larger buyer balance than the shared fixture
+    // to cover its large-amount boundary cases.
+    let token_client = soroban_sdk::token::StellarAssetClient::new(&t.env, &t.token_id);
+    token_client.mint(&t.buyer, &1_000_000_000_000);
+    t
 }
 
 fn build_valid_milestone(env: &Env) -> soroban_sdk::Vec<Milestone> {
@@ -145,32 +107,6 @@ fn build_multi_milestone_with_zero(env: &Env) -> soroban_sdk::Vec<Milestone> {
             penalty_bps_per_ledger: 0,
         },
     ]
-}
-
-fn single_buyer_vec(env: &Env, buyer: &Address) -> soroban_sdk::Vec<Address> {
-    vec![env, buyer.clone()]
-}
-
-fn default_options(_env: &Env) -> ShipmentOptions {
-    ShipmentOptions {
-        response_deadline: 0,
-        penalty_bps: 0,
-        milestone_mode: MilestoneMode::Parallel,
-        holdback_ledgers: 0,
-        dispute_cooldown_ledgers: 0,
-        late_penalty_bps_per_ledger: 0,
-        auto_confirm_ledgers: 0,
-        dispute_bond_amount: 0,
-        arbiter_fee_bps: 0,
-        logistics_fee_bps: 0,
-        supplier_collateral: 0,
-        expires_at_ledger: None,
-        metadata_hash: None,
-        referrer: None,
-        buyer_cancel_fee_bps: 0,
-        early_bonus_pool: 0,
-        review_window_ledgers: None,
-    }
 }
 
 // ============================================================
@@ -554,4 +490,140 @@ fn test_boundary_validation_coverage_summary() {
     // Large Values: ✓ Covered
     
     assert_eq!(1, 1); // Trivial assertion; this test documents coverage
+}
+
+// ============================================================
+// TEST 12: Single Milestone Below Minimum Percentage Rejected
+// ============================================================
+
+#[test]
+#[should_panic(expected = "InvalidPercentages")]
+fn test_create_shipment_single_low_percent_milestone_rejected() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let shipment_id = String::from_str(&t.env, "SHIP-SINGLE-LOW-PCT");
+    let total_amount: i128 = 1_000_000_000;
+
+    // Single milestone at 1% is below the default min_pct (5%).
+    // Should panic: "InvalidPercentages"
+    client.create_shipment(
+        &shipment_id,
+        &single_buyer_vec(&t.env, &t.buyer),
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &total_amount,
+        &build_low_percent_milestone(&t.env),
+        &default_options(&t.env),
+    );
+}
+
+// ============================================================
+// TEST 13: Milestone Percentages Summing Above 100 Rejected
+// ============================================================
+
+#[test]
+#[should_panic(expected = "milestone percentages must sum to 100")]
+fn test_create_shipment_percentages_sum_above_100_rejected() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let shipment_id = String::from_str(&t.env, "SHIP-SUM-OVER-100");
+    let total_amount: i128 = 1_000_000_000;
+
+    // Two milestones, each individually above min_pct, but summing to 110%.
+    let milestones = vec![
+        &t.env,
+        Milestone {
+            name: String::from_str(&t.env, "Milestone 1"),
+            payment_percent: 60,
+            proof_hash: String::from_str(&t.env, ""),
+            status: MilestoneStatus::Pending,
+            release_after_ledger: 0,
+            proof_submitted_ledger: None,
+            dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+        },
+        Milestone {
+            name: String::from_str(&t.env, "Milestone 2"),
+            payment_percent: 50,
+            proof_hash: String::from_str(&t.env, ""),
+            status: MilestoneStatus::Pending,
+            release_after_ledger: 0,
+            proof_submitted_ledger: None,
+            dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+        },
+    ];
+
+    // Should panic: "milestone percentages must sum to 100"
+    client.create_shipment(
+        &shipment_id,
+        &single_buyer_vec(&t.env, &t.buyer),
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &total_amount,
+        &milestones,
+        &default_options(&t.env),
+    );
+}
+
+// ============================================================
+// TEST 14: Milestone Percentages Summing Below 100 Rejected
+// ============================================================
+
+#[test]
+#[should_panic(expected = "milestone percentages must sum to 100")]
+fn test_create_shipment_percentages_sum_below_100_rejected() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let shipment_id = String::from_str(&t.env, "SHIP-SUM-UNDER-100");
+    let total_amount: i128 = 1_000_000_000;
+
+    // Two milestones, each individually above min_pct, but summing to 90%.
+    let milestones = vec![
+        &t.env,
+        Milestone {
+            name: String::from_str(&t.env, "Milestone 1"),
+            payment_percent: 40,
+            proof_hash: String::from_str(&t.env, ""),
+            status: MilestoneStatus::Pending,
+            release_after_ledger: 0,
+            proof_submitted_ledger: None,
+            dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+        },
+        Milestone {
+            name: String::from_str(&t.env, "Milestone 2"),
+            payment_percent: 50,
+            proof_hash: String::from_str(&t.env, ""),
+            status: MilestoneStatus::Pending,
+            release_after_ledger: 0,
+            proof_submitted_ledger: None,
+            dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+        },
+    ];
+
+    // Should panic: "milestone percentages must sum to 100"
+    client.create_shipment(
+        &shipment_id,
+        &single_buyer_vec(&t.env, &t.buyer),
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &total_amount,
+        &milestones,
+        &default_options(&t.env),
+    );
 }
