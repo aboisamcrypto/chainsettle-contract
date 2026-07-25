@@ -1,7 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracterror, contracttype, token, Address, BytesN, Env, String, Vec, Symbol,
+    contract, contractimpl, contracterror, contracttype, token, Address, BytesN, Env, IntoVal, Map,
+    String, Val, Vec, Symbol,
 };
 
 // ============================================================
@@ -343,6 +344,15 @@ pub struct AdminAction {
     pub params: String,
 }
 
+/// #166 – Pending contract-upgrade proposal gated by the upgrade multisig.
+#[contracttype]
+#[derive(Clone)]
+pub struct UpgradeProposal {
+    pub new_wasm_hash: BytesN<32>,
+    /// Distinct admin keys (from `MultiAdminConfig.admins`) that have approved so far.
+    pub approvals: Vec<Address>,
+}
+
 // ============================================================
 // STORAGE CONTEXT STRUCTS (batch reads)
 // ============================================================
@@ -522,6 +532,12 @@ pub enum DataKeyExt {
     // ── #165 Dispute auto-resolution timeout ────────────────────
     /// Unix timestamp at which a dispute was opened: (shipment_id, milestone_index) -> u64.
     DisputeOpenedAt(String, u32),
+
+    // ── #166 Upgrade multisig ───────────────────────────────────
+    /// Next upgrade proposal id (monotonically increasing, starts at 1).
+    UpgradeProposalCounter,
+    /// Pending upgrade proposal by id.
+    UpgradeProposal(u64),
 }
 
 // ============================================================
@@ -659,6 +675,10 @@ impl ChainSettleContract {
     // ----------------------------------------------------------
 
     /// Replace the contract WASM in-place. Only callable by admin.
+    ///
+    /// Disabled once `initialize_multisig_admin` (#166) has been configured — at that
+    /// point upgrades must go through `propose_upgrade` / `approve_upgrade` so that no
+    /// single admin key can push a malicious upgrade unilaterally.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
         admin.require_auth();
         let stored_admin: Address = env
@@ -668,6 +688,13 @@ impl ChainSettleContract {
             .unwrap_or_else(|| panic!("unauthorized"));
         if admin != stored_admin {
             panic!("unauthorized");
+        }
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::MultiAdminConfig)
+        {
+            panic!("upgrade multisig is configured; use propose_upgrade/approve_upgrade instead");
         }
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
@@ -680,6 +707,146 @@ impl ChainSettleContract {
     /// Migration stub — call once after upgrade to perform any data-model changes.
     pub fn migrate(_env: Env) {
         // No-op for current version; implement data migrations here post-upgrade.
+    }
+
+    // ----------------------------------------------------------
+    // #166 UPGRADE MULTISIG
+    // ----------------------------------------------------------
+    // Gated by the same `MultiAdminConfig` (admins + threshold) set up via
+    // `initialize_multisig_admin`. Any registered admin key can propose or approve
+    // a WASM upgrade; the upgrade only executes once `threshold` distinct admin
+    // keys have approved it. Requires `initialize_multisig_admin` to have been
+    // called first — that is also what disables the single-key `upgrade` above.
+
+    /// Propose a new contract WASM hash. Callable by any registered multisig admin key.
+    /// The proposer's own approval is recorded immediately, so a threshold of 1
+    /// executes the upgrade right away. Returns the new proposal's id.
+    pub fn propose_upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> u64 {
+        admin.require_auth();
+        let config = Self::require_multisig_config(&env);
+        Self::assert_multisig_admin(&config, &admin);
+
+        let proposal_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt::UpgradeProposalCounter)
+            .unwrap_or(0)
+            + 1;
+        env.storage()
+            .instance()
+            .set(&DataKeyExt::UpgradeProposalCounter, &proposal_id);
+
+        let mut approvals: Vec<Address> = Vec::new(&env);
+        approvals.push_back(admin.clone());
+        let proposal = UpgradeProposal {
+            new_wasm_hash: new_wasm_hash.clone(),
+            approvals,
+        };
+        let key = DataKeyExt::UpgradeProposal(proposal_id);
+        env.storage().persistent().set(&key, &proposal);
+        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_proposed"), proposal_id),
+            (new_wasm_hash, admin, 1u32),
+        );
+
+        if config.threshold <= 1 {
+            Self::execute_upgrade_proposal(&env, proposal_id);
+        }
+
+        proposal_id
+    }
+
+    /// Approve a pending upgrade proposal. Executes the upgrade once `threshold`
+    /// distinct admin keys have approved. Rejects a second approval from the same key.
+    pub fn approve_upgrade(env: Env, admin: Address, proposal_id: u64) {
+        admin.require_auth();
+        let config = Self::require_multisig_config(&env);
+        Self::assert_multisig_admin(&config, &admin);
+
+        let key = DataKeyExt::UpgradeProposal(proposal_id);
+        let mut proposal: UpgradeProposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("upgrade proposal not found"));
+
+        for i in 0..proposal.approvals.len() {
+            if proposal.approvals.get(i).unwrap() == admin {
+                panic!("already approved by this admin");
+            }
+        }
+        proposal.approvals.push_back(admin.clone());
+        let approvals_count = proposal.approvals.len() as u32;
+        env.storage().persistent().set(&key, &proposal);
+
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_approved"), proposal_id),
+            (admin, approvals_count),
+        );
+
+        if approvals_count >= config.threshold {
+            Self::execute_upgrade_proposal(&env, proposal_id);
+        }
+    }
+
+    /// Cancel a pending upgrade proposal. Callable by any registered multisig admin key.
+    pub fn cancel_upgrade(env: Env, admin: Address, proposal_id: u64) {
+        admin.require_auth();
+        let config = Self::require_multisig_config(&env);
+        Self::assert_multisig_admin(&config, &admin);
+
+        let key = DataKeyExt::UpgradeProposal(proposal_id);
+        if !env.storage().persistent().has(&key) {
+            panic!("upgrade proposal not found");
+        }
+        env.storage().persistent().remove(&key);
+
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_cancelled"), proposal_id),
+            admin,
+        );
+    }
+
+    /// Returns a pending upgrade proposal, or None if it doesn't exist (never
+    /// existed, was cancelled, or already executed).
+    pub fn get_upgrade_proposal(env: Env, proposal_id: u64) -> Option<UpgradeProposal> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt::UpgradeProposal(proposal_id))
+    }
+
+    fn require_multisig_config(env: &Env) -> MultiAdminConfig {
+        env.storage()
+            .instance()
+            .get(&DataKey::MultiAdminConfig)
+            .unwrap_or_else(|| panic!("multisig admin not configured"))
+    }
+
+    fn assert_multisig_admin(config: &MultiAdminConfig, admin: &Address) {
+        for i in 0..config.admins.len() {
+            if config.admins.get(i).unwrap() == *admin {
+                return;
+            }
+        }
+        panic!("unauthorized");
+    }
+
+    fn execute_upgrade_proposal(env: &Env, proposal_id: u64) {
+        let key = DataKeyExt::UpgradeProposal(proposal_id);
+        let proposal: UpgradeProposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("upgrade proposal not found"));
+        env.deployer()
+            .update_current_contract_wasm(proposal.new_wasm_hash.clone());
+        env.storage().persistent().remove(&key);
+        env.events().publish(
+            (Symbol::new(env, "upgrade_executed"), proposal_id),
+            proposal.new_wasm_hash,
+        );
     }
 
     // ----------------------------------------------------------
@@ -1370,10 +1537,12 @@ impl ChainSettleContract {
             .instance()
             .get(&DataKey::AllowedTokens)
             .unwrap_or_else(|| Vec::new(&env));
-        allowed.push_back(token);
+        allowed.push_back(token.clone());
         env.storage()
             .instance()
             .set(&DataKey::AllowedTokens, &allowed);
+        env.events()
+            .publish((Symbol::new(&env, "allowed_token_added"),), token);
     }
 
     pub fn remove_allowed_token(env: Env, token: Address) {
@@ -1403,6 +1572,17 @@ impl ChainSettleContract {
         env.storage()
             .instance()
             .set(&DataKey::AllowedTokens, &new_list);
+        env.events()
+            .publish((Symbol::new(&env, "allowed_token_removed"),), token);
+    }
+
+    /// Returns the current token whitelist. An empty list means all tokens are
+    /// accepted (open mode) — see the whitelist check in `create_shipment`.
+    pub fn get_allowed_tokens(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::AllowedTokens)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     // ----------------------------------------------------------
@@ -1555,7 +1735,8 @@ impl ChainSettleContract {
             panic!("total amount exceeds maximum shipment value");
         }
 
-        // Enforce token whitelist when non-empty.
+        // Enforce token whitelist when non-empty (#161: multi-token support — XLM, EURC,
+        // USDC, or any other SAC-wrapped asset the admin has approved).
         if ctx.allowed_tokens.len() > 0 {
             let mut found = false;
             for i in 0..ctx.allowed_tokens.len() {
@@ -1565,7 +1746,7 @@ impl ChainSettleContract {
                 }
             }
             if !found {
-                panic!("unauthorized");
+                panic!("token is not in the approved whitelist");
             }
         }
 
@@ -1878,6 +2059,15 @@ impl ChainSettleContract {
                 env.ledger().sequence(),
                 shipment.metadata_hash.clone(),
             ),
+        );
+        Self::emit_shipment_created(
+            &env,
+            &shipment_id,
+            &shipment.buyers.get(0).unwrap(),
+            &shipment.supplier,
+            &shipment.arbiter,
+            &shipment.token,
+            shipment.total_amount,
         );
 
         shipment_id
@@ -2295,11 +2485,18 @@ impl ChainSettleContract {
             (event_topic, shipment_id.clone()),
             (
                 milestone_index,
-                proof_hash_for_event,
+                proof_hash_for_event.clone(),
                 proof_type,
                 caller,
                 current_ledger,
             ),
+        );
+        Self::emit_milestone_proof_submitted(
+            &env,
+            &shipment_id,
+            milestone_index,
+            &proof_hash_for_event,
+            &shipment.supplier,
         );
     }
 
@@ -2572,6 +2769,7 @@ impl ChainSettleContract {
                     );
                 }
 
+                Self::emit_shipment_completed(&env, &shipment_id, shipment.released_amount);
             }
 
             // Decrement total escrowed value (net of any advance already deducted).
@@ -2607,6 +2805,7 @@ impl ChainSettleContract {
                     remaining_amount,
                 ),
             );
+            Self::emit_milestone_confirmed(&env, &shipment_id, milestone_index, payment);
         }
     }
 
@@ -2742,6 +2941,7 @@ impl ChainSettleContract {
                 ShipmentStatus::Completed,
                 &shipment_id,
             );
+            Self::emit_shipment_completed(&env, &shipment_id, shipment.released_amount);
         }
 
         // Decrement total escrowed value (net of any advance already deducted).
@@ -2767,6 +2967,7 @@ impl ChainSettleContract {
             ),
             (milestone_index, payment, fee_amount),
         );
+        Self::emit_milestone_confirmed(&env, &shipment_id, milestone_index, payment);
     }
 
     // ----------------------------------------------------------
@@ -2899,6 +3100,7 @@ impl ChainSettleContract {
                     remaining_amount,
                 ),
             );
+            Self::emit_milestone_confirmed(&env, &shipment_id, idx, payment);
         }
 
         if Self::all_milestones_done(&shipment) {
@@ -2926,6 +3128,7 @@ impl ChainSettleContract {
                 ShipmentStatus::Completed,
                 &shipment_id,
             );
+            Self::emit_shipment_completed(&env, &shipment_id, shipment.released_amount);
         }
 
         env.storage()
@@ -3071,6 +3274,7 @@ impl ChainSettleContract {
             (Symbol::new(&env, "dispute_raised"), shipment_id.clone()),
             milestone_index,
         );
+        Self::emit_dispute_opened(&env, &shipment_id, milestone_index, &buyer);
     }
 
     // ----------------------------------------------------------
@@ -3261,8 +3465,9 @@ impl ChainSettleContract {
                 Symbol::new(&env, "partial_dispute_raised"),
                 shipment_id.clone(),
             ),
-            (milestone_index, contested_percent, buyer),
+            (milestone_index, contested_percent, buyer.clone()),
         );
+        Self::emit_dispute_opened(&env, &shipment_id, milestone_index, &buyer);
     }
 
     // ----------------------------------------------------------
@@ -3444,6 +3649,7 @@ impl ChainSettleContract {
                 ShipmentStatus::Completed,
                 &shipment_id,
             );
+            Self::emit_shipment_completed(&env, &shipment_id, shipment.released_amount);
         }
 
         env.storage()
@@ -3474,6 +3680,12 @@ impl ChainSettleContract {
                 remaining_amount,
             ),
         );
+        let resolution = if approve {
+            Symbol::new(&env, "supplier")
+        } else {
+            Symbol::new(&env, "buyer")
+        };
+        Self::emit_dispute_resolved(&env, &shipment_id, milestone_index, resolution, &arbiter);
     }
 
     // ----------------------------------------------------------
@@ -3609,6 +3821,7 @@ impl ChainSettleContract {
             (Symbol::new(&env, "shipment_cancelled"), shipment_id.clone()),
             (refund, cancel_fee, buyer.clone(), env.ledger().sequence()),
         );
+        Self::emit_shipment_cancelled(&env, &shipment_id, refund);
     }
 
     // ----------------------------------------------------------
@@ -3732,6 +3945,7 @@ impl ChainSettleContract {
             ),
             (penalty, refund),
         );
+        Self::emit_shipment_cancelled(&env, &shipment_id, refund);
     }
 
     // ----------------------------------------------------------
@@ -4237,6 +4451,7 @@ impl ChainSettleContract {
                 ShipmentStatus::Completed,
                 &shipment_id,
             );
+            Self::emit_shipment_completed(&env, &shipment_id, shipment.released_amount);
         }
 
         // Decrement total escrowed value.
@@ -4262,6 +4477,7 @@ impl ChainSettleContract {
             ),
             (milestone_index, payment, fee_amount, penalty_deducted),
         );
+        Self::emit_milestone_confirmed(&env, &shipment_id, milestone_index, payment);
     }
 
     // ----------------------------------------------------------
@@ -4526,6 +4742,7 @@ impl ChainSettleContract {
                 ShipmentStatus::Completed,
                 &shipment_id,
             );
+            Self::emit_shipment_completed(&env, &shipment_id, shipment.released_amount);
         }
 
         env.storage()
@@ -4539,7 +4756,14 @@ impl ChainSettleContract {
         };
         env.events().publish(
             (Symbol::new(&env, "dispute_auto_resolved"), shipment_id.clone()),
-            (milestone_index, resolution_sym),
+            (milestone_index, resolution_sym.clone()),
+        );
+        Self::emit_dispute_resolved(
+            &env,
+            &shipment_id,
+            milestone_index,
+            resolution_sym,
+            &shipment.arbiter,
         );
     }
 
@@ -5355,6 +5579,120 @@ impl ChainSettleContract {
         Self::remove_from_status_index(env, from, shipment_id);
         Self::add_to_status_index(env, to, shipment_id);
     }
+
+    // ----------------------------------------------------------
+    // #167 STRUCTURED EVENT LOG
+    // ----------------------------------------------------------
+    // Canonical, indexer-friendly events for the seven core shipment lifecycle
+    // transitions. Each uses the two-topic form (Symbol("chainsettle"), Symbol(name))
+    // with a Map<Symbol, Val> data payload, per docs/events.md. These are emitted
+    // alongside the existing, more granular per-function events (which retain
+    // additional fields such as fees and ledger numbers for backward compatibility).
+
+    fn emit_shipment_created(
+        env: &Env,
+        shipment_id: &String,
+        buyer: &Address,
+        supplier: &Address,
+        arbiter: &Address,
+        token: &Address,
+        amount: i128,
+    ) {
+        let mut data: Map<Symbol, Val> = Map::new(env);
+        data.set(Symbol::new(env, "shipment_id"), shipment_id.into_val(env));
+        data.set(Symbol::new(env, "buyer"), buyer.into_val(env));
+        data.set(Symbol::new(env, "supplier"), supplier.into_val(env));
+        data.set(Symbol::new(env, "arbiter"), arbiter.into_val(env));
+        data.set(Symbol::new(env, "token"), token.into_val(env));
+        data.set(Symbol::new(env, "amount"), amount.into_val(env));
+        env.events().publish(
+            (Symbol::new(env, "chainsettle"), Symbol::new(env, "shipment_created")),
+            data,
+        );
+    }
+
+    fn emit_milestone_proof_submitted(
+        env: &Env,
+        shipment_id: &String,
+        milestone_index: u32,
+        proof_hash: &String,
+        supplier: &Address,
+    ) {
+        let mut data: Map<Symbol, Val> = Map::new(env);
+        data.set(Symbol::new(env, "shipment_id"), shipment_id.into_val(env));
+        data.set(Symbol::new(env, "milestone_index"), milestone_index.into_val(env));
+        data.set(Symbol::new(env, "proof_hash"), proof_hash.into_val(env));
+        data.set(Symbol::new(env, "supplier"), supplier.into_val(env));
+        env.events().publish(
+            (Symbol::new(env, "chainsettle"), Symbol::new(env, "proof_submitted")),
+            data,
+        );
+    }
+
+    fn emit_milestone_confirmed(
+        env: &Env,
+        shipment_id: &String,
+        milestone_index: u32,
+        payout_amount: i128,
+    ) {
+        let mut data: Map<Symbol, Val> = Map::new(env);
+        data.set(Symbol::new(env, "shipment_id"), shipment_id.into_val(env));
+        data.set(Symbol::new(env, "milestone_index"), milestone_index.into_val(env));
+        data.set(Symbol::new(env, "payout_amount"), payout_amount.into_val(env));
+        env.events().publish(
+            (Symbol::new(env, "chainsettle"), Symbol::new(env, "milestone_confirmed")),
+            data,
+        );
+    }
+
+    fn emit_dispute_opened(env: &Env, shipment_id: &String, milestone_index: u32, buyer: &Address) {
+        let mut data: Map<Symbol, Val> = Map::new(env);
+        data.set(Symbol::new(env, "shipment_id"), shipment_id.into_val(env));
+        data.set(Symbol::new(env, "milestone_index"), milestone_index.into_val(env));
+        data.set(Symbol::new(env, "buyer"), buyer.into_val(env));
+        env.events().publish(
+            (Symbol::new(env, "chainsettle"), Symbol::new(env, "dispute_opened")),
+            data,
+        );
+    }
+
+    fn emit_dispute_resolved(
+        env: &Env,
+        shipment_id: &String,
+        milestone_index: u32,
+        resolution: Symbol,
+        resolver: &Address,
+    ) {
+        let mut data: Map<Symbol, Val> = Map::new(env);
+        data.set(Symbol::new(env, "shipment_id"), shipment_id.into_val(env));
+        data.set(Symbol::new(env, "milestone_index"), milestone_index.into_val(env));
+        data.set(Symbol::new(env, "resolution"), resolution.into_val(env));
+        data.set(Symbol::new(env, "resolver"), resolver.into_val(env));
+        env.events().publish(
+            (Symbol::new(env, "chainsettle"), Symbol::new(env, "dispute_resolved")),
+            data,
+        );
+    }
+
+    fn emit_shipment_cancelled(env: &Env, shipment_id: &String, refund_amount: i128) {
+        let mut data: Map<Symbol, Val> = Map::new(env);
+        data.set(Symbol::new(env, "shipment_id"), shipment_id.into_val(env));
+        data.set(Symbol::new(env, "refund_amount"), refund_amount.into_val(env));
+        env.events().publish(
+            (Symbol::new(env, "chainsettle"), Symbol::new(env, "shipment_cancelled")),
+            data,
+        );
+    }
+
+    fn emit_shipment_completed(env: &Env, shipment_id: &String, total_paid: i128) {
+        let mut data: Map<Symbol, Val> = Map::new(env);
+        data.set(Symbol::new(env, "shipment_id"), shipment_id.into_val(env));
+        data.set(Symbol::new(env, "total_paid"), total_paid.into_val(env));
+        env.events().publish(
+            (Symbol::new(env, "chainsettle"), Symbol::new(env, "shipment_completed")),
+            data,
+        );
+    }
 }
 
 pub mod constants;
@@ -5377,6 +5715,10 @@ mod test_arbiter_pool;
 mod test_arbiter_security;
 mod test_boundary_validation;
 mod test_supplier_collateral;
+mod test_partial_cancellation;
+mod test_event_schema;
+mod test_multi_token;
+mod test_upgrade_multisig;
 // mod test_oracle;
 // mod test_upgrade;
 // mod test_concurrent_disputes;
