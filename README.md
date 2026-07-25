@@ -357,6 +357,21 @@ Admin-only. Sets the dispute escalation threshold in ledgers (`0` = disabled). `
 Cancels the shipment if no milestones have been confirmed yet.
 Returns all locked funds to the buyer.
 
+### `top_up_escrow(buyer, shipment_id, additional_amount)`
+Buyer adds more funds to an already active shipment's escrow.
+Use this when the shipment scope or expected payout increases after
+creation, for example:
+
+- the order was expanded and the buyer wants to cover the extra cost
+- milestone payments need to be increased before the shipment finishes
+- the buyer wants to add a buffer so later confirmations do not run short
+
+The call is buyer-only and only works while the shipment is `Active`.
+It transfers the additional USDC into the contract, increases the
+shipment's `total_amount`, and leaves the milestone percentages unchanged.
+That means every milestone keeps the same percentage split, but each
+milestone's absolute payout becomes larger because the escrow base grew.
+
 ---
 
 ### Partial Disputes & Escalation Checks
