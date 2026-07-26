@@ -532,6 +532,24 @@ admin has never called `set_max_advance_percent`. `request_advance`
 reads this value and panics with `AdvanceExceedsMax` if the requested
 `advance_percent` is greater than the cap.
 
+### Referral fee program
+The referral fee mechanism lets an admin reward a referrer when a shipment
+completes successfully. The fee is paid out of the protocol fee that would
+otherwise go to the platform treasury, so the referrer receives a share of
+that fee instead of the full amount being retained by the contract.
+
+- `set_referral_fee_bps(admin, bps: u32)` — admin-only. Sets the referral
+  fee as a basis-point value between `0` and `10_000`.
+- `get_referral_fee_bps() → u32` *(read-only)* — returns the current
+  referral fee setting, defaulting to `500` bps (`5%`) if no value has
+  been configured yet.
+
+A basis point (bps) is one-hundredth of a percent: `1 bps = 0.01%`, and
+`10_000 bps = 100%`. The contract computes the referral payout as a
+fraction of the total protocol fee using the configured bps value, so a
+setting of `500` bps means the referrer receives `5%` of that fee on
+shipment completion.
+
 ### `set_max_concurrent_disputes(admin, limit: u32)`
 Admin-only. Sets how many milestones on a single shipment can be under
 dispute at the same time. Defaults to `1` if never called. `raise_dispute`
