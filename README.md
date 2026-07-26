@@ -544,6 +544,30 @@ unbounded number of simultaneous disputes, tying up several payment
 releases at once and dumping all of that resolution work on one arbiter
 at the same time.
 
+### Address Blacklisting
+
+Admins can ban misbehaving addresses from participating in new shipments. A
+blacklisted address is blocked from being included in a `create_shipment` call
+in **any** role — buyer, supplier, logistics, or arbiter. If any of those
+parties is on the blacklist, `create_shipment` panics with `"unauthorized"`.
+Blacklisting does not touch shipments that already exist; it only prevents the
+address from appearing in future ones.
+
+#### `blacklist_address(admin, address, reason_hash: BytesN<32>)`
+Admin-only. Adds `address` to the blacklist. The `reason_hash` is a 32-byte
+hash committing to the reason the address was banned (for example, the hash of
+an off-chain incident report or governance note). It is stored on-chain
+alongside the blacklist entry so the ban can be audited and justified after the
+fact without publishing the underlying details. The action is recorded in the
+admin audit trail as `address_blacklisted`.
+
+#### `remove_from_blacklist(admin, address)`
+Admin-only. Removes `address` from the blacklist, restoring its ability to take
+part in new shipments. Recorded in the audit trail as `address_unblacklisted`.
+
+#### `is_blacklisted(address) → bool` *(read-only)*
+Returns `true` if `address` is currently blacklisted, `false` otherwise.
+
 ### Admin Action Audit Trail
 
 The contract maintains an immutable audit log of all administrative actions
