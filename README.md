@@ -544,6 +544,16 @@ unbounded number of simultaneous disputes, tying up several payment
 releases at once and dumping all of that resolution work on one arbiter
 at the same time.
 
+### Arbiter Pool & Assignment
+
+ChainSettle supports an active pool of trusted arbiters, allowing for automatic assignment to distribute the dispute resolution workload.
+
+- `add_arbiter_to_pool(admin, arbiter: Address)`: Admin-only. Adds an arbiter address to the active pool.
+- `remove_arbiter_from_pool(admin, arbiter: Address)`: Admin-only. Removes an arbiter from the active pool.
+- `get_arbiter_pool() → Vec<Address>` *(read-only)*: Returns the current list of active arbiters in the pool.
+
+When creating a shipment, a buyer must specify an arbiter. By querying `get_arbiter_pool()`, a frontend or backend service can automatically select an arbiter using a round-robin assignment strategy. This ensures that disputes are evenly distributed among all trusted arbiters in the pool rather than overloading a single resolver.
+
 ### Admin Action Audit Trail
 
 The contract maintains an immutable audit log of all administrative actions
