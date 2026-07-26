@@ -544,29 +544,15 @@ unbounded number of simultaneous disputes, tying up several payment
 releases at once and dumping all of that resolution work on one arbiter
 at the same time.
 
-### Address Blacklisting
+### Arbiter Pool & Assignment
 
-Admins can ban misbehaving addresses from participating in new shipments. A
-blacklisted address is blocked from being included in a `create_shipment` call
-in **any** role — buyer, supplier, logistics, or arbiter. If any of those
-parties is on the blacklist, `create_shipment` panics with `"unauthorized"`.
-Blacklisting does not touch shipments that already exist; it only prevents the
-address from appearing in future ones.
+ChainSettle supports an active pool of trusted arbiters, allowing for automatic assignment to distribute the dispute resolution workload.
 
-#### `blacklist_address(admin, address, reason_hash: BytesN<32>)`
-Admin-only. Adds `address` to the blacklist. The `reason_hash` is a 32-byte
-hash committing to the reason the address was banned (for example, the hash of
-an off-chain incident report or governance note). It is stored on-chain
-alongside the blacklist entry so the ban can be audited and justified after the
-fact without publishing the underlying details. The action is recorded in the
-admin audit trail as `address_blacklisted`.
+- `add_arbiter_to_pool(admin, arbiter: Address)`: Admin-only. Adds an arbiter address to the active pool.
+- `remove_arbiter_from_pool(admin, arbiter: Address)`: Admin-only. Removes an arbiter from the active pool.
+- `get_arbiter_pool() → Vec<Address>` *(read-only)*: Returns the current list of active arbiters in the pool.
 
-#### `remove_from_blacklist(admin, address)`
-Admin-only. Removes `address` from the blacklist, restoring its ability to take
-part in new shipments. Recorded in the audit trail as `address_unblacklisted`.
-
-#### `is_blacklisted(address) → bool` *(read-only)*
-Returns `true` if `address` is currently blacklisted, `false` otherwise.
+When creating a shipment, a buyer must specify an arbiter. By querying `get_arbiter_pool()`, a frontend or backend service can automatically select an arbiter using a round-robin assignment strategy. This ensures that disputes are evenly distributed among all trusted arbiters in the pool rather than overloading a single resolver.
 
 ### Admin Action Audit Trail
 
