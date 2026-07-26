@@ -1917,7 +1917,7 @@ impl ChainSettleContract {
         Self::append_audit_entry(
             &env,
             &mut shipment,
-            buyers.get(0).unwrap(),
+            primary_buyer,
             Symbol::new(&env, "shipment_created"),
             Symbol::new(&env, "create_shipment"),
         );
@@ -3262,6 +3262,9 @@ impl ChainSettleContract {
                 .remove(&pool_flag_key);
         }
 
+        shipment.open_dispute_count += 1;
+        // Cancel any holdback window.
+        milestone.release_after_ledger = 0;
         milestone.status = MilestoneStatus::Disputed;
 
         Self::append_audit_entry(
@@ -4697,7 +4700,7 @@ impl ChainSettleContract {
         Self::append_audit_entry(
             &env,
             &mut shipment,
-            buyer.clone(),
+            admin.clone(),
             Symbol::new(&env, "shipment_cancelled"),
             Symbol::new(&env, "cancel_shipment"),
         );
@@ -4734,6 +4737,7 @@ impl ChainSettleContract {
         Self::assert_not_paused(&env);
 
         let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
+        let arbiter = shipment.arbiter.clone();
 
         if shipment.status != ShipmentStatus::Active {
             panic!("shipment is not active");
@@ -4834,7 +4838,7 @@ impl ChainSettleContract {
         Self::append_audit_entry(
             &env,
             &mut shipment,
-            shipment.arbiter.clone(),
+            arbiter.clone(),
             Symbol::new(&env, "dispute_auto_resolved"),
             Symbol::new(&env, "resolve_dispute_timeout"),
         );
@@ -4845,7 +4849,7 @@ impl ChainSettleContract {
             Self::append_audit_entry(
                 &env,
                 &mut shipment,
-                shipment.arbiter.clone(),
+                arbiter.clone(),
                 Symbol::new(&env, "shipment_completed"),
                 Symbol::new(&env, "resolve_dispute_timeout"),
             );

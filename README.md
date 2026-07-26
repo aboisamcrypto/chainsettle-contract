@@ -562,6 +562,39 @@ unbounded number of simultaneous disputes, tying up several payment
 releases at once and dumping all of that resolution work on one arbiter
 at the same time.
 
+### Supplier Address Whitelisting
+
+The supplier-address whitelist lets an admin operate a closed or curated
+supplier network. It is enforced only when a new shipment is created:
+when the list is non-empty, the shipment's `supplier` must be on it or
+`create_shipment` panics with `"unauthorized"`. It does not grant an
+address any additional permissions and does not restrict buyers, logistics
+providers, or arbiters. Existing shipments are unaffected if their supplier
+is later added to or removed from the list.
+
+The whitelist is **open by default**. An empty list means every supplier is
+allowed; adding the first address switches the contract to restricted mode.
+Removing the last address switches it back to open mode.
+
+| Function | Who | Behaviour |
+|---|---|---|
+| `add_to_whitelist(admin, address)` | Admin only | Adds `address` as an approved supplier. Adding an address already on the list is a no-op. |
+| `remove_from_whitelist(admin, address)` | Admin only | Removes `address` from the approved suppliers. It does **not** blacklist the address. |
+| `is_whitelisted(address) → bool` | Anyone (read-only) | Returns `true` when the address is listed, or when the list is empty (open mode). |
+
+#### Interaction with address blacklisting
+
+Whitelisting is an allowlist for the **supplier role**; blacklisting is a
+denylist for **every role** in a new shipment (buyer, supplier, logistics, or
+arbiter). Blacklisting takes precedence: a supplier that is both whitelisted
+and blacklisted cannot be used to create a shipment. Conversely, removing an
+address from the blacklist only removes that denial; the supplier must still
+be on a non-empty whitelist to be eligible. Neither control changes an
+already-created shipment.
+
+This supplier whitelist is separate from the approved-token whitelist and the
+per-milestone proof content-type whitelist.
+
 ### Arbiter Pool & Assignment
 
 ChainSettle supports an active pool of trusted arbiters, allowing for automatic assignment to distribute the dispute resolution workload.

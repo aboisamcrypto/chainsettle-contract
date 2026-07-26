@@ -7,6 +7,18 @@
         "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4)",
         "detail": "Symbol(create_shipment)",
         "ledger": 0
+      },
+      {
+        "action": "Symbol(proof_submitted)",
+        "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4)",
+        "detail": "Symbol(submit_proof)",
+        "ledger": 0
+      },
+      {
+        "action": "Symbol(milestone_confirmed)",
+        "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4)",
+        "detail": "Symbol(confirm_milestone)",
+        "ledger": 0
       }
     ],
     "auto_confirm_ledgers": 0,
@@ -65,6 +77,30 @@
         "action": "Symbol(shipment_created)",
         "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4)",
         "detail": "Symbol(create_shipment)",
+        "ledger": 0
+      },
+      {
+        "action": "Symbol(proof_submitted)",
+        "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4)",
+        "detail": "Symbol(submit_proof)",
+        "ledger": 0
+      },
+      {
+        "action": "Symbol(milestone_confirmed)",
+        "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4)",
+        "detail": "Symbol(confirm_milestone)",
+        "ledger": 0
+      },
+      {
+        "action": "Symbol(proof_submitted)",
+        "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4)",
+        "detail": "Symbol(submit_proof)",
+        "ledger": 0
+      },
+      {
+        "action": "Symbol(dispute_raised)",
+        "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4)",
+        "detail": "Symbol(raise_dispute)",
         "ledger": 0
       }
     ],
@@ -125,6 +161,36 @@
         "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4)",
         "detail": "Symbol(create_shipment)",
         "ledger": 0
+      },
+      {
+        "action": "Symbol(proof_submitted)",
+        "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4)",
+        "detail": "Symbol(submit_proof)",
+        "ledger": 0
+      },
+      {
+        "action": "Symbol(milestone_confirmed)",
+        "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4)",
+        "detail": "Symbol(confirm_milestone)",
+        "ledger": 0
+      },
+      {
+        "action": "Symbol(proof_submitted)",
+        "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4)",
+        "detail": "Symbol(submit_proof)",
+        "ledger": 0
+      },
+      {
+        "action": "Symbol(dispute_raised)",
+        "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4)",
+        "detail": "Symbol(raise_dispute)",
+        "ledger": 0
+      },
+      {
+        "action": "Symbol(dispute_resolved)",
+        "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5)",
+        "detail": "Symbol(resolve_dispute)",
+        "ledger": 0
       }
     ],
     "auto_confirm_ledgers": 0,
@@ -183,6 +249,12 @@
         "action": "Symbol(shipment_created)",
         "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4)",
         "detail": "Symbol(create_shipment)",
+        "ledger": 0
+      },
+      {
+        "action": "Symbol(proof_submitted)",
+        "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4)",
+        "detail": "Symbol(submit_proof)",
         "ledger": 0
       }
     ],
