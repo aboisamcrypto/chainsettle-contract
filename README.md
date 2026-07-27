@@ -15,6 +15,8 @@ Architecture
 Data Structures
 Contract Functions
 rebalance_milestones
+Partial Disputes & Escalation Checks
+Advance Payment Lifecycle
 Admin Succession & Emergency Recovery
 Events
 Error Codes
@@ -413,15 +415,7 @@ stellar contract invoke \
   --limit 10000000000000 \
   --window_ledgers 1000
 ```
-`set_max_advance_percent(admin, percent: u32)`
-Admin-only. Sets the maximum percentage of a milestone's payment that a
-supplier may request as an advance via `request_advance`. `percent` must
-not exceed `100`, or the call panics with `"max advance percent must not exceed 100"`.
-`get_max_advance_percent() → u32` (read-only)
-Returns the current advance percentage cap, defaulting to `30` if the
-admin has never called `set_max_advance_percent`. `request_advance`
-reads this value and panics with `AdvanceExceedsMax` if the requested
-`advance_percent` is greater than the cap.
+
 Referral fee program
 The referral fee mechanism lets an admin reward a referrer when a shipment
 completes successfully. The fee is paid out of the protocol fee that would
@@ -447,6 +441,100 @@ shipment all at once. Without a cap, one shipment could rack up an
 unbounded number of simultaneous disputes, tying up several payment
 releases at once and dumping all of that resolution work on one arbiter
 at the same time.
+---
+Advance Payment Lifecycle
+The advance payment flow lets a supplier request early access to a
+portion of a milestone's payment before submitting proof. This is useful
+when the supplier needs working capital (e.g. to purchase materials or
+cover logistics costs) before the milestone can be fulfilled.
+`set_max_advance_percent(admin, percent: u32)` — admin-only. Sets the
+maximum percentage of a milestone's payment that a supplier may request
+as an advance. `percent` must not exceed `100`. Defaults to `30` if the
+admin has never called this function.
+`get_max_advance_percent() → u32` (read-only) — returns the current
+advance percentage cap, defaulting to `30`.
+`request_advance(caller, shipment_id, milestone_index, advance_percent)`
+— supplier-only. Requests an advance draw of up to `advance_percent` of
+the milestone's payment value. The milestone must be in `Pending` status.
+`advance_percent` is capped by the admin-configured `max_advance_percent`;
+if it exceeds the cap, the call panics with `"AdvanceExceedsMax"`.
+A milestone may have only one pending advance request at a time. If an
+earlier request was already approved, a second request panics with
+`"AdvanceAlreadyApproved"`. The buyer can later deny a pending request
+simply by not approving it — there is no explicit `deny_advance` function;
+a new `request_advance` overwrites the previous unapproved request.
+Emits `advance_requested` on success.
+`approve_advance(buyer, shipment_id, milestone_index)` — buyer-only.
+Approves a pending advance request for the given milestone. The contract
+immediately transfers the advance amount (`milestone_payment * advance_percent / 100`)
+from escrow to the supplier. The shipment's `total_advanced_amount` is
+incremented, and the total escrowed balance is decremented accordingly.
+After approval, the advance record is marked `approved` so the same
+request cannot be approved twice. The advance amount is deducted from
+the milestone's payout when the milestone is later confirmed (see
+`confirm_milestone` / `batch_confirm_milestones`), so the supplier
+receives only the remaining balance at that point. Emits
+`advance_approved` on success.
+Deduction on confirmation:
+When the buyer confirms a milestone that has an approved advance, the
+confirmation flow calls `consume_advance_for_milestone` which reads the
+stored `AdvanceRequest`, returns the already-advanced amount, removes
+the request from storage, and adjusts the shipment's
+`total_advanced_amount`. The net payment to the supplier during
+confirmation is therefore `milestone_payment - advance_amount` (minus
+any applicable protocol fees). If the milestone has no approved advance,
+the full milestone payment is released as normal.
+Constraints:
+- Buyer raises a partial dispute: If an approved advance exists for a
+  milestone, `raise_partial_dispute` panics with `"partial dispute not
+  allowed when an approved advance exists for this milestone"`. The
+  buyer must use the full `raise_dispute` flow instead.
+- Milestone status: The milestone must be `Pending` when the advance is
+  requested. Once proof has been submitted (`ProofSubmitted`), the
+  advance window is closed and the supplier must wait for confirmation.
+- Escrow coverage: The advance is paid from escrowed funds, so the
+  shipment must have sufficient unlocked balance. The total advanced
+  amount across all milestones is tracked in
+  `shipment.total_advanced_amount` and is excluded from the recoverable
+  escrow balance used by `emergency_recover`, `supplier_cancel`, and
+  the `get_escrow_balance` view.
+Example lifecycle:
+```bash
+# 1. Supplier requests a 20% advance on milestone 0
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source supplier-account \
+  --network testnet \
+  -- request_advance \
+  --caller <SUPPLIER_ADDRESS> \
+  --shipment_id "SHIP-001" \
+  --milestone_index 0 \
+  --advance_percent 20
+
+# 2. Buyer approves the advance — funds are transferred immediately
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source buyer-account \
+  --network testnet \
+  -- approve_advance \
+  --buyer <BUYER_ADDRESS> \
+  --shipment_id "SHIP-001" \
+  --milestone_index 0
+
+# 3. Later, buyer confirms the milestone — the advance is deducted
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source buyer-account \
+  --network testnet \
+  -- confirm_milestone \
+  --caller <BUYER_ADDRESS> \
+  --shipment_id "SHIP-001" \
+  --milestone_index 0
+```
+The supplier receives the advance amount at step 2 and only the remaining
+balance at step 3. If the milestone payment is 100 USDC with a 20 %
+advance, the supplier gets 20 USDC at step 2 and roughly 80 USDC (minus
+fees) at step 3.
 Supplier Address Whitelisting
 The supplier-address whitelist lets an admin operate a closed or curated
 supplier network. It is enforced only when a new shipment is created:
