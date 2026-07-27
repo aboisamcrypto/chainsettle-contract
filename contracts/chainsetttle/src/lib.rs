@@ -326,6 +326,46 @@ pub struct ReputationScore {
     pub cancelled: u32,
 }
 
+/// Global policy: suppliers meeting these thresholds skip the proof confirmation cooldown.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ReputationFastTrack {
+    pub min_completed: u32,
+    /// Max (disputed / completed) ratio in basis points (e.g. 500 = 5%).
+    pub max_disputed_ratio_bps: u32,
+}
+
+/// Pending mutual-consent pause or resume request for a single shipment.
+#[contracttype]
+#[derive(Clone)]
+pub struct ShipmentPauseRequest {
+    pub requester: Address,
+    /// false = pause request, true = resume request
+    pub is_resume: bool,
+}
+
+/// Informational note attached to a milestone (no effect on status/payments).
+#[contracttype]
+#[derive(Clone)]
+pub struct MilestoneNote {
+    pub author: Address,
+    pub note: String,
+    pub ledger: u32,
+}
+
+/// Compact summary retained after a finished shipment is archived.
+#[contracttype]
+#[derive(Clone)]
+pub struct ArchivedShipment {
+    pub id: String,
+    pub buyer: Address,
+    pub supplier: Address,
+    pub status: ShipmentStatus,
+    pub total_amount: i128,
+    pub released_amount: i128,
+    pub completed_at: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct ArbiterStats {
@@ -612,6 +652,30 @@ pub enum DataKeyExt {
     // -- #298 Governance timelock
     TimelockDuration,
     PendingParamChange(Symbol),
+
+    // ── Reputation fast-track ──────────────────────────────────
+    /// Global reputation fast-track policy (absent = disabled).
+    ReputationFastTrack,
+
+    // ── Per-shipment mutual-consent pause ──────────────────────
+    /// Whether a shipment is currently paused.
+    ShipmentPaused(String),
+    /// Pending pause/resume consent request.
+    ShipmentPauseRequest(String),
+    /// Ledger at which the current pause began (for deadline freeze).
+    ShipmentPausedAt(String),
+
+    // ── Milestone notes ────────────────────────────────────────
+    /// Bounded per-milestone notes Vec (cap 10).
+    MilestoneNotes(String, u32),
+
+    // ── Shipment archival ──────────────────────────────────────
+    /// Compact archived shipment record.
+    ArchivedShipment(String),
+    /// Ledgers after finish before a shipment may be archived (0 = archival disabled).
+    ArchiveThreshold,
+    /// Ledger when shipment entered Completed/Cancelled.
+    ShipmentFinishedAt(String),
 }
 
 // ============================================================
@@ -676,6 +740,9 @@ pub enum ChainSettleError {
 
 /// Ledgers equivalent to approximately 2 years (≈ 5 s/ledger × 86 400 s/day × 365 days × 2).
 const RECOVERY_THRESHOLD_LEDGERS: u32 = 12_614_400;
+
+/// Max notes retained per milestone (oldest dropped on overflow).
+const MAX_MILESTONE_NOTES: u32 = 10;
 
 // ============================================================
 // CONTRACT
@@ -2535,6 +2602,7 @@ impl ChainSettleContract {
         if shipment.status != ShipmentStatus::Active {
             panic!("shipment is not active");
         }
+        Self::assert_shipment_not_paused(&env, &shipment_id);
         if milestone_index as usize >= shipment.milestones.len() as usize {
             panic!("invalid milestone index");
         }
@@ -2575,6 +2643,8 @@ impl ChainSettleContract {
                 panic!("MilestoneOutOfOrder");
             }
         }
+
+        Self::assert_shipment_not_paused(&env, &shipment_id);
 
         let current_ledger = env.ledger().sequence();
         let is_resubmission = milestone.proof_hash.len() > 0;
@@ -2659,8 +2729,11 @@ impl ChainSettleContract {
             panic!("milestone proof not yet submitted");
         }
 
+        Self::assert_shipment_not_paused(&env, &shipment_id);
+
         let cooldown = Self::get_confirmation_cooldown_internal(&env, &shipment_id);
-        if cooldown > 0 {
+        let fast_track = Self::is_fast_track_eligible_internal(&env, &shipment.supplier);
+        if cooldown > 0 && !fast_track {
             let proof_ledger = milestone.proof_submitted_ledger.unwrap_or(0);
             if env.ledger().sequence() < proof_ledger + cooldown {
                 panic!("confirmation cooldown not elapsed");
@@ -3192,7 +3265,10 @@ impl ChainSettleContract {
         }
         Self::assert_is_buyer(&shipment, &buyer);
 
+        Self::assert_shipment_not_paused(&env, &shipment_id);
+
         let cooldown = Self::get_confirmation_cooldown_internal(&env, &shipment_id);
+        let fast_track = Self::is_fast_track_eligible_internal(&env, &shipment.supplier);
 
         // Validate all indices and statuses before mutating anything.
         for i in 0..milestone_indices.len() {
@@ -3204,7 +3280,7 @@ impl ChainSettleContract {
             if m.status != MilestoneStatus::ProofSubmitted {
                 panic!("milestone proof not yet submitted");
             }
-            if cooldown > 0 {
+            if cooldown > 0 && !fast_track {
                 let proof_ledger = m.proof_submitted_ledger.unwrap_or(0);
                 if env.ledger().sequence() < proof_ledger + cooldown {
                     panic!("confirmation cooldown not elapsed");
@@ -3352,6 +3428,7 @@ impl ChainSettleContract {
         if shipment.status != ShipmentStatus::Active {
             panic!("shipment is not active");
         }
+        Self::assert_shipment_not_paused(&env, &shipment_id);
         Self::require_buyer_auth(&shipment, &buyer);
 
         // Dispute cooldown check.
@@ -3718,7 +3795,11 @@ impl ChainSettleContract {
     /// and transferred to the arbiter address whenever a monetary disbursement occurs.
     
     pub(crate) fn applicable_arbiter_fee_bps(env: &Env, contested_amount: i128, default_bps: u32) -> u32 {
-        let tiers = crate::storage::get_arbiter_fee_tiers(env);
+        let tiers: Vec<(i128, u32)> = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt::ArbiterFeeTiers)
+            .unwrap_or_else(|| Vec::new(env));
         if tiers.is_empty() {
             return default_bps;
         }
@@ -3879,14 +3960,22 @@ impl ChainSettleContract {
         }
 
         let resolution_ledgers = env.ledger().sequence() - milestone.dispute_opened_ledger.unwrap_or(env.ledger().sequence());
-        let mut arbiter_stats = crate::storage::get_arbiter_stats(&env, &arbiter);
+        let mut arbiter_stats: ArbiterStats = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt::ArbiterStats(arbiter.clone()))
+            .unwrap_or_default();
         if approve {
             arbiter_stats.resolved_approved += 1;
         } else {
             arbiter_stats.resolved_rejected += 1;
         }
-        arbiter_stats.total_resolution_ledgers += resolution_ledgers as u64;
-        crate::storage::set_arbiter_stats(&env, &arbiter, &arbiter_stats);
+        arbiter_stats.total_resolution_ledgers = arbiter_stats
+            .total_resolution_ledgers
+            .saturating_add(resolution_ledgers as u64);
+        env.storage()
+            .persistent()
+            .set(&DataKeyExt::ArbiterStats(arbiter.clone()), &arbiter_stats);
 
         shipment.milestones.set(milestone_index, milestone);
         shipment.open_dispute_count = shipment.open_dispute_count.saturating_sub(1);
@@ -5665,11 +5754,339 @@ impl ChainSettleContract {
     }
 
     // ----------------------------------------------------------
+    // REPUTATION FAST-TRACK
+    // ----------------------------------------------------------
+
+    /// Configure global reputation fast-track policy. Admin only.
+    /// Absent policy (default) keeps full confirmation-cooldown behaviour.
+    pub fn set_reputation_fast_track(
+        env: Env,
+        admin: Address,
+        min_completed: u32,
+        max_disputed_ratio_bps: u32,
+    ) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        if max_disputed_ratio_bps > 10_000 {
+            panic!("max_disputed_ratio_bps cannot exceed 10000");
+        }
+        let policy = ReputationFastTrack {
+            min_completed,
+            max_disputed_ratio_bps,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKeyExt::ReputationFastTrack, &policy);
+        env.events().publish(
+            (Symbol::new(&env, "reputation_fast_track_set"),),
+            (min_completed, max_disputed_ratio_bps),
+        );
+    }
+
+    /// Whether a supplier currently qualifies for proof-review fast-track.
+    pub fn is_fast_track_eligible(env: Env, supplier: Address) -> bool {
+        Self::is_fast_track_eligible_internal(&env, &supplier)
+    }
+
+    // ----------------------------------------------------------
+    // PER-SHIPMENT MUTUAL-CONSENT PAUSE
+    // ----------------------------------------------------------
+
+    /// Buyer or supplier requests a pause. No effect until the other party approves.
+    pub fn request_shipment_pause(env: Env, caller: Address, shipment_id: String) {
+        Self::assert_not_paused(&env);
+        caller.require_auth();
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+        if shipment.status != ShipmentStatus::Active {
+            panic!("shipment is not active");
+        }
+        Self::assert_buyer_or_supplier(&shipment, &caller);
+        if Self::is_shipment_paused_internal(&env, &shipment_id) {
+            panic!("shipment is already paused");
+        }
+        let req = ShipmentPauseRequest {
+            requester: caller.clone(),
+            is_resume: false,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKeyExt::ShipmentPauseRequest(shipment_id.clone()), &req);
+        env.events().publish(
+            (Symbol::new(&env, "shipment_pause_requested"), shipment_id),
+            caller,
+        );
+    }
+
+    /// Counterpart approves a pending pause request; freezes deadlines for this shipment.
+    pub fn approve_shipment_pause(env: Env, caller: Address, shipment_id: String) {
+        Self::assert_not_paused(&env);
+        caller.require_auth();
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+        if shipment.status != ShipmentStatus::Active {
+            panic!("shipment is not active");
+        }
+        Self::assert_buyer_or_supplier(&shipment, &caller);
+        if Self::is_shipment_paused_internal(&env, &shipment_id) {
+            panic!("shipment is already paused");
+        }
+        let req: ShipmentPauseRequest = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt::ShipmentPauseRequest(shipment_id.clone()))
+            .unwrap_or_else(|| panic!("no pending pause request"));
+        if req.is_resume {
+            panic!("no pending pause request");
+        }
+        if req.requester == caller {
+            panic!("cannot approve own pause request");
+        }
+        let now = env.ledger().sequence();
+        env.storage()
+            .persistent()
+            .set(&DataKeyExt::ShipmentPaused(shipment_id.clone()), &true);
+        env.storage()
+            .persistent()
+            .set(&DataKeyExt::ShipmentPausedAt(shipment_id.clone()), &now);
+        env.storage()
+            .persistent()
+            .remove(&DataKeyExt::ShipmentPauseRequest(shipment_id.clone()));
+        env.events().publish(
+            (Symbol::new(&env, "shipment_paused"), shipment_id),
+            (caller, now),
+        );
+    }
+
+    /// Either party requests resumption; the other must call again to approve (mutual consent).
+    pub fn resume_shipment(env: Env, caller: Address, shipment_id: String) {
+        Self::assert_not_paused(&env);
+        caller.require_auth();
+        let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
+        Self::assert_buyer_or_supplier(&shipment, &caller);
+        if !Self::is_shipment_paused_internal(&env, &shipment_id) {
+            panic!("shipment is not paused");
+        }
+
+        let key = DataKeyExt::ShipmentPauseRequest(shipment_id.clone());
+        if let Some(pending) = env
+            .storage()
+            .persistent()
+            .get::<DataKeyExt, ShipmentPauseRequest>(&key)
+        {
+            if pending.is_resume && pending.requester != caller {
+                // Counterpart approves — resume and unfreeze deadlines.
+                let paused_at: u32 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKeyExt::ShipmentPausedAt(shipment_id.clone()))
+                    .unwrap_or(env.ledger().sequence());
+                let delta = env.ledger().sequence().saturating_sub(paused_at);
+                Self::bump_shipment_deadlines_for_pause(&env, &mut shipment, delta);
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
+                env.storage()
+                    .persistent()
+                    .set(&DataKeyExt::ShipmentPaused(shipment_id.clone()), &false);
+                env.storage()
+                    .persistent()
+                    .remove(&DataKeyExt::ShipmentPausedAt(shipment_id.clone()));
+                env.storage().persistent().remove(&key);
+                env.events().publish(
+                    (Symbol::new(&env, "shipment_resumed"), shipment_id),
+                    (caller, env.ledger().sequence()),
+                );
+                return;
+            }
+            if pending.is_resume && pending.requester == caller {
+                panic!("resume already requested; awaiting counterpart");
+            }
+        }
+
+        let req = ShipmentPauseRequest {
+            requester: caller.clone(),
+            is_resume: true,
+        };
+        env.storage().persistent().set(&key, &req);
+        env.events().publish(
+            (Symbol::new(&env, "shipment_resume_requested"), shipment_id),
+            caller,
+        );
+    }
+
+    // ----------------------------------------------------------
+    // MILESTONE NOTES
+    // ----------------------------------------------------------
+
+    /// Append an informational note to a milestone (buyer/supplier/logistics). Cap = 10.
+    pub fn add_milestone_note(
+        env: Env,
+        caller: Address,
+        shipment_id: String,
+        milestone_index: u32,
+        note: String,
+    ) {
+        Self::assert_not_paused(&env);
+        caller.require_auth();
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+        if shipment.status != ShipmentStatus::Active {
+            panic!("shipment is not active");
+        }
+        Self::assert_shipment_participant(&shipment, &caller);
+        if milestone_index as usize >= shipment.milestones.len() as usize {
+            panic!("invalid milestone index");
+        }
+
+        let key = DataKeyExt::MilestoneNotes(shipment_id.clone(), milestone_index);
+        let mut notes: Vec<MilestoneNote> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let entry = MilestoneNote {
+            author: caller.clone(),
+            note: note.clone(),
+            ledger: env.ledger().sequence(),
+        };
+        notes.push_back(entry);
+        while notes.len() > MAX_MILESTONE_NOTES {
+            let mut next = Vec::new(&env);
+            for i in 1..notes.len() {
+                next.push_back(notes.get(i).unwrap());
+            }
+            notes = next;
+        }
+        env.storage().persistent().set(&key, &notes);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+        env.events().publish(
+            (Symbol::new(&env, "milestone_note_added"), shipment_id, milestone_index),
+            (caller, note),
+        );
+    }
+
+    pub fn get_milestone_notes(
+        env: Env,
+        shipment_id: String,
+        milestone_index: u32,
+    ) -> Vec<MilestoneNote> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt::MilestoneNotes(shipment_id, milestone_index))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    // ----------------------------------------------------------
+    // SHIPMENT ARCHIVAL
+    // ----------------------------------------------------------
+
+    /// Admin sets how many ledgers after creation a finished shipment may be archived.
+    /// 0 disables archival.
+    pub fn set_archive_threshold(env: Env, admin: Address, ledgers: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt::ArchiveThreshold, &ledgers);
+        env.events()
+            .publish((Symbol::new(&env, "archive_threshold_set"),), ledgers);
+    }
+
+    pub fn get_archive_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt::ArchiveThreshold)
+            .unwrap_or(0)
+    }
+
+    /// Compact a Completed/Cancelled shipment that is old enough into an ArchivedShipment.
+    /// Callable by anyone. Irreversible.
+    pub fn archive_shipment(env: Env, caller: Address, shipment_id: String) {
+        caller.require_auth();
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt::ArchiveThreshold)
+            .unwrap_or(0);
+        if threshold == 0 {
+            panic!("archival is disabled");
+        }
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKeyExt::ArchivedShipment(shipment_id.clone()))
+        {
+            panic!("shipment already archived");
+        }
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+        if shipment.status != ShipmentStatus::Completed
+            && shipment.status != ShipmentStatus::Cancelled
+        {
+            panic!("only completed or cancelled shipments can be archived");
+        }
+        let finished_at: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt::ShipmentFinishedAt(shipment_id.clone()))
+            .unwrap_or(shipment.created_at);
+        let age = env.ledger().sequence().saturating_sub(finished_at);
+        if age < threshold {
+            panic!("shipment not old enough to archive");
+        }
+
+        let primary_buyer = shipment
+            .buyers
+            .get(0)
+            .unwrap_or_else(|| panic!("shipment has no buyers"));
+        let archived = ArchivedShipment {
+            id: shipment_id.clone(),
+            buyer: primary_buyer,
+            supplier: shipment.supplier.clone(),
+            status: shipment.status.clone(),
+            total_amount: shipment.total_amount,
+            released_amount: shipment.released_amount,
+            completed_at: finished_at,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKeyExt::ArchivedShipment(shipment_id.clone()), &archived);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Shipment(shipment_id.clone()));
+        // Drop heavy satellite state when present.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::CancelPolicy(shipment_id.clone()));
+        env.events().publish(
+            (Symbol::new(&env, "shipment_archived"), shipment_id),
+            (archived.status, archived.completed_at),
+        );
+    }
+
+    pub fn get_archived_shipment(env: Env, shipment_id: String) -> ArchivedShipment {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt::ArchivedShipment(shipment_id))
+            .unwrap_or_else(|| panic!("archived shipment not found"))
+    }
+
+    // ----------------------------------------------------------
     // READ-ONLY QUERIES
     // ----------------------------------------------------------
 
     pub fn get_shipment(env: Env, shipment_id: String) -> Shipment {
         env.storage().instance().extend_ttl(100_000, 6_300_000);
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKeyExt::ArchivedShipment(shipment_id.clone()))
+            && !env
+                .storage()
+                .persistent()
+                .has(&DataKey::Shipment(shipment_id.clone()))
+        {
+            panic!("shipment archived; use get_archived_shipment");
+        }
         Self::get_shipment_internal(&env, &shipment_id)
     }
 
@@ -5726,6 +6143,11 @@ impl ChainSettleContract {
             .unwrap_or(false)
     }
 
+    /// Whether a specific shipment is mutually-consent paused.
+    pub fn is_shipment_paused(env: Env, shipment_id: String) -> bool {
+        Self::is_shipment_paused_internal(&env, &shipment_id)
+    }
+
     pub fn get_total_escrowed_value(env: Env, token: Address) -> i128 {
         env.storage()
             .persistent()
@@ -5753,7 +6175,10 @@ impl ChainSettleContract {
     }
 
     pub fn get_arbiter_stats(env: Env, arbiter: Address) -> ArbiterStats {
-        crate::storage::get_arbiter_stats(&env, &arbiter)
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt::ArbiterStats(arbiter))
+            .unwrap_or_default()
     }
 
     pub fn get_shipment_risk(env: Env, shipment_id: String) -> ShipmentRisk {
@@ -5944,6 +6369,93 @@ impl ChainSettleContract {
             .unwrap_or(false);
         if paused {
             panic!("contract is paused");
+        }
+    }
+
+    fn is_shipment_paused_internal(env: &Env, shipment_id: &String) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt::ShipmentPaused(shipment_id.clone()))
+            .unwrap_or(false)
+    }
+
+    fn assert_shipment_not_paused(env: &Env, shipment_id: &String) {
+        if Self::is_shipment_paused_internal(env, shipment_id) {
+            panic!("shipment is paused");
+        }
+    }
+
+    fn is_fast_track_eligible_internal(env: &Env, supplier: &Address) -> bool {
+        let policy: Option<ReputationFastTrack> = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt::ReputationFastTrack);
+        let Some(policy) = policy else {
+            return false;
+        };
+        let score = Self::get_reputation_internal(env, supplier);
+        if score.completed < policy.min_completed {
+            return false;
+        }
+        if score.completed == 0 {
+            return false;
+        }
+        let ratio_bps = (score.disputed as u64)
+            .saturating_mul(10_000)
+            / (score.completed as u64);
+        ratio_bps <= policy.max_disputed_ratio_bps as u64
+    }
+
+    fn assert_buyer_or_supplier(shipment: &Shipment, caller: &Address) {
+        if !Self::is_buyer(shipment, caller) && *caller != shipment.supplier {
+            panic!("unauthorized");
+        }
+    }
+
+    fn assert_shipment_participant(shipment: &Shipment, caller: &Address) {
+        if !Self::is_buyer(shipment, caller)
+            && *caller != shipment.supplier
+            && *caller != shipment.logistics
+        {
+            panic!("unauthorized");
+        }
+    }
+
+    fn bump_shipment_deadlines_for_pause(env: &Env, shipment: &mut Shipment, delta: u32) {
+        if delta == 0 {
+            return;
+        }
+        for i in 0..shipment.milestones.len() {
+            let mut m = shipment.milestones.get(i).unwrap();
+            if m.deadline_ledger > 0 {
+                m.deadline_ledger = m.deadline_ledger.saturating_add(delta);
+            }
+            if let Some(ps) = m.proof_submitted_ledger {
+                m.proof_submitted_ledger = Some(ps.saturating_add(delta));
+            }
+            if let Some(d) = m.dispute_opened_ledger {
+                m.dispute_opened_ledger = Some(d.saturating_add(delta));
+            }
+            if m.release_after_ledger > 0 {
+                m.release_after_ledger = m.release_after_ledger.saturating_add(delta);
+            }
+            shipment.milestones.set(i, m);
+
+            let deadline_key = DataKeyExt::MilestoneDeadline(shipment.id.clone(), i);
+            if let Some(dl) = env
+                .storage()
+                .persistent()
+                .get::<DataKeyExt, u32>(&deadline_key)
+            {
+                if dl > 0 {
+                    env.storage()
+                        .persistent()
+                        .set(&deadline_key, &(dl.saturating_add(delta)));
+                }
+            }
+        }
+        if let Some(exp) = shipment.expires_at_ledger {
+            shipment.expires_at_ledger = Some(exp.saturating_add(delta));
         }
     }
 
@@ -6587,6 +7099,7 @@ pub mod constants;
 mod test_arbiter_pool;
 mod test_common;
 mod test_new_features;
+mod test_feat_four;
 
 // Legacy test modules — some have pre-existing compilation issues.
 // They are kept as source but only enabled when their API drift is resolved.

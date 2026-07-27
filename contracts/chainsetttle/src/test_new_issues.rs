@@ -4,7 +4,10 @@ extern crate std;
 
 use super::*;
 use crate::test_common::{build_milestones, default_options, setup, single_buyer_vec};
-use soroban_sdk::{vec, Env, String, Symbol};
+use soroban_sdk::{
+    testutils::Ledger,
+    vec, Env, String, Symbol,
+};
 
 fn sid(env: &Env, s: &str) -> String {
     String::from_str(env, s)
