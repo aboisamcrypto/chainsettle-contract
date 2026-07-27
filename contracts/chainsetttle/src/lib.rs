@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracterror, contracttype, token, Address, BytesN, Env, IntoVal, Map,
-    String, Val, Vec, Symbol,
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, Map,
+    String, Symbol, Val, Vec,
 };
 
 // ============================================================
@@ -385,6 +385,7 @@ pub struct UpgradeProposal {
 #[derive(Clone)]
 pub struct CreateShipmentCtx {
     pub max_value: i128,
+    pub min_value: i128,
     pub allowed_tokens: Vec<Address>,
     pub min_pct: u32,
     pub contract_stats: ContractStats,
@@ -508,6 +509,8 @@ pub enum DataKey {
     ReferralFeeBps,
     /// Global default auto-confirm review window in ledgers (0 = globally disabled).
     AutoConfirmThreshold,
+    /// Minimum shipment value floor in i128 (0 = disabled).
+    MinShipmentValue,
 }
 
 // `#[contracttype]` union enums are capped at 50 cases by the Soroban XDR spec
@@ -612,6 +615,12 @@ pub enum ChainSettleError {
     DisputeTimeoutNotReached = 36,
     /// submit_proof called out of order in Sequential mode (#162).
     MilestoneOutOfOrder = 37,
+    /// create_shipment total_amount is below the configured minimum (#42).
+    MinShipmentValueNotMet = 38,
+    /// execute_param_change called before effective_ledger (#298).
+    TimelockNotExpired = 39,
+    /// execute_param_change called with no pending change (#298).
+    NoPendingParamChange = 40,
 }
 
 // ============================================================
@@ -713,11 +722,7 @@ impl ChainSettleContract {
         if admin != stored_admin {
             panic!("unauthorized");
         }
-        if env
-            .storage()
-            .instance()
-            .has(&DataKey::MultiAdminConfig)
-        {
+        if env.storage().instance().has(&DataKey::MultiAdminConfig) {
             panic!("upgrade multisig is configured; use propose_upgrade/approve_upgrade instead");
         }
         env.deployer()
@@ -768,7 +773,9 @@ impl ChainSettleContract {
         };
         let key = DataKeyExt::UpgradeProposal(proposal_id);
         env.storage().persistent().set(&key, &proposal);
-        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
 
         env.events().publish(
             (Symbol::new(&env, "upgrade_proposed"), proposal_id),
@@ -827,10 +834,8 @@ impl ChainSettleContract {
         }
         env.storage().persistent().remove(&key);
 
-        env.events().publish(
-            (Symbol::new(&env, "upgrade_cancelled"), proposal_id),
-            admin,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "upgrade_cancelled"), proposal_id), admin);
     }
 
     /// Returns a pending upgrade proposal, or None if it doesn't exist (never
@@ -1313,9 +1318,7 @@ impl ChainSettleContract {
         if bps > 10_000 {
             panic!("referral_fee_bps cannot exceed 10000");
         }
-        env.storage()
-            .instance()
-            .set(&DataKey::ReferralFeeBps, &bps);
+        env.storage().instance().set(&DataKey::ReferralFeeBps, &bps);
         env.events()
             .publish((Symbol::new(&env, "referral_fee_bps_set"),), bps);
     }
@@ -1347,7 +1350,8 @@ impl ChainSettleContract {
             panic!("max 5 fee tiers");
         }
         env.storage().instance().set(&DataKeyExt::FeeTiers, &tiers);
-        env.events().publish((Symbol::new(&env, "fee_tiers_set"),), tiers.len() as u32);
+        env.events()
+            .publish((Symbol::new(&env, "fee_tiers_set"),), tiers.len() as u32);
     }
 
     /// Returns the effective fee bps for `address` based on lifetime volume.
@@ -1369,7 +1373,13 @@ impl ChainSettleContract {
             if volume >= t.min_lifetime_volume {
                 best = Some(match best {
                     None => t.fee_bps,
-                    Some(b) => if t.fee_bps < b { t.fee_bps } else { b },
+                    Some(b) => {
+                        if t.fee_bps < b {
+                            t.fee_bps
+                        } else {
+                            b
+                        }
+                    }
                 });
             }
         }
@@ -1413,7 +1423,9 @@ impl ChainSettleContract {
             panic!("proof must be submitted before attaching invoice hash");
         }
         env.storage().persistent().set(&key, &invoice_hash);
-        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
         env.events().publish(
             (Symbol::new(&env, "invoice_hash_attached"), shipment_id),
             (milestone_index, invoice_hash, caller),
@@ -1421,10 +1433,17 @@ impl ChainSettleContract {
     }
 
     /// Returns the invoice hash for a milestone, or None if not set.
-    pub fn get_invoice_hash(env: Env, shipment_id: String, milestone_index: u32) -> Option<BytesN<32>> {
+    pub fn get_invoice_hash(
+        env: Env,
+        shipment_id: String,
+        milestone_index: u32,
+    ) -> Option<BytesN<32>> {
         env.storage()
             .persistent()
-            .get(&DataKeyExt::MilestoneInvoiceHash(shipment_id, milestone_index))
+            .get(&DataKeyExt::MilestoneInvoiceHash(
+                shipment_id,
+                milestone_index,
+            ))
     }
 
     // ----------------------------------------------------------
@@ -1432,7 +1451,11 @@ impl ChainSettleContract {
     // ----------------------------------------------------------
 
     /// Returns the append-only amendment log for a milestone in chronological order.
-    pub fn get_amendment_log(env: Env, shipment_id: String, milestone_index: u32) -> Vec<AmendmentEntry> {
+    pub fn get_amendment_log(
+        env: Env,
+        shipment_id: String,
+        milestone_index: u32,
+    ) -> Vec<AmendmentEntry> {
         env.storage()
             .persistent()
             .get(&DataKeyExt::AmendmentLog(shipment_id, milestone_index))
@@ -1465,8 +1488,12 @@ impl ChainSettleContract {
         if env.storage().persistent().has(&key) {
             panic!("extension request already pending");
         }
-        env.storage().persistent().set(&key, &ExtensionReq { extra_ledgers });
-        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+        env.storage()
+            .persistent()
+            .set(&key, &ExtensionReq { extra_ledgers });
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
         env.events().publish(
             (Symbol::new(&env, "extension_requested"), shipment_id),
             (milestone_index, extra_ledgers, caller),
@@ -1474,12 +1501,7 @@ impl ChainSettleContract {
     }
 
     /// Buyer approves the pending extension request; adds extra_ledgers to milestone deadline.
-    pub fn approve_extension(
-        env: Env,
-        buyer: Address,
-        shipment_id: String,
-        milestone_index: u32,
-    ) {
+    pub fn approve_extension(env: Env, buyer: Address, shipment_id: String, milestone_index: u32) {
         Self::assert_not_paused(&env);
         let shipment = Self::get_shipment_internal(&env, &shipment_id);
         if shipment.status != ShipmentStatus::Active {
@@ -1501,7 +1523,9 @@ impl ChainSettleContract {
             .unwrap_or_else(|| env.ledger().sequence());
         let new_deadline = current_deadline + req.extra_ledgers;
         env.storage().persistent().set(&deadline_key, &new_deadline);
-        env.storage().persistent().extend_ttl(&deadline_key, 100_000, 6_300_000);
+        env.storage()
+            .persistent()
+            .extend_ttl(&deadline_key, 100_000, 6_300_000);
         env.events().publish(
             (Symbol::new(&env, "extension_approved"), shipment_id),
             (milestone_index, new_deadline, buyer),
@@ -1509,12 +1533,7 @@ impl ChainSettleContract {
     }
 
     /// Buyer denies the pending extension request; clears it without changing the deadline.
-    pub fn deny_extension(
-        env: Env,
-        buyer: Address,
-        shipment_id: String,
-        milestone_index: u32,
-    ) {
+    pub fn deny_extension(env: Env, buyer: Address, shipment_id: String, milestone_index: u32) {
         Self::assert_not_paused(&env);
         let shipment = Self::get_shipment_internal(&env, &shipment_id);
         if shipment.status != ShipmentStatus::Active {
@@ -1630,9 +1649,7 @@ impl ChainSettleContract {
             }
         }
         pool.push_back(arbiter.clone());
-        env.storage()
-            .instance()
-            .set(&pool_key, &pool);
+        env.storage().instance().set(&pool_key, &pool);
         Self::append_admin_action(
             &env,
             Symbol::new(&env, "add_arbiter_to_pool"),
@@ -1663,12 +1680,8 @@ impl ChainSettleContract {
             }
         }
         // Reset pool index to 0 to stay within new pool bounds.
-        env.storage()
-            .instance()
-            .set(&pool_idx_key, &0u32);
-        env.storage()
-            .instance()
-            .set(&pool_key, &new_pool);
+        env.storage().instance().set(&pool_idx_key, &0u32);
+        env.storage().instance().set(&pool_key, &new_pool);
         Self::append_admin_action(
             &env,
             Symbol::new(&env, "remove_arbiter_from_pool"),
@@ -1733,7 +1746,6 @@ impl ChainSettleContract {
             panic!("buyer_cancel_fee_bps cannot exceed 1000 (10%)");
         }
 
-
         if buyers.is_empty() {
             panic!("at least one buyer is required");
         }
@@ -1757,6 +1769,11 @@ impl ChainSettleContract {
 
         if ctx.max_value > 0 && total_amount > ctx.max_value {
             panic!("total amount exceeds maximum shipment value");
+        }
+
+        // #42: Enforce minimum shipment value floor (0 = disabled).
+        if ctx.min_value > 0 && total_amount < ctx.min_value {
+            panic!("MinShipmentValueNotMet");
         }
 
         // Enforce token whitelist when non-empty (#161: multi-token support — XLM, EURC,
@@ -1876,12 +1893,20 @@ impl ChainSettleContract {
 
         // Transfer early bonus pool from buyer (separate from escrow; 0 = disabled).
         if early_bonus_pool > 0 {
-            token_client.transfer(&primary_buyer, &env.current_contract_address(), &early_bonus_pool);
+            token_client.transfer(
+                &primary_buyer,
+                &env.current_contract_address(),
+                &early_bonus_pool,
+            );
         }
 
         // Lock supplier collateral: transfer from supplier and store separately.
         if supplier_collateral > 0 {
-            token_client.transfer(&supplier, &env.current_contract_address(), &supplier_collateral);
+            token_client.transfer(
+                &supplier,
+                &env.current_contract_address(),
+                &supplier_collateral,
+            );
             env.storage().persistent().set(
                 &DataKey::SupplierCollateral(shipment_id.clone()),
                 &supplier_collateral,
@@ -1952,9 +1977,10 @@ impl ChainSettleContract {
 
         // If pool-arbiter mode was requested, record the flag so raise_dispute can assign later.
         if use_pool_arbiter {
-            env.storage()
-                .persistent()
-                .set(&(Symbol::new(&env, "use_pool_arb"), shipment_id.clone()), &true);
+            env.storage().persistent().set(
+                &(Symbol::new(&env, "use_pool_arb"), shipment_id.clone()),
+                &true,
+            );
         }
 
         env.storage().persistent().set(
@@ -1972,9 +1998,10 @@ impl ChainSettleContract {
 
         // #160: Store basis-point splits when provided.
         if milestone_splits.len() > 0 {
-            env.storage()
-                .persistent()
-                .set(&DataKeyExt::MilestoneSplits(shipment_id.clone()), &milestone_splits);
+            env.storage().persistent().set(
+                &DataKeyExt::MilestoneSplits(shipment_id.clone()),
+                &milestone_splits,
+            );
             env.storage().persistent().extend_ttl(
                 &DataKeyExt::MilestoneSplits(shipment_id.clone()),
                 100_000,
@@ -1984,9 +2011,10 @@ impl ChainSettleContract {
 
         // #164: Store per-milestone Unix timestamp deadlines when provided.
         if deadlines.len() > 0 {
-            env.storage()
-                .persistent()
-                .set(&DataKeyExt::MilestoneTimestampDeadlines(shipment_id.clone()), &deadlines);
+            env.storage().persistent().set(
+                &DataKeyExt::MilestoneTimestampDeadlines(shipment_id.clone()),
+                &deadlines,
+            );
             env.storage().persistent().extend_ttl(
                 &DataKeyExt::MilestoneTimestampDeadlines(shipment_id.clone()),
                 100_000,
@@ -1998,9 +2026,10 @@ impl ChainSettleContract {
         {
             let primary_buyer = shipment.buyers.get(0).unwrap();
             let effective_bps = Self::resolve_fee_bps_for(&env, &primary_buyer);
-            env.storage()
-                .persistent()
-                .set(&DataKeyExt::ShipmentFeeBps(shipment_id.clone()), &effective_bps);
+            env.storage().persistent().set(
+                &DataKeyExt::ShipmentFeeBps(shipment_id.clone()),
+                &effective_bps,
+            );
         }
 
         // Index by supplier for supplier-facing dashboards.
@@ -2200,7 +2229,10 @@ impl ChainSettleContract {
             .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
 
         env.events().publish(
-            (Symbol::new(&env, "milestones_rebalanced"), shipment_id.clone()),
+            (
+                Symbol::new(&env, "milestones_rebalanced"),
+                shipment_id.clone(),
+            ),
             (buyer, new_percents),
         );
     }
@@ -2261,9 +2293,7 @@ impl ChainSettleContract {
             approved: false,
             amount_advanced: 0,
         };
-        env.storage()
-            .persistent()
-            .set(&advance_key, &request);
+        env.storage().persistent().set(&advance_key, &request);
         env.storage()
             .persistent()
             .extend_ttl(&advance_key, 100_000, 6_300_000);
@@ -2304,15 +2334,12 @@ impl ChainSettleContract {
         }
 
         let milestone = shipment.milestones.get(milestone_index).unwrap();
-        let milestone_payment =
-            (shipment.total_amount * milestone.payment_percent as i128) / 100;
+        let milestone_payment = (shipment.total_amount * milestone.payment_percent as i128) / 100;
         let advance_amount = (milestone_payment * request.requested_percent as i128) / 100;
 
         request.approved = true;
         request.amount_advanced = advance_amount;
-        env.storage()
-            .persistent()
-            .set(&advance_key, &request);
+        env.storage().persistent().set(&advance_key, &request);
 
         // Transfer advance to supplier.
         let token_client = token::Client::new(&env, &shipment.token);
@@ -2386,7 +2413,10 @@ impl ChainSettleContract {
             .extend_ttl(&key, 100_000, 6_300_000);
 
         env.events().publish(
-            (Symbol::new(&env, "proof_whitelist_set"), shipment_id.clone()),
+            (
+                Symbol::new(&env, "proof_whitelist_set"),
+                shipment_id.clone(),
+            ),
             (milestone_index, buyer),
         );
     }
@@ -2404,14 +2434,13 @@ impl ChainSettleContract {
 
     /// Returns the proof content-type whitelist for a milestone.
     /// An empty Vec means any type is accepted.
-    pub fn get_proof_whitelist(
-        env: Env,
-        shipment_id: String,
-        milestone_index: u32,
-    ) -> Vec<Symbol> {
+    pub fn get_proof_whitelist(env: Env, shipment_id: String, milestone_index: u32) -> Vec<Symbol> {
         env.storage()
             .persistent()
-            .get(&DataKey::MilestoneProofWhitelist(shipment_id, milestone_index))
+            .get(&DataKey::MilestoneProofWhitelist(
+                shipment_id,
+                milestone_index,
+            ))
             .unwrap_or_else(|| Vec::new(&env))
     }
 
@@ -2590,8 +2619,7 @@ impl ChainSettleContract {
                 let overdue_ledgers = proof_ledger.saturating_sub(milestone.deadline_ledger);
                 if overdue_ledgers > 0 {
                     let raw_penalty =
-                        (gross_payment * (penalty_bps as i128 * overdue_ledgers as i128))
-                            / 10_000;
+                        (gross_payment * (penalty_bps as i128 * overdue_ledgers as i128)) / 10_000;
                     let cap = gross_payment / 2;
                     penalty_deducted = raw_penalty.min(cap);
                     payment -= penalty_deducted;
@@ -2652,7 +2680,32 @@ impl ChainSettleContract {
             );
         } else {
             let mut fee_amount: i128 = 0;
-            let net_payment = Self::deduct_fee_for_shipment(&env, payment, &shipment.token, &shipment_id, &mut fee_amount);
+            let mut net_payment = Self::deduct_fee_for_shipment(
+                &env,
+                payment,
+                &shipment.token,
+                &shipment_id,
+                &mut fee_amount,
+            );
+
+            // #300: Apply long-hold rebate if shipment age exceeds threshold.
+            {
+                let (threshold_ledgers, rebate_bps): (u32, u32) = env
+                    .storage()
+                    .instance()
+                    .get(&DataKeyExt::LongHoldRebate)
+                    .unwrap_or((0u32, 0u32));
+                if rebate_bps > 0 && threshold_ledgers > 0 {
+                    let age = env.ledger().sequence().saturating_sub(shipment.created_at);
+                    if age >= threshold_ledgers && fee_amount > 0 {
+                        let rebate = (fee_amount * rebate_bps as i128) / 10_000;
+                        if rebate > 0 {
+                            net_payment += rebate;
+                            fee_amount -= rebate;
+                        }
+                    }
+                }
+            }
 
             // Check circuit breaker before transferring payment
             Self::check_circuit_breaker(&env, payment);
@@ -2711,8 +2764,7 @@ impl ChainSettleContract {
                         .instance()
                         .get::<DataKey, FeeConfig>(&DataKey::FeeConfig)
                     {
-                        let total_fee =
-                            (shipment.total_amount * fee_cfg.fee_bps as i128) / 10_000;
+                        let total_fee = (shipment.total_amount * fee_cfg.fee_bps as i128) / 10_000;
                         let mut referral = (total_fee * referral_bps as i128) / 10_000;
                         if referral > actual_transfer {
                             referral = actual_transfer;
@@ -2801,7 +2853,6 @@ impl ChainSettleContract {
                     &shipment_id,
                 );
 
-
                 // Return supplier collateral on completion.
                 let collateral: i128 = env
                     .storage()
@@ -2809,7 +2860,11 @@ impl ChainSettleContract {
                     .get(&DataKey::SupplierCollateral(shipment_id.clone()))
                     .unwrap_or(0);
                 if collateral > 0 {
-                    token_client.transfer(&env.current_contract_address(), &shipment.supplier, &collateral);
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &shipment.supplier,
+                        &collateral,
+                    );
                 }
 
                 // Issue #104 — Emit NFT mint hook event if enabled.
@@ -3109,8 +3164,7 @@ impl ChainSettleContract {
                         .instance()
                         .get::<DataKey, FeeConfig>(&DataKey::FeeConfig)
                     {
-                        let total_fee =
-                            (shipment.total_amount * fee_cfg.fee_bps as i128) / 10_000;
+                        let total_fee = (shipment.total_amount * fee_cfg.fee_bps as i128) / 10_000;
                         let mut referral = (total_fee * referral_bps as i128) / 10_000;
                         if referral > actual_transfer {
                             referral = actual_transfer;
@@ -3277,13 +3331,9 @@ impl ChainSettleContract {
                 .unwrap_or(0u32);
             let next_idx = (idx + 1) % pool.len() as u32;
             shipment.arbiter = pool.get(idx).unwrap();
-            env.storage()
-                .instance()
-                .set(&pool_idx_key, &next_idx);
+            env.storage().instance().set(&pool_idx_key, &next_idx);
             // Clear the per-shipment flag so subsequent disputes use the assigned arbiter.
-            env.storage()
-                .persistent()
-                .remove(&pool_flag_key);
+            env.storage().persistent().remove(&pool_flag_key);
         }
 
         shipment.open_dispute_count += 1;
@@ -3301,9 +3351,14 @@ impl ChainSettleContract {
 
         milestone.dispute_opened_ledger = Some(env.ledger().sequence());
         // #165: Store Unix timestamp so resolve_dispute_timeout can check elapsed seconds.
-        let dispute_opened_at_key = DataKeyExt::DisputeOpenedAt(shipment_id.clone(), milestone_index);
-        env.storage().persistent().set(&dispute_opened_at_key, &env.ledger().timestamp());
-        env.storage().persistent().extend_ttl(&dispute_opened_at_key, 100_000, 6_300_000);
+        let dispute_opened_at_key =
+            DataKeyExt::DisputeOpenedAt(shipment_id.clone(), milestone_index);
+        env.storage()
+            .persistent()
+            .set(&dispute_opened_at_key, &env.ledger().timestamp());
+        env.storage()
+            .persistent()
+            .extend_ttl(&dispute_opened_at_key, 100_000, 6_300_000);
         shipment.milestones.set(milestone_index, milestone);
 
         env.storage()
@@ -3433,7 +3488,8 @@ impl ChainSettleContract {
         }
 
         // Compute and immediately release the uncontested portion to the supplier.
-        let full_milestone_payment = Self::milestone_gross_payment(&env, &shipment, milestone_index);
+        let full_milestone_payment =
+            Self::milestone_gross_payment(&env, &shipment, milestone_index);
         let uncontested_payment =
             (full_milestone_payment * (100 - contested_percent) as i128) / 100;
 
@@ -3500,9 +3556,14 @@ impl ChainSettleContract {
 
         milestone.dispute_opened_ledger = Some(env.ledger().sequence());
         // #165: Store Unix timestamp so resolve_dispute_timeout can check elapsed seconds.
-        let dispute_opened_at_key = DataKeyExt::DisputeOpenedAt(shipment_id.clone(), milestone_index);
-        env.storage().persistent().set(&dispute_opened_at_key, &env.ledger().timestamp());
-        env.storage().persistent().extend_ttl(&dispute_opened_at_key, 100_000, 6_300_000);
+        let dispute_opened_at_key =
+            DataKeyExt::DisputeOpenedAt(shipment_id.clone(), milestone_index);
+        env.storage()
+            .persistent()
+            .set(&dispute_opened_at_key, &env.ledger().timestamp());
+        env.storage()
+            .persistent()
+            .extend_ttl(&dispute_opened_at_key, 100_000, 6_300_000);
         shipment.milestones.set(milestone_index, milestone);
 
         env.storage()
@@ -3725,8 +3786,7 @@ impl ChainSettleContract {
         }
 
         // Clean up the partial-dispute record.
-        let contested_key =
-            DataKey::DisputeContestedPercent(shipment_id.clone(), milestone_index);
+        let contested_key = DataKey::DisputeContestedPercent(shipment_id.clone(), milestone_index);
         if is_partial {
             env.storage().persistent().remove(&contested_key);
         }
@@ -3879,14 +3939,19 @@ impl ChainSettleContract {
             }
         }
 
-        let unreleased = shipment.total_amount - shipment.released_amount - shipment.total_advanced_amount;
+        let unreleased =
+            shipment.total_amount - shipment.released_amount - shipment.total_advanced_amount;
         let cancel_fee = (unreleased * shipment.buyer_cancel_fee_bps as i128) / 10_000;
         let refund = unreleased - cancel_fee;
         let primary_buyer = shipment.buyers.get(0).unwrap();
         let token_client = token::Client::new(&env, &shipment.token);
 
         if cancel_fee > 0 {
-            token_client.transfer(&env.current_contract_address(), &shipment.supplier, &cancel_fee);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &shipment.supplier,
+                &cancel_fee,
+            );
         }
         if refund > 0 {
             token_client.transfer(&env.current_contract_address(), &primary_buyer, &refund);
@@ -4006,7 +4071,8 @@ impl ChainSettleContract {
             panic!("buyer response deadline has not passed");
         }
 
-        let remaining = shipment.total_amount - shipment.released_amount - shipment.total_advanced_amount;
+        let remaining =
+            shipment.total_amount - shipment.released_amount - shipment.total_advanced_amount;
         let penalty = (remaining * policy.penalty_bps as i128) / 10_000;
         let refund = remaining - penalty;
 
@@ -4215,7 +4281,9 @@ impl ChainSettleContract {
                 ledger: env.ledger().sequence(),
             });
             env.storage().persistent().set(&log_key, &log);
-            env.storage().persistent().extend_ttl(&log_key, 100_000, 6_300_000);
+            env.storage()
+                .persistent()
+                .extend_ttl(&log_key, 100_000, 6_300_000);
 
             env.events().publish(
                 (Symbol::new(&env, "amendment_accepted"), shipment_id.clone()),
@@ -4551,8 +4619,7 @@ impl ChainSettleContract {
                 let overdue_ledgers = proof_ledger.saturating_sub(milestone.deadline_ledger);
                 if overdue_ledgers > 0 {
                     let raw_penalty =
-                        (gross_payment * (penalty_bps as i128 * overdue_ledgers as i128))
-                            / 10_000;
+                        (gross_payment * (penalty_bps as i128 * overdue_ledgers as i128)) / 10_000;
                     let cap = gross_payment / 2;
                     penalty_deducted = raw_penalty.min(cap);
                     payment -= penalty_deducted;
@@ -4608,11 +4675,7 @@ impl ChainSettleContract {
             let bonus = shipment.early_bonus_pool / total_milestones;
             if bonus > 0 && bonus <= shipment.early_bonus_remaining {
                 shipment.early_bonus_remaining -= bonus;
-                token_client.transfer(
-                    &env.current_contract_address(),
-                    &shipment.supplier,
-                    &bonus,
-                );
+                token_client.transfer(&env.current_contract_address(), &shipment.supplier, &bonus);
             }
         }
 
@@ -4802,7 +4865,8 @@ impl ChainSettleContract {
             panic!("recovery threshold not reached");
         }
 
-        let recovery_amount = shipment.total_amount - shipment.released_amount - shipment.total_advanced_amount;
+        let recovery_amount =
+            shipment.total_amount - shipment.released_amount - shipment.total_advanced_amount;
 
         if recovery_amount > 0 {
             let token_client = token::Client::new(&env, &shipment.token);
@@ -4879,7 +4943,10 @@ impl ChainSettleContract {
         let opened_at: u64 = env
             .storage()
             .persistent()
-            .get(&DataKeyExt::DisputeOpenedAt(shipment_id.clone(), milestone_index))
+            .get(&DataKeyExt::DisputeOpenedAt(
+                shipment_id.clone(),
+                milestone_index,
+            ))
             .unwrap_or_else(|| panic!("dispute opened timestamp not recorded"));
 
         let current_timestamp = env.ledger().timestamp();
@@ -4888,10 +4955,13 @@ impl ChainSettleContract {
         }
 
         // Determine payment scope: partial dispute holds only the contested portion.
-        let partial_cp: Option<u32> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::DisputeContestedPercent(shipment_id.clone(), milestone_index));
+        let partial_cp: Option<u32> =
+            env.storage()
+                .persistent()
+                .get(&DataKey::DisputeContestedPercent(
+                    shipment_id.clone(),
+                    milestone_index,
+                ));
         let full_payment = Self::milestone_gross_payment(&env, &shipment, milestone_index);
         let payment = if let Some(cp) = partial_cp {
             (full_payment * cp as i128) / 100
@@ -4924,11 +4994,7 @@ impl ChainSettleContract {
             // Resolution::Buyer — refund contested portion to buyer.
             let primary_buyer = shipment.buyers.get(0).unwrap();
             if payment > 0 {
-                token_client.transfer(
-                    &env.current_contract_address(),
-                    &primary_buyer,
-                    &payment,
-                );
+                token_client.transfer(&env.current_contract_address(), &primary_buyer, &payment);
             }
         }
 
@@ -4947,11 +5013,17 @@ impl ChainSettleContract {
         if partial_cp.is_some() {
             env.storage()
                 .persistent()
-                .remove(&DataKey::DisputeContestedPercent(shipment_id.clone(), milestone_index));
+                .remove(&DataKey::DisputeContestedPercent(
+                    shipment_id.clone(),
+                    milestone_index,
+                ));
         }
         env.storage()
             .persistent()
-            .remove(&DataKeyExt::DisputeOpenedAt(shipment_id.clone(), milestone_index));
+            .remove(&DataKeyExt::DisputeOpenedAt(
+                shipment_id.clone(),
+                milestone_index,
+            ));
 
         milestone.status = MilestoneStatus::Resolved;
 
@@ -5029,7 +5101,10 @@ impl ChainSettleContract {
             Symbol::new(&env, "buyer")
         };
         env.events().publish(
-            (Symbol::new(&env, "dispute_auto_resolved"), shipment_id.clone()),
+            (
+                Symbol::new(&env, "dispute_auto_resolved"),
+                shipment_id.clone(),
+            ),
             (milestone_index, resolution_sym.clone()),
         );
         Self::emit_dispute_resolved(
@@ -5071,7 +5146,9 @@ impl ChainSettleContract {
         let deadlines: Vec<u64> = env
             .storage()
             .persistent()
-            .get(&DataKeyExt::MilestoneTimestampDeadlines(shipment_id.clone()))
+            .get(&DataKeyExt::MilestoneTimestampDeadlines(
+                shipment_id.clone(),
+            ))
             .unwrap_or_else(|| Vec::new(&env));
 
         if (milestone_index as usize) >= deadlines.len() as usize {
@@ -5096,9 +5173,8 @@ impl ChainSettleContract {
         }
 
         // Release all remaining escrowed funds back to the primary buyer.
-        let refund_amount = shipment.total_amount
-            - shipment.released_amount
-            - shipment.total_advanced_amount;
+        let refund_amount =
+            shipment.total_amount - shipment.released_amount - shipment.total_advanced_amount;
 
         let primary_buyer = shipment.buyers.get(0).unwrap();
         let token_client = token::Client::new(&env, &shipment.token);
@@ -5176,6 +5252,198 @@ impl ChainSettleContract {
             .instance()
             .get(&DataKey::AutoConfirmThreshold)
             .unwrap_or(0)
+    }
+
+    // ----------------------------------------------------------
+    // ADMIN: MIN SHIPMENT VALUE (#42)
+    // ----------------------------------------------------------
+
+    pub fn set_min_shipment_value(env: Env, admin: Address, min_amount: i128) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinShipmentValue, &min_amount);
+        env.events()
+            .publish((Symbol::new(&env, "min_shipment_value_set"),), min_amount);
+    }
+
+    pub fn get_min_shipment_value(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinShipmentValue)
+            .unwrap_or(0)
+    }
+
+    // ----------------------------------------------------------
+    // ADMIN: SHIPMENT-LEVEL FEE OVERRIDE (#299)
+    // ----------------------------------------------------------
+
+    pub fn set_shipment_fee_override(env: Env, admin: Address, shipment_id: String, fee_bps: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+        if shipment.status != ShipmentStatus::Active {
+            panic!("shipment is not active");
+        }
+        env.storage().persistent().set(
+            &DataKeyExt::ShipmentFeeOverride(shipment_id.clone()),
+            &fee_bps,
+        );
+        env.events().publish(
+            (Symbol::new(&env, "shipment_fee_override_set"), shipment_id),
+            fee_bps,
+        );
+    }
+
+    pub fn clear_shipment_fee_override(env: Env, admin: Address, shipment_id: String) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .remove(&DataKeyExt::ShipmentFeeOverride(shipment_id.clone()));
+        env.events().publish(
+            (Symbol::new(&env, "shipment_fee_override_cleared"),),
+            shipment_id,
+        );
+    }
+
+    pub fn get_shipment_fee_override(env: Env, shipment_id: String) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt::ShipmentFeeOverride(shipment_id))
+    }
+
+    // ----------------------------------------------------------
+    // ADMIN: LONG-HOLD ESCROW REBATE (#300)
+    // ----------------------------------------------------------
+
+    pub fn set_long_hold_rebate(env: Env, admin: Address, threshold_ledgers: u32, rebate_bps: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage().instance().set(
+            &DataKeyExt::LongHoldRebate,
+            &(threshold_ledgers, rebate_bps),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "long_hold_rebate_set"),),
+            (threshold_ledgers, rebate_bps),
+        );
+    }
+
+    pub fn get_long_hold_rebate(env: Env) -> (u32, u32) {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt::LongHoldRebate)
+            .unwrap_or((0u32, 0u32))
+    }
+
+    // ----------------------------------------------------------
+    // ADMIN: GOVERNANCE TIMELOCK (#298)
+    // ----------------------------------------------------------
+
+    pub fn set_timelock_duration(env: Env, admin: Address, ledgers: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt::TimelockDuration, &ledgers);
+        env.events()
+            .publish((Symbol::new(&env, "timelock_duration_set"),), ledgers);
+    }
+
+    pub fn propose_param_change(env: Env, admin: Address, param: Symbol, new_value: i128) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        let timelock: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt::TimelockDuration)
+            .unwrap_or(0);
+        let effective_ledger = env.ledger().sequence() + timelock;
+        env.storage().instance().set(
+            &DataKeyExt::PendingParamChange(param.clone()),
+            &(new_value, effective_ledger),
+        );
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "propose_param_change"),
+            param.clone(),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "param_change_proposed"), param),
+            (new_value, effective_ledger),
+        );
+    }
+
+    pub fn execute_param_change(env: Env, admin: Address, param: Symbol) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        let (new_value, effective_ledger): (i128, u32) = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt::PendingParamChange(param.clone()))
+            .unwrap_or_else(|| panic!("NoPendingParamChange"));
+        if env.ledger().sequence() < effective_ledger {
+            panic!("TimelockNotExpired");
+        }
+        env.storage()
+            .instance()
+            .remove(&DataKeyExt::PendingParamChange(param.clone()));
+        let fee_sym = Symbol::new(&env, "fee_config");
+        let max_sym = Symbol::new(&env, "max_shipment_value");
+        let cb_sym = Symbol::new(&env, "circuit_breaker_limit");
+        if param == fee_sym {
+            if let Some(mut cfg) = env
+                .storage()
+                .instance()
+                .get::<DataKey, FeeConfig>(&DataKey::FeeConfig)
+            {
+                cfg.fee_bps = new_value as u32;
+                env.storage().instance().set(&DataKey::FeeConfig, &cfg);
+            }
+        } else if param == max_sym {
+            env.storage()
+                .instance()
+                .set(&DataKey::MaxShipmentValue, &new_value);
+        } else if param == cb_sym {
+            env.storage()
+                .instance()
+                .set(&DataKey::CircuitBreakerLimit, &new_value);
+        } else {
+            panic!("unsupported param");
+        }
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "execute_param_change"),
+            param.clone(),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "param_change_executed"), param),
+            new_value,
+        );
+    }
+
+    pub fn cancel_param_change(env: Env, admin: Address, param: Symbol) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKeyExt::PendingParamChange(param.clone()))
+        {
+            panic!("NoPendingParamChange");
+        }
+        env.storage()
+            .instance()
+            .remove(&DataKeyExt::PendingParamChange(param.clone()));
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "cancel_param_change"),
+            param.clone(),
+        );
+        env.events()
+            .publish((Symbol::new(&env, "param_change_cancelled"),), param);
     }
 
     // ----------------------------------------------------------
@@ -5529,7 +5797,8 @@ impl ChainSettleContract {
         {
             if req.approved && req.amount_advanced > 0 {
                 env.storage().persistent().remove(&advance_key);
-                shipment.total_advanced_amount = (shipment.total_advanced_amount - req.amount_advanced).max(0);
+                shipment.total_advanced_amount =
+                    (shipment.total_advanced_amount - req.amount_advanced).max(0);
                 return req.amount_advanced;
             }
         }
@@ -5625,6 +5894,11 @@ impl ChainSettleContract {
             .instance()
             .get(&DataKey::MaxShipmentValue)
             .unwrap_or(0);
+        let min_value: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinShipmentValue)
+            .unwrap_or(0);
         let allowed_tokens: Vec<Address> = env
             .storage()
             .instance()
@@ -5648,6 +5922,7 @@ impl ChainSettleContract {
 
         CreateShipmentCtx {
             max_value,
+            min_value,
             allowed_tokens,
             min_pct,
             contract_stats,
@@ -5684,8 +5959,7 @@ impl ChainSettleContract {
     ) -> ResolveDisputeCtx {
         let shipment = Self::get_shipment_internal(env, shipment_id);
         let contested_key = DataKey::DisputeContestedPercent(shipment_id.clone(), milestone_index);
-        let partial_contested_percent: Option<u32> =
-            env.storage().persistent().get(&contested_key);
+        let partial_contested_percent: Option<u32> = env.storage().persistent().get(&contested_key);
         let contract_stats: ContractStats = env
             .storage()
             .instance()
@@ -5802,11 +6076,28 @@ impl ChainSettleContract {
         gross
     }
 
-    /// #113: Deducts the fee using the shipment's locked tier bps (falls back to FeeConfig).
-    fn deduct_fee_for_shipment(env: &Env, gross: i128, token: &Address, shipment_id: &String, fee_out: &mut i128) -> i128 {
-        let locked_bps: Option<u32> = env.storage().persistent().get(&DataKeyExt::ShipmentFeeBps(shipment_id.clone()));
-        if let Some(config) = env.storage().instance().get::<DataKey, FeeConfig>(&DataKey::FeeConfig) {
-            let bps = locked_bps.unwrap_or(config.fee_bps);
+    /// #299: Deducts fee using per-shipment override first, then locked tier bps, then FeeConfig.
+    fn deduct_fee_for_shipment(
+        env: &Env,
+        gross: i128,
+        token: &Address,
+        shipment_id: &String,
+        fee_out: &mut i128,
+    ) -> i128 {
+        let override_bps: Option<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt::ShipmentFeeOverride(shipment_id.clone()));
+        let locked_bps: Option<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt::ShipmentFeeBps(shipment_id.clone()));
+        if let Some(config) = env
+            .storage()
+            .instance()
+            .get::<DataKey, FeeConfig>(&DataKey::FeeConfig)
+        {
+            let bps = override_bps.unwrap_or_else(|| locked_bps.unwrap_or(config.fee_bps));
             let fee = (gross * bps as i128) / 10_000;
             if fee > 0 {
                 let token_client = token::Client::new(env, token);
@@ -5817,6 +6108,8 @@ impl ChainSettleContract {
         }
         gross
     }
+
+    /// #113: Deducts the fee using the shipment's locked tier bps (falls back to FeeConfig).
 
     /// #113: Resolves the effective fee bps for `address` based on accumulated lifetime volume.
     fn resolve_fee_bps_for(env: &Env, address: &Address) -> u32 {
@@ -5836,7 +6129,13 @@ impl ChainSettleContract {
             if volume >= t.min_lifetime_volume {
                 best = Some(match best {
                     None => t.fee_bps,
-                    Some(b) => if t.fee_bps < b { t.fee_bps } else { b },
+                    Some(b) => {
+                        if t.fee_bps < b {
+                            t.fee_bps
+                        } else {
+                            b
+                        }
+                    }
                 });
             }
         }
@@ -5919,7 +6218,10 @@ impl ChainSettleContract {
         data.set(Symbol::new(env, "token"), token.into_val(env));
         data.set(Symbol::new(env, "amount"), amount.into_val(env));
         env.events().publish(
-            (Symbol::new(env, "chainsettle"), Symbol::new(env, "shipment_created")),
+            (
+                Symbol::new(env, "chainsettle"),
+                Symbol::new(env, "shipment_created"),
+            ),
             data,
         );
     }
@@ -5933,11 +6235,17 @@ impl ChainSettleContract {
     ) {
         let mut data: Map<Symbol, Val> = Map::new(env);
         data.set(Symbol::new(env, "shipment_id"), shipment_id.into_val(env));
-        data.set(Symbol::new(env, "milestone_index"), milestone_index.into_val(env));
+        data.set(
+            Symbol::new(env, "milestone_index"),
+            milestone_index.into_val(env),
+        );
         data.set(Symbol::new(env, "proof_hash"), proof_hash.into_val(env));
         data.set(Symbol::new(env, "supplier"), supplier.into_val(env));
         env.events().publish(
-            (Symbol::new(env, "chainsettle"), Symbol::new(env, "proof_submitted")),
+            (
+                Symbol::new(env, "chainsettle"),
+                Symbol::new(env, "proof_submitted"),
+            ),
             data,
         );
     }
@@ -5950,10 +6258,19 @@ impl ChainSettleContract {
     ) {
         let mut data: Map<Symbol, Val> = Map::new(env);
         data.set(Symbol::new(env, "shipment_id"), shipment_id.into_val(env));
-        data.set(Symbol::new(env, "milestone_index"), milestone_index.into_val(env));
-        data.set(Symbol::new(env, "payout_amount"), payout_amount.into_val(env));
+        data.set(
+            Symbol::new(env, "milestone_index"),
+            milestone_index.into_val(env),
+        );
+        data.set(
+            Symbol::new(env, "payout_amount"),
+            payout_amount.into_val(env),
+        );
         env.events().publish(
-            (Symbol::new(env, "chainsettle"), Symbol::new(env, "milestone_confirmed")),
+            (
+                Symbol::new(env, "chainsettle"),
+                Symbol::new(env, "milestone_confirmed"),
+            ),
             data,
         );
     }
@@ -5961,10 +6278,16 @@ impl ChainSettleContract {
     fn emit_dispute_opened(env: &Env, shipment_id: &String, milestone_index: u32, buyer: &Address) {
         let mut data: Map<Symbol, Val> = Map::new(env);
         data.set(Symbol::new(env, "shipment_id"), shipment_id.into_val(env));
-        data.set(Symbol::new(env, "milestone_index"), milestone_index.into_val(env));
+        data.set(
+            Symbol::new(env, "milestone_index"),
+            milestone_index.into_val(env),
+        );
         data.set(Symbol::new(env, "buyer"), buyer.into_val(env));
         env.events().publish(
-            (Symbol::new(env, "chainsettle"), Symbol::new(env, "dispute_opened")),
+            (
+                Symbol::new(env, "chainsettle"),
+                Symbol::new(env, "dispute_opened"),
+            ),
             data,
         );
     }
@@ -5978,11 +6301,17 @@ impl ChainSettleContract {
     ) {
         let mut data: Map<Symbol, Val> = Map::new(env);
         data.set(Symbol::new(env, "shipment_id"), shipment_id.into_val(env));
-        data.set(Symbol::new(env, "milestone_index"), milestone_index.into_val(env));
+        data.set(
+            Symbol::new(env, "milestone_index"),
+            milestone_index.into_val(env),
+        );
         data.set(Symbol::new(env, "resolution"), resolution.into_val(env));
         data.set(Symbol::new(env, "resolver"), resolver.into_val(env));
         env.events().publish(
-            (Symbol::new(env, "chainsettle"), Symbol::new(env, "dispute_resolved")),
+            (
+                Symbol::new(env, "chainsettle"),
+                Symbol::new(env, "dispute_resolved"),
+            ),
             data,
         );
     }
@@ -5990,9 +6319,15 @@ impl ChainSettleContract {
     fn emit_shipment_cancelled(env: &Env, shipment_id: &String, refund_amount: i128) {
         let mut data: Map<Symbol, Val> = Map::new(env);
         data.set(Symbol::new(env, "shipment_id"), shipment_id.into_val(env));
-        data.set(Symbol::new(env, "refund_amount"), refund_amount.into_val(env));
+        data.set(
+            Symbol::new(env, "refund_amount"),
+            refund_amount.into_val(env),
+        );
         env.events().publish(
-            (Symbol::new(env, "chainsettle"), Symbol::new(env, "shipment_cancelled")),
+            (
+                Symbol::new(env, "chainsettle"),
+                Symbol::new(env, "shipment_cancelled"),
+            ),
             data,
         );
     }
@@ -6002,16 +6337,19 @@ impl ChainSettleContract {
         data.set(Symbol::new(env, "shipment_id"), shipment_id.into_val(env));
         data.set(Symbol::new(env, "total_paid"), total_paid.into_val(env));
         env.events().publish(
-            (Symbol::new(env, "chainsettle"), Symbol::new(env, "shipment_completed")),
+            (
+                Symbol::new(env, "chainsettle"),
+                Symbol::new(env, "shipment_completed"),
+            ),
             data,
         );
     }
 }
 
 pub mod constants;
+mod test_arbiter_pool;
 mod test_common;
 mod test_new_features;
-mod test_arbiter_pool;
 
 // Legacy test modules — some have pre-existing compilation issues.
 // They are kept as source but only enabled when their API drift is resolved.
@@ -6027,8 +6365,9 @@ mod test_arbiter_pool;
 // mod test_issues;
 mod test_arbiter_security;
 mod test_boundary_validation;
-mod test_rebalance_milestones;
 mod test_escalation;
+mod test_new_issues;
+mod test_rebalance_milestones;
 mod test_top_up_escrow;
 // mod test_oracle;
 // mod test_upgrade;
