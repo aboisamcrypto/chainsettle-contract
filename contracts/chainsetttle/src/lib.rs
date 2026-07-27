@@ -33,6 +33,17 @@ pub enum MilestoneMode {
     Parallel,
 }
 
+/// Why a shipment reached a terminal cancelled/expired path.
+/// Emitted on `shipment_cancelled` and persisted on `Shipment.cancellation_reason`.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CancellationReason {
+    BuyerCancelled,
+    SupplierCancelled,
+    DeadlineRefund,
+    AdminEmergencyRecovery,
+}
+
 /// Default resolution applied when a dispute auto-resolves after timeout (#165).
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
@@ -148,6 +159,11 @@ pub struct Shipment {
     // ── #162 Sequential milestone tracking ────────────────────
     /// Index of the most recently confirmed milestone; None if none confirmed yet.
     pub last_confirmed_milestone_index: Option<u32>,
+
+    /// Set when the shipment is cancelled / deadline-refunded / emergency-recovered.
+    /// Empty = not set (`None`). One entry = the reason.
+    /// (`Option<CancellationReason>` is not supported by Soroban `#[contracttype]`.)
+    pub cancellation_reason: Vec<CancellationReason>,
 }
 
 /// Cancellation policy stored separately (keeps Shipment within the contracttype field limit).
@@ -612,6 +628,10 @@ pub enum DataKeyExt {
     // -- #298 Governance timelock
     TimelockDuration,
     PendingParamChange(Symbol),
+
+    /// Address that originally submitted proof for (shipment_id, milestone_index).
+    /// Used by `correct_proof` to enforce original-submitter-only corrections.
+    ProofSubmitter(String, u32),
 }
 
 // ============================================================
@@ -675,6 +695,9 @@ pub enum ChainSettleError {
 // ============================================================
 
 /// Ledgers equivalent to approximately 2 years (≈ 5 s/ledger × 86 400 s/day × 365 days × 2).
+#[cfg(test)]
+const RECOVERY_THRESHOLD_LEDGERS: u32 = 100;
+#[cfg(not(test))]
 const RECOVERY_THRESHOLD_LEDGERS: u32 = 12_614_400;
 
 // ============================================================
@@ -2010,6 +2033,7 @@ impl ChainSettleContract {
             dispute_timeout_seconds,
             default_resolution: default_resolution.clone(),
             last_confirmed_milestone_index: None,
+            cancellation_reason: Vec::new(&env),
         };
 
         Self::append_audit_entry(
@@ -2609,6 +2633,13 @@ impl ChainSettleContract {
             .persistent()
             .extend_ttl(&type_key, 100_000, 6_300_000);
 
+        // Record original submitter so correct_proof can enforce same-role corrections.
+        let submitter_key = DataKeyExt::ProofSubmitter(shipment_id.clone(), milestone_index);
+        env.storage().persistent().set(&submitter_key, &caller);
+        env.storage()
+            .persistent()
+            .extend_ttl(&submitter_key, 100_000, 6_300_000);
+
         let event_topic = if is_resubmission {
             Symbol::new(&env, "proof_resubmitted")
         } else {
@@ -2630,6 +2661,101 @@ impl ChainSettleContract {
             milestone_index,
             &proof_hash_for_event,
             &shipment.supplier,
+        );
+    }
+
+    // ----------------------------------------------------------
+    // CORRECT PROOF (in-place before buyer action)
+    // ----------------------------------------------------------
+
+    /// Correct a previously submitted proof while the milestone is still
+    /// `ProofSubmitted`. Only the original submitter (supplier or logistics)
+    /// may call this. Whitelist rules apply to `new_proof_type` the same way
+    /// as in `submit_proof`. Status remains `ProofSubmitted`.
+    pub fn correct_proof(
+        env: Env,
+        caller: Address,
+        shipment_id: String,
+        milestone_index: u32,
+        new_proof_hash: String,
+        new_proof_type: Symbol,
+    ) {
+        env.storage().instance().extend_ttl(100_000, 6_300_000);
+        Self::assert_not_paused(&env);
+        caller.require_auth();
+
+        let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
+
+        if shipment.status != ShipmentStatus::Active {
+            panic!("shipment is not active");
+        }
+        if milestone_index as usize >= shipment.milestones.len() as usize {
+            panic!("invalid milestone index");
+        }
+
+        let mut milestone = shipment.milestones.get(milestone_index).unwrap();
+        if milestone.status != MilestoneStatus::ProofSubmitted {
+            panic!("milestone is not in proof submitted status");
+        }
+
+        // Only the original submitting address may correct.
+        let submitter_key = DataKeyExt::ProofSubmitter(shipment_id.clone(), milestone_index);
+        let original: Address = env
+            .storage()
+            .persistent()
+            .get(&submitter_key)
+            .unwrap_or_else(|| panic!("unauthorized"));
+        if caller != original {
+            panic!("unauthorized");
+        }
+
+        // Validate new_proof_type against per-milestone whitelist (same rules as submit_proof).
+        let whitelist_key = DataKey::MilestoneProofWhitelist(shipment_id.clone(), milestone_index);
+        if let Some(whitelist) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Vec<Symbol>>(&whitelist_key)
+        {
+            if whitelist.len() > 0 {
+                let mut allowed = false;
+                for i in 0..whitelist.len() {
+                    if whitelist.get(i).unwrap() == new_proof_type {
+                        allowed = true;
+                        break;
+                    }
+                }
+                if !allowed {
+                    panic!("proof type not in whitelist");
+                }
+            }
+        }
+
+        let proof_hash_for_event = new_proof_hash.clone();
+        milestone.proof_hash = new_proof_hash;
+        // Status stays ProofSubmitted — buyer has not yet acted.
+        shipment.milestones.set(milestone_index, milestone);
+
+        Self::append_audit_entry(
+            &env,
+            &mut shipment,
+            caller.clone(),
+            Symbol::new(&env, "proof_corrected"),
+            Symbol::new(&env, "correct_proof"),
+        );
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
+
+        let type_key = DataKey::SubmittedProofType(shipment_id.clone(), milestone_index);
+        env.storage().persistent().set(&type_key, &new_proof_type);
+        env.storage()
+            .persistent()
+            .extend_ttl(&type_key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (Symbol::new(&env, "proof_corrected"), shipment_id.clone()),
+            (milestone_index, proof_hash_for_event),
         );
     }
 
@@ -3718,7 +3844,11 @@ impl ChainSettleContract {
     /// and transferred to the arbiter address whenever a monetary disbursement occurs.
     
     pub(crate) fn applicable_arbiter_fee_bps(env: &Env, contested_amount: i128, default_bps: u32) -> u32 {
-        let tiers = crate::storage::get_arbiter_fee_tiers(env);
+        let tiers: Vec<(i128, u32)> = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt::ArbiterFeeTiers)
+            .unwrap_or_else(|| Vec::new(env));
         if tiers.is_empty() {
             return default_bps;
         }
@@ -3879,14 +4009,22 @@ impl ChainSettleContract {
         }
 
         let resolution_ledgers = env.ledger().sequence() - milestone.dispute_opened_ledger.unwrap_or(env.ledger().sequence());
-        let mut arbiter_stats = crate::storage::get_arbiter_stats(&env, &arbiter);
+        let mut arbiter_stats: ArbiterStats = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt::ArbiterStats(arbiter.clone()))
+            .unwrap_or_default();
         if approve {
             arbiter_stats.resolved_approved += 1;
         } else {
             arbiter_stats.resolved_rejected += 1;
         }
         arbiter_stats.total_resolution_ledgers += resolution_ledgers as u64;
-        crate::storage::set_arbiter_stats(&env, &arbiter, &arbiter_stats);
+        let stats_key = DataKeyExt::ArbiterStats(arbiter.clone());
+        env.storage().persistent().set(&stats_key, &arbiter_stats);
+        env.storage()
+            .persistent()
+            .extend_ttl(&stats_key, 100_000, 6_300_000);
 
         shipment.milestones.set(milestone_index, milestone);
         shipment.open_dispute_count = shipment.open_dispute_count.saturating_sub(1);
@@ -4105,6 +4243,8 @@ impl ChainSettleContract {
         }
 
         shipment.status = ShipmentStatus::Cancelled;
+        shipment.cancellation_reason =
+            Vec::from_array(&env, [CancellationReason::BuyerCancelled]);
 
         Self::increment_reputation_internal(&env, &shipment.supplier, 0, 0, 1);
 
@@ -4152,7 +4292,12 @@ impl ChainSettleContract {
             (Symbol::new(&env, "shipment_cancelled"), shipment_id.clone()),
             (refund, cancel_fee, buyer.clone(), env.ledger().sequence()),
         );
-        Self::emit_shipment_cancelled(&env, &shipment_id, refund);
+        Self::emit_shipment_cancelled(
+            &env,
+            &shipment_id,
+            refund,
+            CancellationReason::BuyerCancelled,
+        );
     }
 
     // ----------------------------------------------------------
@@ -4227,6 +4372,8 @@ impl ChainSettleContract {
         }
 
         shipment.status = ShipmentStatus::Cancelled;
+        shipment.cancellation_reason =
+            Vec::from_array(&env, [CancellationReason::SupplierCancelled]);
 
         Self::append_audit_entry(
             &env,
@@ -4285,7 +4432,12 @@ impl ChainSettleContract {
             ),
             (penalty, refund),
         );
-        Self::emit_shipment_cancelled(&env, &shipment_id, refund);
+        Self::emit_shipment_cancelled(
+            &env,
+            &shipment_id,
+            refund,
+            CancellationReason::SupplierCancelled,
+        );
     }
 
     // ----------------------------------------------------------
@@ -5017,6 +5169,8 @@ impl ChainSettleContract {
             &shipment_id,
         );
         shipment.status = ShipmentStatus::Cancelled;
+        shipment.cancellation_reason =
+            Vec::from_array(&env, [CancellationReason::AdminEmergencyRecovery]);
 
         Self::append_audit_entry(
             &env,
@@ -5044,6 +5198,12 @@ impl ChainSettleContract {
         env.events().publish(
             (Symbol::new(&env, "emergency_recovery"), shipment_id.clone()),
             (recovery_amount, admin),
+        );
+        Self::emit_shipment_cancelled(
+            &env,
+            &shipment_id,
+            recovery_amount,
+            CancellationReason::AdminEmergencyRecovery,
         );
     }
 
@@ -5353,6 +5513,8 @@ impl ChainSettleContract {
             &shipment_id,
         );
         shipment.status = ShipmentStatus::Expired;
+        shipment.cancellation_reason =
+            Vec::from_array(&env, [CancellationReason::DeadlineRefund]);
         Self::increment_reputation_internal(&env, &shipment.supplier, 0, 0, 1);
 
         env.storage()
@@ -5362,6 +5524,12 @@ impl ChainSettleContract {
         env.events().publish(
             (Symbol::new(&env, "milestone_expired"), shipment_id.clone()),
             (milestone_index, refund_amount, primary_buyer),
+        );
+        Self::emit_shipment_cancelled(
+            &env,
+            &shipment_id,
+            refund_amount,
+            CancellationReason::DeadlineRefund,
         );
     }
 
@@ -5753,7 +5921,10 @@ impl ChainSettleContract {
     }
 
     pub fn get_arbiter_stats(env: Env, arbiter: Address) -> ArbiterStats {
-        crate::storage::get_arbiter_stats(&env, &arbiter)
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt::ArbiterStats(arbiter))
+            .unwrap_or_default()
     }
 
     pub fn get_shipment_risk(env: Env, shipment_id: String) -> ShipmentRisk {
@@ -6553,13 +6724,28 @@ impl ChainSettleContract {
         );
     }
 
-    fn emit_shipment_cancelled(env: &Env, shipment_id: &String, refund_amount: i128) {
+    fn emit_shipment_cancelled(
+        env: &Env,
+        shipment_id: &String,
+        refund_amount: i128,
+        reason: CancellationReason,
+    ) {
+        let reason_sym = match reason {
+            CancellationReason::BuyerCancelled => Symbol::new(env, "BuyerCancelled"),
+            CancellationReason::SupplierCancelled => Symbol::new(env, "SupplierCancelled"),
+            CancellationReason::DeadlineRefund => Symbol::new(env, "DeadlineRefund"),
+            CancellationReason::AdminEmergencyRecovery => {
+                Symbol::new(env, "AdminEmergencyRecovery")
+            }
+        };
         let mut data: Map<Symbol, Val> = Map::new(env);
         data.set(Symbol::new(env, "shipment_id"), shipment_id.into_val(env));
         data.set(
             Symbol::new(env, "refund_amount"),
             refund_amount.into_val(env),
         );
+        // Additive third field — existing (shipment_id, refund_amount) consumers keep working.
+        data.set(Symbol::new(env, "reason"), reason_sym.into_val(env));
         env.events().publish(
             (
                 Symbol::new(env, "chainsettle"),
@@ -6587,6 +6773,8 @@ pub mod constants;
 mod test_arbiter_pool;
 mod test_common;
 mod test_new_features;
+mod test_correct_proof;
+mod test_cancellation_reason;
 
 // Legacy test modules — some have pre-existing compilation issues.
 // They are kept as source but only enabled when their API drift is resolved.

@@ -93,13 +93,16 @@ Emitted by `resolve_dispute` (arbiter-driven) and `resolve_dispute_timeout`
 
 ### ShipmentCancelled
 
-Emitted by `cancel_shipment` (buyer-initiated) and `supplier_cancel`
-(supplier-initiated after the buyer response deadline lapses).
+Emitted by `cancel_shipment` (buyer-initiated), `supplier_cancel`
+(supplier-initiated after the buyer response deadline lapses),
+`claim_deadline_refund` (deadline-based refund → `Expired`), and
+`emergency_recover` (admin emergency recovery).
 
 | Field | Type | Description |
 |---|---|---|
 | `shipment_id` | `String` | The shipment identifier. |
-| `refund_amount` | `i128` | Amount refunded to the buyer — the unconfirmed escrow balance, net of any cancellation fee. Funds already released to the supplier for confirmed milestones are never included or reclaimed. |
+| `refund_amount` | `i128` | Amount refunded to the buyer — the unconfirmed escrow balance, net of any cancellation fee. Funds already released to the supplier for confirmed milestones are never included or reclaimed. For `AdminEmergencyRecovery`, this is the amount recovered to the admin. |
+| `reason` | `Symbol` | Why the shipment ended: `"BuyerCancelled"`, `"SupplierCancelled"`, `"DeadlineRefund"`, or `"AdminEmergencyRecovery"`. Additive third field — older indexers that only read the first two fields remain compatible. The typed `CancellationReason` enum is also persisted on `Shipment.cancellation_reason` (empty `Vec` = unset; one entry = set). |
 
 ### ShipmentCompleted
 
