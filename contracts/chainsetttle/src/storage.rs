@@ -555,6 +555,44 @@ pub fn remove_arbiter_rotation(env: &Env, shipment_id: &String) {
 }
 
 // ============================================================
+// ARBITER FEE TIERS
+// ============================================================
+
+pub fn get_arbiter_fee_tiers(env: &Env) -> Vec<(i128, u32)> {
+    env.storage()
+        .persistent()
+        .get(&crate::DataKeyExt::ArbiterFeeTiers)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_arbiter_fee_tiers(env: &Env, tiers: &Vec<(i128, u32)>) {
+    let key = crate::DataKeyExt::ArbiterFeeTiers;
+    env.storage().persistent().set(&key, tiers);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, crate::constants::TTL_INITIAL_LEDGERS, crate::constants::TTL_MAX_LEDGERS);
+}
+
+// ============================================================
+// ARBITER STATS
+// ============================================================
+
+pub fn get_arbiter_stats(env: &Env, arbiter: &Address) -> crate::ArbiterStats {
+    env.storage()
+        .persistent()
+        .get(&crate::DataKeyExt::ArbiterStats(arbiter.clone()))
+        .unwrap_or_default()
+}
+
+pub fn set_arbiter_stats(env: &Env, arbiter: &Address, stats: &crate::ArbiterStats) {
+    let key = crate::DataKeyExt::ArbiterStats(arbiter.clone());
+    env.storage().persistent().set(&key, stats);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, crate::constants::TTL_INITIAL_LEDGERS, crate::constants::TTL_MAX_LEDGERS);
+}
+
+// ============================================================
 // MIGRATION STUB  (#77)
 // Call once after a contract upgrade that introduces V2_* keys.
 // Currently a no-op; add data-model transformation logic here.

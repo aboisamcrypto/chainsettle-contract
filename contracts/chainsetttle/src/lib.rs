@@ -326,6 +326,22 @@ pub struct ReputationScore {
     pub cancelled: u32,
 }
 
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ArbiterStats {
+    pub resolved_approved: u32,
+    pub resolved_rejected: u32,
+    pub total_resolution_ledgers: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ShipmentRisk {
+    pub late_milestones: u32,
+    pub disputed_milestones: u32,
+    pub total_milestones: u32,
+}
+
 /// Active dispute entry: (shipment_id, milestone_index).
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
@@ -576,6 +592,13 @@ pub enum DataKeyExt {
     DisputeDecayStartLedger(String),
     /// Effective bond charged for a specific dispute.
     EffectiveDisputeBond(String, u32),
+    // ── Tiered Arbiter Fee ──────────────────────────────────────
+    /// Admin-configured fee tiers for arbiters: (min_contested_amount, fee_bps)
+    ArbiterFeeTiers,
+
+    // ── Arbiter Performance Analytics ───────────────────────────
+    /// Arbiter resolution statistics.
+    ArbiterStats(Address),
 }
 
 // ============================================================
@@ -3620,8 +3643,27 @@ impl ChainSettleContract {
     ///   - `approve = false` → buyer wins; contested portion refunded minus arbiter fee;
     ///                          milestone marked Resolved (uncontested was already released).
     ///
-    /// The arbiter fee (`shipment.arbiter_fee_bps`) is deducted from the disputed payment
+    /// The arbiter fee (`applicable_arbiter_fee_bps`) is deducted from the disputed payment
     /// and transferred to the arbiter address whenever a monetary disbursement occurs.
+    
+    pub(crate) fn applicable_arbiter_fee_bps(env: &Env, contested_amount: i128, default_bps: u32) -> u32 {
+        let tiers = crate::storage::get_arbiter_fee_tiers(env);
+        if tiers.is_empty() {
+            return default_bps;
+        }
+        
+        let mut applicable_bps = default_bps;
+        for i in 0..tiers.len() {
+            let (threshold, bps) = tiers.get(i).unwrap();
+            if contested_amount >= threshold {
+                applicable_bps = bps;
+            } else {
+                // Tiers are sorted ascending, so once we hit a threshold > contested_amount, we stop.
+                break;
+            }
+        }
+        applicable_bps
+    }
     pub fn resolve_dispute(
         env: Env,
         arbiter: Address,
@@ -3677,7 +3719,8 @@ impl ChainSettleContract {
             Self::check_circuit_breaker(&env, payment);
 
             // Compute and transfer arbiter fee from the disputed payment.
-            let arbiter_fee = (payment * shipment.arbiter_fee_bps as i128) / 10_000;
+            let fee_bps = Self::applicable_arbiter_fee_bps(&env, payment, shipment.arbiter_fee_bps);
+            let arbiter_fee = (payment * fee_bps as i128) / 10_000;
             if arbiter_fee > 0 {
                 token_client.transfer(
                     &env.current_contract_address(),
@@ -3712,7 +3755,8 @@ impl ChainSettleContract {
             // Partial dispute rejection: buyer contested but lost.
             // Refund the contested portion to the buyer minus arbiter fee, then mark Resolved
             // (the uncontested portion was already released at raise_partial_dispute time).
-            let arbiter_fee = (payment * shipment.arbiter_fee_bps as i128) / 10_000;
+            let fee_bps = Self::applicable_arbiter_fee_bps(&env, payment, shipment.arbiter_fee_bps);
+            let arbiter_fee = (payment * fee_bps as i128) / 10_000;
             if arbiter_fee > 0 {
                 token_client.transfer(
                     &env.current_contract_address(),
@@ -3763,6 +3807,16 @@ impl ChainSettleContract {
         if is_partial {
             env.storage().persistent().remove(&contested_key);
         }
+
+        let resolution_ledgers = env.ledger().sequence() - milestone.dispute_opened_ledger.unwrap_or(env.ledger().sequence());
+        let mut arbiter_stats = crate::storage::get_arbiter_stats(&env, &arbiter);
+        if approve {
+            arbiter_stats.resolved_approved += 1;
+        } else {
+            arbiter_stats.resolved_rejected += 1;
+        }
+        arbiter_stats.total_resolution_ledgers += resolution_ledgers as u64;
+        crate::storage::set_arbiter_stats(&env, &arbiter, &arbiter_stats);
 
         shipment.milestones.set(milestone_index, milestone);
         shipment.open_dispute_count = shipment.open_dispute_count.saturating_sub(1);
@@ -4415,6 +4469,71 @@ impl ChainSettleContract {
     // ----------------------------------------------------------
     // ARBITER ROTATION
     // ----------------------------------------------------------
+
+    /// Allows the current arbiter to voluntarily step down.
+    /// The contract automatically assigns the next available arbiter from the active pool.
+    pub fn recuse_arbiter(env: Env, arbiter: Address, shipment_id: String) {
+        Self::assert_not_paused(&env);
+        arbiter.require_auth();
+
+        let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
+
+        if shipment.status != ShipmentStatus::Active {
+            panic!("shipment is not active");
+        }
+
+        if shipment.arbiter != arbiter {
+            panic!("only the current arbiter can recuse");
+        }
+
+        let pool_key = Symbol::new(&env, "arbiters_pool");
+        let pool_idx_key = Symbol::new(&env, "arb_pool_idx");
+        let pool: Vec<Address> = env
+            .storage()
+            .instance()
+            .get::<Symbol, Vec<Address>>(&pool_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if pool.is_empty() {
+            panic!("no available arbiter for reassignment");
+        }
+
+        let mut current_idx: u32 = env
+            .storage()
+            .instance()
+            .get::<Symbol, u32>(&pool_idx_key)
+            .unwrap_or(0u32);
+
+        let mut replacement: Option<Address> = None;
+        let mut attempts = 0;
+
+        while attempts < pool.len() {
+            let candidate = pool.get(current_idx).unwrap();
+            current_idx = (current_idx + 1) % pool.len() as u32;
+
+            if candidate != arbiter {
+                replacement = Some(candidate);
+                break;
+            }
+            attempts += 1;
+        }
+
+        if let Some(new_arbiter) = replacement {
+            env.storage().instance().set(&pool_idx_key, &current_idx);
+            shipment.arbiter = new_arbiter.clone();
+
+            env.storage()
+                .persistent()
+                .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
+
+            env.events().publish(
+                (Symbol::new(&env, "arbiter_recused"), shipment_id.clone()),
+                (arbiter, new_arbiter),
+            );
+        } else {
+            panic!("no available arbiter for reassignment");
+        }
+    }
 
     /// Buyer or supplier proposes to rotate the arbiter.
     /// When both parties agree on the same new_arbiter, the rotation is applied.
@@ -5353,6 +5472,44 @@ impl ChainSettleContract {
                 total_disputes: 0,
                 completed_shipments: 0,
             })
+    }
+
+    pub fn get_arbiter_stats(env: Env, arbiter: Address) -> ArbiterStats {
+        crate::storage::get_arbiter_stats(&env, &arbiter)
+    }
+
+    pub fn get_shipment_risk(env: Env, shipment_id: String) -> ShipmentRisk {
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+        let mut late = 0;
+        let mut disputed = 0;
+        let total = shipment.milestones.len();
+        
+        let current_ledger = env.ledger().sequence();
+        
+        for i in 0..total {
+            let m = shipment.milestones.get(i).unwrap();
+            
+            if m.status == MilestoneStatus::Disputed || m.status == MilestoneStatus::Resolved {
+                disputed += 1;
+            }
+            
+            let deadline = Self::get_milestone_deadline(env.clone(), shipment_id.clone(), i);
+            if deadline > 0 && current_ledger > deadline && m.status != MilestoneStatus::Confirmed && m.status != MilestoneStatus::Resolved {
+                late += 1;
+            } else if m.status == MilestoneStatus::Confirmed || m.status == MilestoneStatus::Resolved {
+                // If the milestone is finished, we could consider if it *was* late,
+                // but the standard says "deadline vs current ledger for lateness",
+                // meaning currently late. If we want historically late, we'd need to check when it was finished.
+                // The acceptance criteria: "Correctly counts late milestones against get_milestone_deadline".
+                // I will consider a milestone currently late if the deadline has passed and it's not confirmed.
+            }
+        }
+        
+        ShipmentRisk {
+            late_milestones: late,
+            disputed_milestones: disputed,
+            total_milestones: total,
+        }
     }
 
     pub fn list_shipments(
