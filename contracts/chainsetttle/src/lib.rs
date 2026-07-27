@@ -270,6 +270,22 @@ pub struct ShipmentOptions {
     pub dispute_timeout_seconds: u64,
     /// Resolution applied by resolve_dispute_timeout when timeout elapses.
     pub default_resolution: Resolution,
+
+    // ── Backup Arbiter ───────────────────────────────────────────
+    /// Optional backup arbiter for inactivity failover.
+    pub backup_arbiter: Option<Address>,
+
+    // ── Confirmation Cooldown ────────────────────────────────────
+    /// Optional override for the milestone confirmation cooling-off period.
+    pub confirmation_cooldown_ledgers: Option<u32>,
+}
+
+/// Configuration for time-decayed dispute bonds.
+#[contracttype]
+#[derive(Clone)]
+pub struct DisputeBondDecayConfig {
+    pub decay_bps_per_window: u32,
+    pub window_ledgers: u32,
 }
 
 /// All parameters needed to create a single shipment in a batch call.
@@ -538,6 +554,28 @@ pub enum DataKeyExt {
     UpgradeProposalCounter,
     /// Pending upgrade proposal by id.
     UpgradeProposal(u64),
+
+    // ── Arbiter Failover ─────────────────────────────────────────
+    /// Global inactivity threshold for arbiter failover (in ledgers, 0 = disabled).
+    ArbiterInactivityThreshold,
+    /// Backup arbiter for a shipment (String).
+    BackupArbiter(String),
+
+    // ── Milestone Confirmation Cooldown ──────────────────────────
+    /// Global default milestone confirmation cooldown in ledgers.
+    GlobalConfirmationCooldown,
+    /// Per-shipment override for confirmation cooldown in ledgers.
+    ShipmentConfirmationCooldown(String),
+
+    // ── Dispute Bond Decay ───────────────────────────────────────
+    /// Configuration for dispute bond time-decay.
+    DisputeBondDecayConfig,
+    /// Minimum allowed dispute bond amount globally.
+    MinDisputeBond,
+    /// Ledger at which the dispute bond decay clock was last reset.
+    DisputeDecayStartLedger(String),
+    /// Effective bond charged for a specific dispute.
+    EffectiveDisputeBond(String, u32),
 }
 
 // ============================================================
@@ -1704,6 +1742,8 @@ impl ChainSettleContract {
         let deadlines = options.deadlines.clone();
         let dispute_timeout_seconds = options.dispute_timeout_seconds;
         let default_resolution = options.default_resolution.clone();
+        let backup_arbiter = options.backup_arbiter.clone();
+        let confirmation_cooldown_ledgers = options.confirmation_cooldown_ledgers;
 
         if buyer_cancel_fee_bps > 1000 {
             panic!("buyer_cancel_fee_bps cannot exceed 1000 (10%)");
@@ -1965,6 +2005,28 @@ impl ChainSettleContract {
                 .set(&DataKeyExt::MilestoneTimestampDeadlines(shipment_id.clone()), &deadlines);
             env.storage().persistent().extend_ttl(
                 &DataKeyExt::MilestoneTimestampDeadlines(shipment_id.clone()),
+                100_000,
+                6_300_000,
+            );
+        }
+
+        if let Some(backup) = backup_arbiter {
+            env.storage()
+                .persistent()
+                .set(&DataKeyExt::BackupArbiter(shipment_id.clone()), &backup);
+            env.storage().persistent().extend_ttl(
+                &DataKeyExt::BackupArbiter(shipment_id.clone()),
+                100_000,
+                6_300_000,
+            );
+        }
+
+        if let Some(cooldown) = confirmation_cooldown_ledgers {
+            env.storage()
+                .persistent()
+                .set(&DataKeyExt::ShipmentConfirmationCooldown(shipment_id.clone()), &cooldown);
+            env.storage().persistent().extend_ttl(
+                &DataKeyExt::ShipmentConfirmationCooldown(shipment_id.clone()),
                 100_000,
                 6_300_000,
             );
@@ -2535,6 +2597,14 @@ impl ChainSettleContract {
             panic!("milestone proof not yet submitted");
         }
 
+        let cooldown = Self::get_confirmation_cooldown_internal(&env, &shipment_id);
+        if cooldown > 0 {
+            let proof_ledger = milestone.proof_submitted_ledger.unwrap_or(0);
+            if env.ledger().sequence() < proof_ledger + cooldown {
+                panic!("confirmation cooldown not elapsed");
+            }
+        }
+
         // Check if auto-confirmation window has passed; if so, reject manual confirmation.
         let effective_window = Self::get_effective_auto_confirm_window(&env, &shipment);
         if effective_window > 0 {
@@ -3034,6 +3104,8 @@ impl ChainSettleContract {
         }
         Self::assert_is_buyer(&shipment, &buyer);
 
+        let cooldown = Self::get_confirmation_cooldown_internal(&env, &shipment_id);
+
         // Validate all indices and statuses before mutating anything.
         for i in 0..milestone_indices.len() {
             let idx = milestone_indices.get(i).unwrap();
@@ -3043,6 +3115,12 @@ impl ChainSettleContract {
             let m = shipment.milestones.get(idx).unwrap();
             if m.status != MilestoneStatus::ProofSubmitted {
                 panic!("milestone proof not yet submitted");
+            }
+            if cooldown > 0 {
+                let proof_ledger = m.proof_submitted_ledger.unwrap_or(0);
+                if env.ledger().sequence() < proof_ledger + cooldown {
+                    panic!("confirmation cooldown not elapsed");
+                }
             }
         }
 
@@ -3760,6 +3838,56 @@ impl ChainSettleContract {
             Symbol::new(&env, "buyer")
         };
         Self::emit_dispute_resolved(&env, &shipment_id, milestone_index, resolution, &arbiter);
+    }
+
+    // ----------------------------------------------------------
+    // BATCH RESOLVE DISPUTES
+    // ----------------------------------------------------------
+
+    /// Resolve multiple disputes across one or more shipments in one invocation.
+    /// Atomic — any invalid entry reverts the entire batch.
+    pub fn batch_resolve_disputes(
+        env: Env,
+        arbiter: Address,
+        resolutions: Vec<(String, u32, bool)>,
+    ) {
+        Self::assert_not_paused(&env);
+
+        if resolutions.is_empty() {
+            return;
+        }
+
+        // Validate all entries before mutating anything
+        for i in 0..resolutions.len() {
+            let (shipment_id, milestone_index, _approve) = resolutions.get(i).unwrap();
+            let shipment = Self::get_shipment_internal(&env, &shipment_id);
+
+            if shipment.status != ShipmentStatus::Active {
+                panic!("shipment is not active");
+            }
+            Self::require_arbiter_auth(&shipment, &arbiter);
+
+            if milestone_index as usize >= shipment.milestones.len() as usize {
+                panic!("invalid milestone index");
+            }
+
+            let m = shipment.milestones.get(milestone_index).unwrap();
+            if m.status != MilestoneStatus::Disputed {
+                panic!("milestone is not in disputed status");
+            }
+        }
+
+        // Execute resolutions
+        for i in 0..resolutions.len() {
+            let (shipment_id, milestone_index, approve) = resolutions.get(i).unwrap();
+            Self::resolve_dispute(
+                env.clone(),
+                arbiter.clone(),
+                shipment_id,
+                milestone_index,
+                approve,
+            );
+        }
     }
 
     // ----------------------------------------------------------
@@ -5033,6 +5161,63 @@ impl ChainSettleContract {
     }
 
     // ----------------------------------------------------------
+    // ARBITER FAILOVER
+    // ----------------------------------------------------------
+
+    pub fn activate_backup_arbiter(env: Env, shipment_id: String, milestone_index: u32) {
+        Self::assert_not_paused(&env);
+        let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
+
+        let backup_arbiter: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt::BackupArbiter(shipment_id.clone()));
+        
+        let backup = backup_arbiter.unwrap_or_else(|| panic!("no backup arbiter configured"));
+
+        if shipment.arbiter == backup {
+            panic!("already failed over");
+        }
+
+        if milestone_index as usize >= shipment.milestones.len() as usize {
+            panic!("invalid milestone index");
+        }
+
+        let milestone = shipment.milestones.get(milestone_index).unwrap();
+        if milestone.status != MilestoneStatus::Disputed {
+            panic!("milestone is not in disputed status");
+        }
+
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt::ArbiterInactivityThreshold)
+            .unwrap_or(0);
+        
+        if threshold == 0 {
+            panic!("arbiter failover is disabled globally");
+        }
+
+        let opened_ledger = milestone.dispute_opened_ledger.unwrap_or_else(|| panic!("dispute not opened"));
+        let current_ledger = env.ledger().sequence();
+        if current_ledger < opened_ledger + threshold {
+            panic!("inactivity threshold not reached");
+        }
+
+        let old_arbiter = shipment.arbiter.clone();
+        shipment.arbiter = backup.clone();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
+
+        env.events().publish(
+            (Symbol::new(&env, "arbiter_failover"), shipment_id),
+            (old_arbiter, backup),
+        );
+    }
+
+    // ----------------------------------------------------------
     // ADMIN: AUTO-CONFIRM THRESHOLD (#96)
     // ----------------------------------------------------------
 
@@ -5058,6 +5243,30 @@ impl ChainSettleContract {
             .unwrap_or(0)
     }
 
+    pub fn set_arbiter_inactivity_threshold(env: Env, admin: Address, threshold_ledgers: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt::ArbiterInactivityThreshold, &threshold_ledgers);
+        env.events().publish(
+            (Symbol::new(&env, "arbiter_inactivity_threshold_set"),),
+            threshold_ledgers,
+        );
+    }
+
+    pub fn set_confirmation_cooldown(env: Env, admin: Address, ledgers: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt::GlobalConfirmationCooldown, &ledgers);
+        env.events().publish(
+            (Symbol::new(&env, "confirmation_cooldown_set"),),
+            ledgers,
+        );
+    }
+
     // ----------------------------------------------------------
     // READ-ONLY QUERIES
     // ----------------------------------------------------------
@@ -5065,6 +5274,10 @@ impl ChainSettleContract {
     pub fn get_shipment(env: Env, shipment_id: String) -> Shipment {
         env.storage().instance().extend_ttl(100_000, 6_300_000);
         Self::get_shipment_internal(&env, &shipment_id)
+    }
+
+    pub fn get_confirmation_cooldown(env: Env, shipment_id: String) -> u32 {
+        Self::get_confirmation_cooldown_internal(&env, &shipment_id)
     }
 
     pub fn get_milestone(env: Env, shipment_id: String, milestone_index: u32) -> Milestone {
@@ -5234,6 +5447,21 @@ impl ChainSettleContract {
     // ----------------------------------------------------------
     // INTERNAL HELPERS
     // ----------------------------------------------------------
+
+    fn get_confirmation_cooldown_internal(env: &Env, shipment_id: &String) -> u32 {
+        let override_cooldown: Option<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt::ShipmentConfirmationCooldown(shipment_id.clone()));
+        if let Some(c) = override_cooldown {
+            c
+        } else {
+            env.storage()
+                .instance()
+                .get(&DataKeyExt::GlobalConfirmationCooldown)
+                .unwrap_or(0)
+        }
+    }
 
     /// #160: Returns gross payment for a milestone using stored basis-point splits when available,
     /// otherwise falls back to the milestone's payment_percent field.
