@@ -602,6 +602,16 @@ pub enum DataKeyExt {
     // ── Arbiter Performance Analytics ───────────────────────────
     /// Arbiter resolution statistics.
     ArbiterStats(Address),
+
+    // -- #299 Shipment-level fee override
+    ShipmentFeeOverride(String),
+
+    // -- #300 Long-hold escrow rebate
+    LongHoldRebate,
+
+    // -- #298 Governance timelock
+    TimelockDuration,
+    PendingParamChange(Symbol),
 }
 
 // ============================================================
@@ -6589,7 +6599,7 @@ mod test_new_features;
 // mod test_permissions;
 // mod test_query;
 // mod test_shipment;
-// mod test_issues;
+mod test_issues;
 mod test_arbiter_security;
 mod test_boundary_validation;
 mod test_escalation;

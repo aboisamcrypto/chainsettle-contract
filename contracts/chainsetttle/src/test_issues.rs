@@ -68,6 +68,12 @@ fn default_options(_env: &Env) -> ShipmentOptions {
         buyer_cancel_fee_bps: 0,
         early_bonus_pool: 0,
         review_window_ledgers: None,
+        milestone_splits: soroban_sdk::Vec::new(_env),
+        deadlines: soroban_sdk::Vec::new(_env),
+        dispute_timeout_seconds: 0,
+        default_resolution: Resolution::Buyer,
+        backup_arbiter: None,
+        confirmation_cooldown_ledgers: None,
     }
 }
 
