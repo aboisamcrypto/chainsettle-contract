@@ -14,6 +14,8 @@ How It Works
 Architecture
 Data Structures
 Contract Functions
+Allowed token list
+Invoice hash
 rebalance_milestones
 Partial Disputes & Escalation Checks
 Advance Payment Lifecycle
@@ -200,15 +202,32 @@ Parameters:
   supplier      Address   — payment recipient
   logistics     Address   — in-transit proof submitter
   arbiter       Address   — dispute resolver
-  token         Address   — USDC Stellar Asset Contract address
+  token         Address   — Stellar Asset Contract address used for escrow
   total_amount  i128      — total USDC to lock (in stroops)
   milestones    Vec<Milestone> — ordered list, percentages must sum to 100
 
 Returns: shipment_id (same as input, for confirmation)
 ```
+Allowed token list
+The `token` parameter on `create_shipment` is checked against an admin-managed allowlist (`DataKey::AllowedTokens`). By default the list is empty, which means **open mode**: any Stellar Asset Contract (SAC) address is accepted. Once the admin adds at least one token, `create_shipment` only accepts tokens on that list — a non-listed token panics with `"token is not in the approved whitelist"`.
+Function	Who	Effect
+`add_allowed_token(token)`	Admin only	Approves a SAC address for use as `create_shipment`'s `token` parameter
+`remove_allowed_token(token)`	Admin only	Revokes approval; existing shipments that already use the token are unaffected
+`get_allowed_tokens() → Vec<Address>`	Anyone (read-only)	Returns the current allowlist (empty = open mode)
+The allowlist gates shipment creation only. After a shipment is created, all payouts (`confirm_milestone`, dispute resolution, cancellation refunds, etc.) always use the token address stored on that shipment — they never re-check the allowlist.
 `submit_proof(caller, shipment_id, milestone_index, proof_hash, proof_type)`
 Supplier or logistics submits proof for a milestone (`proof_hash` is the payload reference, e.g. an IPFS CID; `proof_type` is a short symbol naming the content scheme, e.g. `ipfs`, `sha256`, or `url`).
 Milestone must be in `Pending` status. Moves status to `ProofSubmitted`.
+Invoice hash
+An invoice hash is an optional, immutable `BytesN<32>` commitment (e.g. a SHA-256 digest of an off-chain invoice PDF) that the supplier can attach to a milestone for audit and reconciliation. It does not move funds; it only records a cryptographic reference next to the milestone after proof is on-chain.
+Function	Who	When
+`attach_invoice_hash(caller, shipment_id, milestone_index, invoice_hash)`	Supplier only	Shipment `Active`, milestone past `Pending` (proof already submitted), and no hash set yet
+`get_invoice_hash(shipment_id, milestone_index) → Option<BytesN<32>>`	Anyone (read-only)	Returns the stored hash, or `None` if none was attached
+Rules:
+Only the shipment's supplier may call `attach_invoice_hash` (buyer, logistics, arbiter, and strangers are rejected).
+Proof must already be submitted for that milestone — attaching while still `Pending` panics with `"proof must be submitted before attaching invoice hash"`.
+The hash is immutable: a second attach for the same milestone panics with `"invoice hash already set and is immutable"`.
+Emits `invoice_hash_attached` with `(milestone_index, invoice_hash, caller)`.
 Proof content-type whitelist
 The buyer can constrain which `proof_type` values are valid for each milestone before anyone submits proof. This is enforced inside `submit_proof`: if a non-empty whitelist is stored for that milestone, the supplied `proof_type` must appear in the list or the call panics (`proof type not in whitelist`). If no whitelist was configured, or the buyer cleared it with an empty list, any `proof_type` is accepted.
 Function	Who	When
@@ -431,6 +450,35 @@ A basis point (bps) is one-hundredth of a percent: `1 bps = 0.01%`, and
 fraction of the total protocol fee using the configured bps value, so a
 setting of `500` bps means the referrer receives `5%` of that fee on
 shipment completion.
+
+Volume-based fee tiers
+Buyers can receive a reduced platform fee once their lifetime shipment volume
+crosses admin-configured thresholds. Each `FeeTier` entry is a pair:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `min_lifetime_volume` | `i128` | Minimum cumulative volume (token base units) the address must have accrued |
+| `fee_bps` | `u32` | Fee in basis points applied when that threshold is met |
+
+`set_fee_tiers(admin, tiers: Vec<FeeTier>)` — admin-only. Stores up to 5 tier
+entries on instance storage. Prefer listing higher `min_lifetime_volume` values
+first; at lookup time the contract still picks the **lowest** `fee_bps` among
+every tier whose threshold the address meets.
+`get_fee_tier(address) → u32` (read-only) — returns the effective fee bps for
+`address`:
+1. Load the address's `LifetimeVolume`.
+2. Among configured tiers where `volume >= min_lifetime_volume`, take the
+   smallest `fee_bps`.
+3. If no tier matches (or no tiers are configured), fall back to
+   `FeeConfig.fee_bps`, or `0` if fee config was never set.
+
+Per-address application: when a shipment is created, the primary buyer's
+resolved tier bps is locked onto that shipment (`ShipmentFeeBps`) so later
+volume changes do not alter fees mid-flight. Subsequent payouts for that
+shipment use the locked value; `get_fee_tier` always reflects the address's
+*current* volume against the live tier table (useful for dashboards and for
+previewing the rate the next shipment would lock).
+
 `set_max_concurrent_disputes(admin, limit: u32)`
 Admin-only. Sets how many milestones on a single shipment can be under
 dispute at the same time. Defaults to `1` if never called. `raise_dispute`
