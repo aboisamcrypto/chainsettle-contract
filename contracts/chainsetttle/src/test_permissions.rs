@@ -155,15 +155,17 @@ fn opts(env: &Env) -> ShipmentOptions {
         logistics_fee_bps: 0,
         supplier_collateral: 0,
         expires_at_ledger: None,
-
-        metadata_hash: Some(BytesN::from_array(env, &[0u8; 32])),
-
         metadata_hash: None,
         referrer: None,
         buyer_cancel_fee_bps: 0,
         early_bonus_pool: 0,
         review_window_ledgers: None,
-
+        milestone_splits: vec![env],
+        deadlines: vec![env],
+        dispute_timeout_seconds: 0,
+        default_resolution: Resolution::Buyer,
+        backup_arbiter: None,
+        confirmation_cooldown_ledgers: None,
     }
 }
 

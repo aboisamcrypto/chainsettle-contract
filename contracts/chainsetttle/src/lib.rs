@@ -7549,6 +7549,7 @@ impl ChainSettleContract {
 }
 
 pub mod constants;
+mod storage;
 mod test_arbiter_pool;
 mod test_common;
 mod test_new_features;
@@ -7563,9 +7564,9 @@ mod test_cancellation_reason;
 // mod test_admin;
 // mod test_dispute;
 // mod test_errors;
-// mod test_permissions;
+mod test_permissions;
 // mod test_query;
-// mod test_shipment;
+mod test_shipment;
 mod test_issues;
 mod test_arbiter_security;
 mod test_boundary_validation;
