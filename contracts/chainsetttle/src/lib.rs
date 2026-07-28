@@ -37,6 +37,31 @@ mod yield_protocol {
 use yield_protocol::YieldProtocolClient;
 
 // ============================================================
+// CONFIRMATION WEBHOOK INTERFACE (Issue #303)
+// ============================================================
+
+mod confirmation_webhook {
+    use soroban_sdk::{contractclient, Env, String};
+
+    /// Interface expected of external contracts registered in the confirmation webhook
+    /// allowlist. Called best-effort on every successful milestone confirmation.
+    #[contractclient(name = "ConfirmationWebhookClient")]
+    pub trait ConfirmationWebhook {
+        /// Called when a milestone is confirmed.
+        /// `shipment_id`      — the shipment's string ID
+        /// `milestone_index`  — 0-based index of the confirmed milestone
+        /// `payment_amount`   — gross payment amount released for this milestone
+        fn on_milestone_confirmed(
+            env: Env,
+            shipment_id: String,
+            milestone_index: u32,
+            payment_amount: i128,
+        );
+    }
+}
+use confirmation_webhook::ConfirmationWebhookClient;
+
+// ============================================================
 // DATA TYPES
 // ============================================================
 
@@ -283,6 +308,26 @@ pub struct AdminAction {
     pub params: String,
 }
 
+/// Issue #302 — Pending emergency recovery proposal.
+#[contracttype]
+#[derive(Clone)]
+pub struct RecoveryProposal {
+    /// Ledger at which the proposal becomes executable.
+    pub effective_ledger: u32,
+    /// Admin who proposed the recovery.
+    pub proposed_by: Address,
+}
+
+/// Issue #306 — Confirmation delegate configuration for a shipment.
+#[contracttype]
+#[derive(Clone)]
+pub struct DelegateConfig {
+    /// The delegated address that may call confirm_milestone.
+    pub delegate: Address,
+    /// Maximum payment amount the delegate may authorise per confirm_milestone call.
+    pub per_tx_cap: i128,
+}
+
 // ============================================================
 // STORAGE KEYS
 // ============================================================
@@ -366,6 +411,30 @@ pub enum DataKey {
     YieldDeposited(Address),
     /// Supplier collateral amount for a shipment.
     SupplierCollateral(String),
+    // ------------------------------------------------------------------
+    // Issue #302 — Delayed, cancellable emergency recovery
+    // ------------------------------------------------------------------
+    /// Pending emergency recovery proposal: shipment_id -> RecoveryProposal.
+    PendingRecovery(String),
+    /// Delay in ledgers before a proposed recovery can be executed (0 = immediate).
+    RecoveryDelayLedgers,
+    // ------------------------------------------------------------------
+    // Issue #303 — Milestone confirmation webhook allowlist
+    // ------------------------------------------------------------------
+    /// Allowlist of external contract addresses invoked on each milestone confirmation.
+    ConfirmationWebhooks,
+    // ------------------------------------------------------------------
+    // Issue #304 — Dispute evidence submission cap
+    // ------------------------------------------------------------------
+    /// Max number of evidence/proof submissions allowed per milestone (default 5).
+    MaxEvidencePerMilestone,
+    /// Current evidence count for (shipment_id, milestone_index).
+    EvidenceCount(String, u32),
+    // ------------------------------------------------------------------
+    // Issue #306 — Delegated confirmation signer
+    // ------------------------------------------------------------------
+    /// Registered confirmation delegate for a shipment: shipment_id -> DelegateConfig.
+    ConfirmationDelegate(String),
 }
 
 // ============================================================
@@ -791,6 +860,180 @@ impl ChainSettleContract {
             .instance()
             .get(&DataKey::MaxAdvancePercent)
             .unwrap_or(30)
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #303 — Milestone confirmation webhook allowlist
+    // ----------------------------------------------------------
+
+    /// Register an external contract address in the confirmation webhook allowlist.
+    /// On every successful milestone confirmation, the contract will best-effort call
+    /// `on_milestone_confirmed(shipment_id, milestone_index, payment_amount)` on each
+    /// registered address. A failing webhook does NOT revert the confirmation.
+    /// Admin only.
+    pub fn add_confirmation_webhook(env: Env, admin: Address, contract_address: Address) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        let mut hooks: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ConfirmationWebhooks)
+            .unwrap_or_else(|| Vec::new(&env));
+        // Deduplicate — don't add the same address twice.
+        for i in 0..hooks.len() {
+            if hooks.get(i).unwrap() == contract_address {
+                return;
+            }
+        }
+        hooks.push_back(contract_address.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::ConfirmationWebhooks, &hooks);
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "add_webhook"),
+            Symbol::new(&env, "webhook_added"),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "webhook_added"),),
+            (admin, contract_address, env.ledger().sequence()),
+        );
+    }
+
+    /// Remove an external contract address from the confirmation webhook allowlist.
+    /// Admin only.
+    pub fn remove_confirmation_webhook(env: Env, admin: Address, contract_address: Address) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        let hooks: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ConfirmationWebhooks)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut new_hooks: Vec<Address> = Vec::new(&env);
+        for i in 0..hooks.len() {
+            let addr = hooks.get(i).unwrap();
+            if addr != contract_address {
+                new_hooks.push_back(addr);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ConfirmationWebhooks, &new_hooks);
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "remove_webhook"),
+            Symbol::new(&env, "webhook_removed"),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "webhook_removed"),),
+            (admin, contract_address, env.ledger().sequence()),
+        );
+    }
+
+    /// Returns the current confirmation webhook allowlist. Empty by default.
+    pub fn get_confirmation_webhooks(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ConfirmationWebhooks)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #304 — Dispute evidence submission cap
+    // ----------------------------------------------------------
+
+    /// Set the maximum number of evidence/proof submissions allowed per milestone.
+    /// Default is 5 if not explicitly configured. Admin only.
+    pub fn set_max_evidence_per_milestone(env: Env, admin: Address, max_count: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        if max_count == 0 {
+            panic!("max_count must be at least 1");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxEvidencePerMilestone, &max_count);
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "set_max_evidence"),
+            Symbol::new(&env, "max_evidence_updated"),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "max_evidence_updated"),),
+            (admin, max_count, env.ledger().sequence()),
+        );
+    }
+
+    /// Returns the current evidence count for a given milestone.
+    pub fn get_evidence_count(env: Env, shipment_id: String, milestone_index: u32) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::EvidenceCount(shipment_id, milestone_index))
+            .unwrap_or(0)
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #306 — Delegated confirmation signer
+    // ----------------------------------------------------------
+
+    /// Authorize a delegate address to call confirm_milestone on behalf of the buyer
+    /// for a specific shipment. The delegate may only approve milestones whose gross
+    /// payment is ≤ `per_tx_cap`. Buyer only.
+    pub fn authorize_delegate(
+        env: Env,
+        buyer: Address,
+        shipment_id: String,
+        delegate: Address,
+        per_tx_cap: i128,
+    ) {
+        Self::assert_not_paused(&env);
+        buyer.require_auth();
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+        if shipment.status != ShipmentStatus::Active {
+            panic!("shipment is not active");
+        }
+        Self::assert_is_buyer(&shipment, &buyer);
+        if per_tx_cap <= 0 {
+            panic!("per_tx_cap must be greater than zero");
+        }
+        let config = DelegateConfig {
+            delegate: delegate.clone(),
+            per_tx_cap,
+        };
+        let key = DataKey::ConfirmationDelegate(shipment_id.clone());
+        env.storage().persistent().set(&key, &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+        env.events().publish(
+            (Symbol::new(&env, "delegate_authorized"), shipment_id.clone()),
+            (buyer, delegate, per_tx_cap),
+        );
+    }
+
+    /// Revoke a previously authorized confirmation delegate for a shipment.
+    /// The delegate immediately loses the ability to call confirm_milestone.
+    /// Buyer only.
+    pub fn revoke_delegate(env: Env, buyer: Address, shipment_id: String) {
+        Self::assert_not_paused(&env);
+        buyer.require_auth();
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+        Self::assert_is_buyer(&shipment, &buyer);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ConfirmationDelegate(shipment_id.clone()));
+        env.events().publish(
+            (Symbol::new(&env, "delegate_revoked"), shipment_id.clone()),
+            (buyer, env.ledger().sequence()),
+        );
+    }
+
+    /// Returns the current confirmation delegate for a shipment, if one is registered.
+    pub fn get_delegate(env: Env, shipment_id: String) -> Option<DelegateConfig> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ConfirmationDelegate(shipment_id))
     }
 
     pub fn blacklist_address(env: Env, admin: Address, address: Address, reason_hash: BytesN<32>) {
@@ -1579,6 +1822,23 @@ impl ChainSettleContract {
 
         let current_ledger = env.ledger().sequence();
         let is_resubmission = milestone.proof_hash.len() > 0;
+
+        // Issue #304 — Enforce per-milestone evidence submission cap.
+        let evidence_key = DataKey::EvidenceCount(shipment_id.clone(), milestone_index);
+        let current_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&evidence_key)
+            .unwrap_or(0);
+        let max_evidence: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxEvidencePerMilestone)
+            .unwrap_or(5);
+        if current_count >= max_evidence {
+            panic!("evidence submission limit reached");
+        }
+
         let proof_hash_for_event = proof_hash.clone();
         milestone.proof_hash = proof_hash;
         milestone.status = MilestoneStatus::ProofSubmitted;
@@ -1588,6 +1848,14 @@ impl ChainSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
+
+        // Increment and persist the evidence count for this milestone.
+        env.storage()
+            .persistent()
+            .set(&evidence_key, &(current_count + 1));
+        env.storage()
+            .persistent()
+            .extend_ttl(&evidence_key, 100_000, 6_300_000);
 
         // Record the ledger at which proof was submitted (used by supplier_cancel).
         env.storage().persistent().set(
@@ -1632,7 +1900,27 @@ impl ChainSettleContract {
         if shipment.status != ShipmentStatus::Active {
             panic!("shipment is not active");
         }
-        Self::require_buyer_auth(&shipment, &buyer);
+
+        // Issue #306 — Accept either the registered buyer or an authorized delegate.
+        // Delegates are limited to confirm_milestone only (not dispute/cancel/etc.).
+        let caller_is_buyer = Self::is_buyer(&shipment, &buyer);
+        if !caller_is_buyer {
+            // Check if caller is a registered delegate for this shipment.
+            let delegate_config: DelegateConfig = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ConfirmationDelegate(shipment_id.clone()))
+                .unwrap_or_else(|| panic!("unauthorized"));
+            if buyer != delegate_config.delegate {
+                panic!("unauthorized");
+            }
+            // Delegate auth check — must require_auth before checking cap.
+            buyer.require_auth();
+            // We'll enforce the spending cap after computing the payment amount.
+            let _ = delegate_config; // keep borrow alive for now; re-fetch below if needed
+        } else {
+            Self::require_buyer_auth(&shipment, &buyer);
+        }
 
         if milestone_index as usize >= shipment.milestones.len() as usize {
             panic!("invalid milestone index");
@@ -1654,6 +1942,18 @@ impl ChainSettleContract {
         }
 
         let mut payment = (shipment.total_amount * milestone.payment_percent as i128) / 100;
+
+        // Issue #306 — Enforce spending cap when called by a delegate.
+        if !caller_is_buyer {
+            let delegate_config: DelegateConfig = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ConfirmationDelegate(shipment_id.clone()))
+                .unwrap_or_else(|| panic!("unauthorized"));
+            if payment > delegate_config.per_tx_cap {
+                panic!("payment exceeds delegate per_tx_cap");
+            }
+        }
 
         // Deduct any approved advance for this milestone.
         let advance_deducted =
@@ -1824,6 +2124,15 @@ impl ChainSettleContract {
                     ),
                 );
             }
+
+            // Issue #303 — Best-effort webhook dispatch.
+            // A failing webhook does NOT revert the confirmation.
+            Self::dispatch_confirmation_webhooks(
+                &env,
+                &shipment_id,
+                milestone_index,
+                payment,
+            );
         }
     }
 
@@ -2055,6 +2364,9 @@ impl ChainSettleContract {
                     remaining_amount,
                 ),
             );
+
+            // Issue #303 — Best-effort webhook dispatch per confirmed milestone.
+            Self::dispatch_confirmation_webhooks(&env, &shipment_id, idx, payment);
         }
 
         if Self::all_milestones_done(&shipment) {
@@ -3412,59 +3724,161 @@ impl ChainSettleContract {
     // EMERGENCY FUND RECOVERY (Issue #47)
     // ----------------------------------------------------------
 
-    /// Recover stuck escrow funds from an abandoned shipment.
-    /// Only callable after RECOVERY_THRESHOLD_LEDGERS have elapsed since creation.
-    /// Transfers remaining funds to the admin address and marks the shipment Cancelled.
-    pub fn emergency_recover(env: Env, admin: Address, shipment_id: String) {
+    // ----------------------------------------------------------
+    // EMERGENCY FUND RECOVERY — DELAYED & CANCELLABLE (Issue #302)
+    // ----------------------------------------------------------
+
+    /// Set the mandatory delay (in ledgers) between proposing and executing an
+    /// emergency recovery. A value of 0 preserves immediate-execution behaviour.
+    /// Admin only.
+    pub fn set_recovery_delay(env: Env, admin: Address, ledgers: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryDelayLedgers, &ledgers);
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "set_recovery_delay"),
+            Symbol::new(&env, "recovery_delay_updated"),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "recovery_delay_updated"),),
+            (admin, ledgers, env.ledger().sequence()),
+        );
+    }
+
+    /// Step 1 of 2 — Record intent to recover stuck escrow funds from an abandoned
+    /// shipment. When `recovery_delay_ledgers > 0`, the proposal cannot be executed
+    /// until `effective_ledger` has been reached, giving stakeholders visibility.
+    /// When `recovery_delay_ledgers == 0`, this call immediately executes the recovery
+    /// (preserving the original single-step behaviour).
+    pub fn propose_emergency_recover(env: Env, admin: Address, shipment_id: String) {
         Self::assert_not_paused(&env);
         admin.require_auth();
         Self::assert_admin(&env, &admin);
 
-        let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
-
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
         if shipment.status != ShipmentStatus::Active {
             panic!("shipment is not active");
         }
-
         let current_ledger = env.ledger().sequence();
         if current_ledger <= shipment.created_at + RECOVERY_THRESHOLD_LEDGERS {
             panic!("recovery threshold not reached");
         }
 
-        let recovery_amount = shipment.total_amount - shipment.released_amount - shipment.total_advanced_amount;
+        let delay: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RecoveryDelayLedgers)
+            .unwrap_or(0);
 
-        if recovery_amount > 0 {
-            let token_client = token::Client::new(&env, &shipment.token);
-            token_client.transfer(&env.current_contract_address(), &admin, &recovery_amount);
+        // Record the proposal in the admin audit log.
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "propose_recovery"),
+            Symbol::new(&env, "recovery_proposed"),
+        );
+
+        if delay == 0 {
+            // Immediate execution — call the shared recovery helper directly.
+            Self::do_emergency_recover(&env, &admin, &shipment_id);
+        } else {
+            let effective_ledger = current_ledger + delay;
+            let proposal = RecoveryProposal {
+                effective_ledger,
+                proposed_by: admin.clone(),
+            };
+            env.storage()
+                .persistent()
+                .set(&DataKey::PendingRecovery(shipment_id.clone()), &proposal);
+            env.storage().persistent().extend_ttl(
+                &DataKey::PendingRecovery(shipment_id.clone()),
+                100_000,
+                6_300_000,
+            );
+            env.events().publish(
+                (Symbol::new(&env, "recovery_proposed"), shipment_id.clone()),
+                (admin, effective_ledger, current_ledger),
+            );
+        }
+    }
+
+    /// Step 2 of 2 — Execute a pending emergency recovery proposal once its
+    /// `effective_ledger` has been reached. Panics if called too early.
+    pub fn execute_emergency_recover(env: Env, admin: Address, shipment_id: String) {
+        Self::assert_not_paused(&env);
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+
+        let proposal: RecoveryProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingRecovery(shipment_id.clone()))
+            .unwrap_or_else(|| panic!("no pending recovery proposal for this shipment"));
+
+        if env.ledger().sequence() < proposal.effective_ledger {
+            panic!("recovery delay has not elapsed");
         }
 
-        Self::move_shipment_status_index(
+        // Remove the proposal before executing (prevents re-entrancy).
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingRecovery(shipment_id.clone()));
+
+        // Record execution in the admin audit log.
+        Self::append_admin_action(
             &env,
-            ShipmentStatus::Active,
-            ShipmentStatus::Cancelled,
-            &shipment_id,
+            Symbol::new(&env, "execute_recovery"),
+            Symbol::new(&env, "recovery_executed"),
         );
-        shipment.status = ShipmentStatus::Cancelled;
+
+        Self::do_emergency_recover(&env, &admin, &shipment_id);
+    }
+
+    /// Cancel a pending emergency recovery proposal before it is executed.
+    /// Admin only. Panics if no proposal exists for the given shipment.
+    pub fn cancel_emergency_recover(env: Env, admin: Address, shipment_id: String) {
+        Self::assert_not_paused(&env);
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::PendingRecovery(shipment_id.clone()))
+        {
+            panic!("no pending recovery proposal to cancel");
+        }
 
         env.storage()
             .persistent()
-            .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
+            .remove(&DataKey::PendingRecovery(shipment_id.clone()));
 
-        // Decrement total escrowed value.
-        let current_escrowed: i128 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::TotalEscrowed(shipment.token.clone()))
-            .unwrap_or(0);
-        env.storage().persistent().set(
-            &DataKey::TotalEscrowed(shipment.token.clone()),
-            &(current_escrowed - recovery_amount).max(0),
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "cancel_recovery"),
+            Symbol::new(&env, "recovery_cancelled"),
         );
 
         env.events().publish(
-            (Symbol::new(&env, "emergency_recovery"), shipment_id.clone()),
-            (recovery_amount, admin),
+            (Symbol::new(&env, "recovery_cancelled"), shipment_id.clone()),
+            (admin, env.ledger().sequence()),
         );
+    }
+
+    /// Returns the pending recovery proposal for a shipment, if one exists.
+    pub fn get_pending_recovery(env: Env, shipment_id: String) -> Option<RecoveryProposal> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingRecovery(shipment_id))
+    }
+
+    /// Legacy single-step entry point kept for backward compatibility.
+    /// Delegates to `propose_emergency_recover`; when `recovery_delay_ledgers = 0`
+    /// (the default) this executes immediately, reproducing the original behaviour.
+    pub fn emergency_recover(env: Env, admin: Address, shipment_id: String) {
+        Self::propose_emergency_recover(env, admin, shipment_id);
     }
 
     // ----------------------------------------------------------
@@ -4045,6 +4459,45 @@ impl ChainSettleContract {
             .unwrap_or_else(|| panic!("shipment not found"))
     }
 
+    /// Shared recovery logic used by both propose_emergency_recover (delay=0) and
+    /// execute_emergency_recover. Assumes all preconditions are already verified.
+    fn do_emergency_recover(env: &Env, admin: &Address, shipment_id: &String) {
+        let mut shipment = Self::get_shipment_internal(env, shipment_id);
+        if shipment.status != ShipmentStatus::Active {
+            panic!("shipment is not active");
+        }
+        let recovery_amount = shipment.total_amount
+            - shipment.released_amount
+            - shipment.total_advanced_amount;
+        if recovery_amount > 0 {
+            let token_client = token::Client::new(env, &shipment.token);
+            token_client.transfer(&env.current_contract_address(), admin, &recovery_amount);
+        }
+        Self::move_shipment_status_index(
+            env,
+            ShipmentStatus::Active,
+            ShipmentStatus::Cancelled,
+            shipment_id,
+        );
+        shipment.status = ShipmentStatus::Cancelled;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
+        let current_escrowed: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalEscrowed(shipment.token.clone()))
+            .unwrap_or(0);
+        env.storage().persistent().set(
+            &DataKey::TotalEscrowed(shipment.token.clone()),
+            &(current_escrowed - recovery_amount).max(0),
+        );
+        env.events().publish(
+            (Symbol::new(env, "emergency_recovery"), shipment_id.clone()),
+            (recovery_amount, admin.clone()),
+        );
+    }
+
     fn append_audit_entry(env: &Env, shipment: &mut Shipment, action: Symbol, detail: Symbol) {
         // Maintain a bounded ring-buffer of max 20 entries.
         let entry = AuditEntry {
@@ -4098,6 +4551,35 @@ impl ChainSettleContract {
         }
         log.push_back(entry);
         env.storage().instance().set(&DataKey::AdminActionLog, &log);
+    }
+
+    /// Issue #303 — Best-effort dispatch to all registered confirmation webhooks.
+    /// Each webhook's `on_milestone_confirmed` is called via cross-contract invocation.
+    /// A panic in any single webhook is caught and ignored so that payout state is
+    /// never rolled back by a misbehaving external contract.
+    fn dispatch_confirmation_webhooks(
+        env: &Env,
+        shipment_id: &String,
+        milestone_index: u32,
+        payment_amount: i128,
+    ) {
+        let hooks: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ConfirmationWebhooks)
+            .unwrap_or_else(|| Vec::new(env));
+
+        for i in 0..hooks.len() {
+            let hook_addr = hooks.get(i).unwrap();
+            let client = ConfirmationWebhookClient::new(env, &hook_addr);
+            // try_on_milestone_confirmed returns a Result; we discard errors
+            // so that a reverting webhook cannot affect the confirmation.
+            let _ = client.try_on_milestone_confirmed(
+                shipment_id,
+                &milestone_index,
+                &payment_amount,
+            );
+        }
     }
 
     fn all_milestones_done(shipment: &Shipment) -> bool {
@@ -4194,3 +4676,4 @@ mod test_upgrade;
 mod test_concurrent_disputes;
 mod test_boundaries;
 mod test_chaos;
+mod test_302_303_304_306;
