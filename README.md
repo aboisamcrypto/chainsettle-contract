@@ -20,6 +20,7 @@ rebalance_milestones
 Partial Disputes & Escalation Checks
 Advance Payment Lifecycle
 Admin Succession & Emergency Recovery
+Contract Upgrades & Migration
 Events
 Error Codes
 Project Structure
@@ -711,6 +712,28 @@ this function is meant purely as a break-glass measure for abandoned
 escrow, not as a way to resolve normal disputes — those should go through
 `raise_dispute` / `raise_partial_dispute` and `resolve_dispute` instead.
 ---
+Contract Upgrades & Migration
+ChainSettle supports in-place WebAssembly (WASM) contract upgrades on Soroban using the contract deployer's `update_current_contract_wasm` interface. In-place upgrades preserve the existing contract ID, token escrow balances, state indices, and historical shipment records.
+
+`upgrade(admin: Address, new_wasm_hash: BytesN<32>)`
+Replaces the contract's executing WASM code in-place with the compiled WebAssembly module corresponding to `new_wasm_hash`.
+- **Who can call:** Single contract Admin only (`admin.require_auth()` + `admin == stored_admin`).
+- **Behavior:** Updates the WASM bytecode in-place and emits a `contract_upgraded` event with `(new_wasm_hash, ledger_sequence)`.
+- **Multisig Protection:** If multi-admin governance (`DataKey::MultiAdminConfig`) has been initialized via `initialize_multisig_admin`, single-key `upgrade()` is automatically disabled and panics with `"upgrade multisig is configured; use propose_upgrade/approve_upgrade instead"`.
+
+Multisig Upgrade Governance
+When multi-admin governance is enabled, upgrades must be proposed and approved by a threshold of registered admin keys:
+- `propose_upgrade(admin: Address, new_wasm_hash: BytesN<32>) → u64` — Any registered multisig admin key can propose an upgrade. The proposer's approval is recorded immediately. Returns a unique `proposal_id`.
+- `approve_upgrade(admin: Address, proposal_id: u64)` — Registered admin keys approve a pending proposal. Once the approval count reaches the configured threshold (`config.threshold`), the contract automatically executes `update_current_contract_wasm` and emits `upgrade_executed`.
+- `cancel_upgrade(admin: Address, proposal_id: u64)` — Registered admin key cancels a pending proposal. Emits `upgrade_cancelled`.
+- `get_upgrade_proposal(proposal_id: u64) → Option<UpgradeProposal>` (read-only) — Queries details and collected approvals for a pending upgrade proposal.
+
+`migrate(env: Env)`
+Post-upgrade state migration entrypoint.
+- **Who can call:** Public / post-upgrade execution hook.
+- **What it does post-upgrade:** Called once immediately after a WASM bytecode upgrade to execute state schema transformations, re-key storage entries (e.g. migrating `V1_*` storage keys to `V2_*` schema), or set new storage defaults.
+- **Idempotency:** Designed to be safe to invoke post-upgrade without side-effects when no data model changes are required (currently operates as an idempotent stub for the active contract version).
+---
 Events
 The contract emits the following events (subscribe via Horizon or RPC):
 Event name	Payload	When
@@ -727,6 +750,11 @@ Event name	Payload	When
 `nft_hook_config_updated`	`(admin, enabled, ledger_sequence)`	Admin toggled the NFT mint hook via `set_nft_hook_enabled`
 `circuit_breaker_set`	`(limit, window_ledgers)`	Admin configured rate-limiting circuit breaker
 `nft_mint_hook`	`(shipment_id)` topic, `(buyer, supplier, total_amount, ledger_sequence, metadata_hash)` data	Final milestone completed while the NFT mint hook is enabled
+`contract_upgraded`	`(new_wasm_hash, ledger_sequence)`	Single-key WASM upgrade executed
+`upgrade_proposed`	`(new_wasm_hash, admin, 1)`	Multisig WASM upgrade proposed
+`upgrade_approved`	`(admin, approvals_count)`	Multisig WASM upgrade approved by an admin
+`upgrade_cancelled`	`admin`	Multisig WASM upgrade proposal cancelled
+`upgrade_executed`	`new_wasm_hash`	Multisig WASM upgrade executed after threshold reached
 The backend service (`chainsetttle-backend`) listens for these events and
 sends push notifications to the relevant parties.
 ---
@@ -912,7 +940,7 @@ Escrow isolation: Funds are held by the contract address itself, not a separate 
 Milestone ordering: Milestones can be confirmed in any order. For sequential enforcement (e.g. must confirm dispatch before transit), you would add a check in `submit_proof` that the previous milestone is `Confirmed` — this is left as an optional extension.
 Percentage validation: The contract validates that all milestone percentages sum exactly to 100 at shipment creation. Rounding is integer-based — for amounts where `total * percent / 100` doesn't divide evenly, the final milestone may receive a slightly different amount. Consider adjusting percentages accordingly.
 TTL / State Archival: Persistent storage entries are given an extended TTL (~1 year) at creation. Long-lived shipments should call `extend_ttl` via the backend before entries archive.
-No upgradability (MVP): This scaffold has no upgrade mechanism. For production, consider implementing Soroban's `upgrade` pattern.
+Contract Upgrades: The contract supports in-place WASM code upgrades via Soroban's deployer mechanism (`upgrade` for single-admin mode and `propose_upgrade`/`approve_upgrade` for multi-admin governance). Post-upgrade data migration is handled via the `migrate` entrypoint.
 For a detailed threat analysis and security model, see docs/SECURITY.md.
 
 ---
@@ -924,7 +952,7 @@ Roadmap
 [ ] Sequential milestone enforcement (optional)
 [ ] Multi-token support (XLM, EURC)
 [ ] Partial cancellation (after some milestones confirmed)
-[ ] Contract upgrade mechanism
+[x] Contract upgrade mechanism
 [ ] Mainnet deployment + verification
 [ ] Integration with `chainsetttle-backend` event listener
 [ ] Integration with `chainsetttle-frontend` Freighter wallet

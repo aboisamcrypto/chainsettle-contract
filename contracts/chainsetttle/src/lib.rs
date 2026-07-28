@@ -3636,7 +3636,7 @@ impl ChainSettleContract {
                 Self::pay_milestone_to_payees(
                     &env,
                     &shipment_id,
-                    milestone_index,
+                    idx,
                     actual_transfer,
                     &shipment.supplier,
                     &token_client,
