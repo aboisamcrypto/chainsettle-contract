@@ -6,6 +6,63 @@ use soroban_sdk::{
 };
 
 // ============================================================
+// YIELD PROTOCOL INTERFACE
+// ============================================================
+
+mod yield_protocol {
+    use soroban_sdk::{contractclient, Address, Env};
+
+    /// Minimal interface expected of an external yield protocol.
+    /// The ChainSettle contract deposits idle escrow tokens here to earn
+    /// yield while milestones are pending confirmation.
+    ///
+    /// Deposit flow:
+    ///   1. ChainSettle transfers `amount` tokens to the protocol contract.
+    ///   2. ChainSettle calls `deposit` so the protocol records the principal.
+    ///
+    /// Withdraw flow:
+    ///   1. ChainSettle calls `withdraw`; the protocol transfers principal +
+    ///      accrued yield back to `to` and returns the total amount.
+    #[contractclient(name = "YieldProtocolClient")]
+    pub trait YieldProtocol {
+        /// Record a deposit of `amount` units of `token` on behalf of `depositor`.
+        /// The caller must have already transferred the tokens to this contract.
+        fn deposit(env: Env, depositor: Address, token: Address, amount: i128);
+        /// Withdraw all funds (principal + yield) for `depositor`/`token` to `to`.
+        /// Returns the total amount transferred.
+        fn withdraw(env: Env, depositor: Address, token: Address, to: Address) -> i128;
+        /// Current balance (principal + accrued yield) for `depositor` and `token`.
+        fn balance_of(env: Env, depositor: Address, token: Address) -> i128;
+    }
+}
+use yield_protocol::YieldProtocolClient;
+
+// ============================================================
+// CONFIRMATION WEBHOOK INTERFACE (Issue #303)
+// ============================================================
+
+mod confirmation_webhook {
+    use soroban_sdk::{contractclient, Env, String};
+
+    /// Interface expected of external contracts registered in the confirmation webhook
+    /// allowlist. Called best-effort on every successful milestone confirmation.
+    #[contractclient(name = "ConfirmationWebhookClient")]
+    pub trait ConfirmationWebhook {
+        /// Called when a milestone is confirmed.
+        /// `shipment_id`      — the shipment's string ID
+        /// `milestone_index`  — 0-based index of the confirmed milestone
+        /// `payment_amount`   — gross payment amount released for this milestone
+        fn on_milestone_confirmed(
+            env: Env,
+            shipment_id: String,
+            milestone_index: u32,
+            payment_amount: i128,
+        );
+    }
+}
+use confirmation_webhook::ConfirmationWebhookClient;
+
+// ============================================================
 // DATA TYPES
 // ============================================================
 
@@ -4255,6 +4312,31 @@ impl ChainSettleContract {
             Self::emit_shipment_completed(&env, &shipment_id, shipment.released_amount);
         }
 
+        let current_ledger = env.ledger().sequence();
+        let is_resubmission = milestone.proof_hash.len() > 0;
+
+        // Issue #304 — Enforce per-milestone evidence submission cap.
+        let evidence_key = DataKey::EvidenceCount(shipment_id.clone(), milestone_index);
+        let current_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&evidence_key)
+            .unwrap_or(0);
+        let max_evidence: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxEvidencePerMilestone)
+            .unwrap_or(5);
+        if current_count >= max_evidence {
+            panic!("evidence submission limit reached");
+        }
+
+        let proof_hash_for_event = proof_hash.clone();
+        milestone.proof_hash = proof_hash;
+        milestone.status = MilestoneStatus::ProofSubmitted;
+        milestone.proof_submitted_ledger = Some(current_ledger);
+        shipment.milestones.set(milestone_index, milestone);
+
         env.storage()
             .persistent()
             .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
@@ -4304,6 +4386,35 @@ impl ChainSettleContract {
     ) {
         Self::assert_not_paused(&env);
 
+        let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
+
+        if shipment.status != ShipmentStatus::Active {
+            panic!("shipment is not active");
+        }
+
+        // Issue #306 — Accept either the registered buyer or an authorized delegate.
+        // Delegates are limited to confirm_milestone only (not dispute/cancel/etc.).
+        let caller_is_buyer = Self::is_buyer(&shipment, &buyer);
+        if !caller_is_buyer {
+            // Check if caller is a registered delegate for this shipment.
+            let delegate_config: DelegateConfig = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ConfirmationDelegate(shipment_id.clone()))
+                .unwrap_or_else(|| panic!("unauthorized"));
+            if buyer != delegate_config.delegate {
+                panic!("unauthorized");
+            }
+            // Delegate auth check — must require_auth before checking cap.
+            buyer.require_auth();
+            // We'll enforce the spending cap after computing the payment amount.
+            let _ = delegate_config; // keep borrow alive for now; re-fetch below if needed
+        } else {
+            Self::require_buyer_auth(&shipment, &buyer);
+        }
+
+        if milestone_index as usize >= shipment.milestones.len() as usize {
+            panic!("invalid milestone index");
         if resolutions.is_empty() {
             return;
         }
@@ -4318,9 +4429,23 @@ impl ChainSettleContract {
             }
             Self::require_arbiter_auth(&shipment, &arbiter);
 
-            if milestone_index as usize >= shipment.milestones.len() as usize {
-                panic!("invalid milestone index");
+        let mut payment = (shipment.total_amount * milestone.payment_percent as i128) / 100;
+
+        // Issue #306 — Enforce spending cap when called by a delegate.
+        if !caller_is_buyer {
+            let delegate_config: DelegateConfig = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ConfirmationDelegate(shipment_id.clone()))
+                .unwrap_or_else(|| panic!("unauthorized"));
+            if payment > delegate_config.per_tx_cap {
+                panic!("payment exceeds delegate per_tx_cap");
             }
+        }
+
+        // Deduct any approved advance for this milestone.
+        let advance_deducted =
+            Self::consume_advance_for_milestone(&env, &mut shipment, &shipment_id, milestone_index);
 
             let m = shipment.milestones.get(milestone_index).unwrap();
             if m.status != MilestoneStatus::Disputed {
@@ -4472,6 +4597,15 @@ impl ChainSettleContract {
             if d.shipment_id != shipment_id {
                 new_disputes.push_back(d);
             }
+
+            // Issue #303 — Best-effort webhook dispatch.
+            // A failing webhook does NOT revert the confirmation.
+            Self::dispatch_confirmation_webhooks(
+                &env,
+                &shipment_id,
+                milestone_index,
+                payment,
+            );
         }
         env.storage()
             .persistent()
@@ -4764,8 +4898,49 @@ impl ChainSettleContract {
                 .extend_ttl(&log_key, 100_000, 6_300_000);
 
             env.events().publish(
-                (Symbol::new(&env, "amendment_accepted"), shipment_id.clone()),
-                milestone_index,
+                (
+                    Symbol::new(&env, "milestone_confirmed"),
+                    shipment_id.clone(),
+                ),
+                (
+                    idx,
+                    payment,
+                    fee_amount,
+                    shipment.supplier.clone(),
+                    env.ledger().sequence(),
+                    shipment.released_amount,
+                    remaining_amount,
+                ),
+            );
+
+            // Issue #303 — Best-effort webhook dispatch per confirmed milestone.
+            Self::dispatch_confirmation_webhooks(&env, &shipment_id, idx, payment);
+        }
+
+        if Self::all_milestones_done(&shipment) {
+            shipment.status = ShipmentStatus::Completed;
+            // Update completed shipments stat.
+            let mut stats: ContractStats = env
+                .storage()
+                .instance()
+                .get(&DataKey::ContractStats)
+                .unwrap_or(ContractStats {
+                    total_shipments: 0,
+                    total_volume: 0,
+                    total_disputes: 0,
+                    completed_shipments: 0,
+                });
+            stats.completed_shipments += 1;
+            env.storage()
+                .instance()
+                .set(&DataKey::ContractStats, &stats);
+            Self::increment_reputation_internal(&env, &shipment.supplier, 1, 0, 0);
+            // Move from Active to Completed status index.
+            Self::move_shipment_status_index(
+                &env,
+                ShipmentStatus::Active,
+                ShipmentStatus::Completed,
+                &shipment_id,
             );
         } else {
             env.storage().temporary().set(&amendment_key, &proposal);
@@ -6436,6 +6611,7 @@ impl ChainSettleContract {
 
         let shipment = Self::get_shipment_internal(&env, &shipment_id);
 
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
         if shipment.status != ShipmentStatus::Active {
             panic!("shipment is not active");
         }
@@ -7379,6 +7555,35 @@ impl ChainSettleContract {
         env.storage().instance().set(&DataKey::AdminActionLog, &log);
     }
 
+    /// Issue #303 — Best-effort dispatch to all registered confirmation webhooks.
+    /// Each webhook's `on_milestone_confirmed` is called via cross-contract invocation.
+    /// A panic in any single webhook is caught and ignored so that payout state is
+    /// never rolled back by a misbehaving external contract.
+    fn dispatch_confirmation_webhooks(
+        env: &Env,
+        shipment_id: &String,
+        milestone_index: u32,
+        payment_amount: i128,
+    ) {
+        let hooks: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ConfirmationWebhooks)
+            .unwrap_or_else(|| Vec::new(env));
+
+        for i in 0..hooks.len() {
+            let hook_addr = hooks.get(i).unwrap();
+            let client = ConfirmationWebhookClient::new(env, &hook_addr);
+            // try_on_milestone_confirmed returns a Result; we discard errors
+            // so that a reverting webhook cannot affect the confirmation.
+            let _ = client.try_on_milestone_confirmed(
+                shipment_id,
+                &milestone_index,
+                &payment_amount,
+            );
+        }
+    }
+
     fn all_milestones_done(shipment: &Shipment) -> bool {
         for i in 0..shipment.milestones.len() {
             let s = shipment.milestones.get(i).unwrap().status;
@@ -7736,4 +7941,12 @@ mod test_panel_features;
 // mod test_concurrent_disputes;
 // mod test_boundaries;
 // mod test_chaos;
+mod property_tests;
+mod test;
+mod test_oracle;
+mod test_upgrade;
+mod test_concurrent_disputes;
+mod test_boundaries;
+mod test_chaos;
+mod test_302_303_304_306;
 // mod test_features;
