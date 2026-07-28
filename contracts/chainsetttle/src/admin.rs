@@ -354,6 +354,41 @@ impl ChainSettleContract {
     }
 
     // ----------------------------------------------------------
+    // ARBITER FEE TIERS
+    // ----------------------------------------------------------
+
+    pub fn set_arbiter_fee_tiers(env: Env, admin: Address, mut tiers: Vec<(i128, u32)>) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+
+        let mut prev_threshold = -1_i128;
+        for i in 0..tiers.len() {
+            let (threshold, bps) = tiers.get(i).unwrap();
+            if threshold < 0 {
+                panic!("threshold must be non-negative");
+            }
+            if threshold <= prev_threshold {
+                panic!("tiers must be strictly ascending by threshold");
+            }
+            if bps > MAX_FEE_BPS {
+                panic!("fee_bps exceeds maximum");
+            }
+            prev_threshold = threshold;
+        }
+
+        Self::append_admin_action(&env, Symbol::new(&env, "set_arbiter_fee_tiers"), Symbol::new(&env, "arbiter_fee_tiers_updated"));
+        storage::set_arbiter_fee_tiers(&env, &tiers);
+        env.events().publish(
+            (Symbol::new(&env, "admin_action"), Symbol::new(&env, "set_arbiter_fee_tiers")),
+            (admin, env.ledger().sequence()),
+        );
+    }
+
+    pub fn get_arbiter_fee_tiers(env: Env) -> Vec<(i128, u32)> {
+        storage::get_arbiter_fee_tiers(&env)
+    }
+
+    // ----------------------------------------------------------
     // EMERGENCY FUND RECOVERY
     // ----------------------------------------------------------
 

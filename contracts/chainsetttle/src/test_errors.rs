@@ -8,8 +8,8 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _, Symbol},
-    token, vec, Address, Env, String,
+    testutils::{Address as _, Ledger as _},
+    token, vec, Address, BytesN, Env, String,
 };
 
 // ============================================================
@@ -69,6 +69,10 @@ fn milestones(env: &Env) -> soroban_sdk::Vec<Milestone> {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
         Milestone {
             name: String::from_str(env, "M1"),
@@ -78,6 +82,10 @@ fn milestones(env: &Env) -> soroban_sdk::Vec<Milestone> {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
     ]
 }
@@ -96,6 +104,15 @@ fn opts(env: &Env) -> ShipmentOptions {
         logistics_fee_bps: 0,
         supplier_collateral: 0,
         expires_at_ledger: None,
+
+        metadata_hash: Some(BytesN::from_array(env, &[0u8; 32])),
+
+        metadata_hash: None,
+        referrer: None,
+        buyer_cancel_fee_bps: 0,
+        early_bonus_pool: 0,
+        review_window_ledgers: None,
+
     }
 }
 
@@ -497,6 +514,10 @@ fn test_err_invalid_percentages_sum_not_100() {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
         Milestone {
             name: String::from_str(&t.env, "B"),
@@ -506,6 +527,10 @@ fn test_err_invalid_percentages_sum_not_100() {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
     ];
 
@@ -543,6 +568,10 @@ fn test_err_invalid_percentages_sum_over_100() {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
         Milestone {
             name: String::from_str(&t.env, "B"),
@@ -552,6 +581,10 @@ fn test_err_invalid_percentages_sum_over_100() {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
     ];
 
@@ -586,6 +619,10 @@ fn test_err_invalid_percentages_below_min_threshold() {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
         Milestone {
             name: String::from_str(&t.env, "Big"),
@@ -595,6 +632,10 @@ fn test_err_invalid_percentages_below_min_threshold() {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
     ];
 

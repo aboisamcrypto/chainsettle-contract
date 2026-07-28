@@ -1,7 +1,7 @@
 extern crate chainsetttle;
 use chainsetttle::*;
 use serde::Serialize;
-use soroban_sdk::{testutils::{Address as _}, token, vec, Address, Env, String as SorobanString};
+use soroban_sdk::{testutils::{Address as _}, token, vec, Address, Env, String as SorobanString, Symbol};
 use std::{env, fs, path::PathBuf};
 
 struct TestSetup {
@@ -33,6 +33,7 @@ enum SnapshotShipmentStatus {
     Active,
     Completed,
     Cancelled,
+    Expired,
 }
 
 #[derive(Serialize)]
@@ -134,6 +135,7 @@ impl SnapshotShipment {
                 ShipmentStatus::Active => SnapshotShipmentStatus::Active,
                 ShipmentStatus::Completed => SnapshotShipmentStatus::Completed,
                 ShipmentStatus::Cancelled => SnapshotShipmentStatus::Cancelled,
+                ShipmentStatus::Expired => SnapshotShipmentStatus::Expired,
             },
             milestone_mode: match shipment.milestone_mode {
                 MilestoneMode::Sequential => SnapshotMilestoneMode::Sequential,
@@ -224,6 +226,8 @@ fn build_milestones(env: &Env) -> soroban_sdk::Vec<Milestone> {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
         Milestone {
             name: SorobanString::from_str(env, "In Transit"),
@@ -233,6 +237,8 @@ fn build_milestones(env: &Env) -> soroban_sdk::Vec<Milestone> {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
         Milestone {
             name: SorobanString::from_str(env, "Delivered"),
@@ -242,6 +248,8 @@ fn build_milestones(env: &Env) -> soroban_sdk::Vec<Milestone> {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
     ]
 }
@@ -260,6 +268,19 @@ fn default_options(_env: &Env) -> ShipmentOptions {
         late_penalty_bps_per_ledger: 0,
         auto_confirm_ledgers: 0,
         dispute_bond_amount: 0,
+        arbiter_fee_bps: 0,
+        logistics_fee_bps: 0,
+        supplier_collateral: 0,
+        expires_at_ledger: None,
+        metadata_hash: None,
+        referrer: None,
+        buyer_cancel_fee_bps: 0,
+        early_bonus_pool: 0,
+        review_window_ledgers: None,
+        milestone_splits: vec![_env],
+        deadlines: vec![_env],
+        dispute_timeout_seconds: 0,
+        default_resolution: Resolution::Buyer,
     }
 }
 
@@ -313,7 +334,7 @@ fn test_shipment_lifecycle_snapshots() {
         &t.supplier,
         &shipment_id,
         &0,
-        &SorobanString::from_str(&t.env, "ipfs://d0"),
+        &SorobanString::from_str(&t.env, "ipfs://d0"), &Symbol::new(&t.env, "ipfs"),
     );
     let after_submit_snapshot = SnapshotShipment::from_shipment(client.get_shipment(&shipment_id));
 
@@ -324,7 +345,7 @@ fn test_shipment_lifecycle_snapshots() {
         &t.supplier,
         &shipment_id,
         &1,
-        &SorobanString::from_str(&t.env, "ipfs://d1"),
+        &SorobanString::from_str(&t.env, "ipfs://d1"), &Symbol::new(&t.env, "ipfs"),
     );
     client.raise_dispute(&t.buyer, &shipment_id, &1);
     let after_dispute_snapshot = SnapshotShipment::from_shipment(client.get_shipment(&shipment_id));

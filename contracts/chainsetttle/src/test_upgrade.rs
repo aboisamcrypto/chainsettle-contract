@@ -30,6 +30,10 @@ fn two_milestone_vec(env: &Env) -> soroban_sdk::Vec<Milestone> {
             proof_hash: String::from_str(env, ""),
             status: MilestoneStatus::Pending,
             release_after_ledger: 0,
+            proof_submitted_ledger: None,
+            dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
         Milestone {
             name: String::from_str(env, "Phase 2"),
@@ -37,6 +41,10 @@ fn two_milestone_vec(env: &Env) -> soroban_sdk::Vec<Milestone> {
             proof_hash: String::from_str(env, ""),
             status: MilestoneStatus::Pending,
             release_after_ledger: 0,
+            proof_submitted_ledger: None,
+            dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
     ]
 }

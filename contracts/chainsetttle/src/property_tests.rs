@@ -234,7 +234,7 @@ mod contract_prop_tests {
         ChainSettleContract, ChainSettleContractClient, Milestone, MilestoneMode, MilestoneStatus,
         ShipmentOptions,
     };
-    use soroban_sdk::{testutils::Address as _, token, vec, Address, Env, String, Symbol};
+    use soroban_sdk::{testutils::Address as _, token, vec, Address, BytesN, Env, String, Symbol};
 
     fn make_env_and_client() -> (Env, Address, Address, Address, Address, Address, Address) {
         let env = Env::default();
@@ -284,6 +284,8 @@ mod contract_prop_tests {
                 release_after_ledger: 0,
                 proof_submitted_ledger: None,
                 dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
             },
             Milestone {
                 name: String::from_str(env, "M1"),
@@ -293,6 +295,8 @@ mod contract_prop_tests {
                 release_after_ledger: 0,
                 proof_submitted_ledger: None,
                 dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
             },
         ];
         client.create_shipment(
@@ -317,6 +321,14 @@ mod contract_prop_tests {
                 logistics_fee_bps: 0,
                 supplier_collateral: 0,
                 expires_at_ledger: None,
+
+
+                metadata_hash: None,
+                referrer: None,
+                buyer_cancel_fee_bps: 0,
+        early_bonus_pool: 0,
+        review_window_ledgers: None,
+
             },
         );
     }
@@ -567,7 +579,7 @@ mod milestone_percent_fuzz {
             MilestoneStatus, ShipmentOptions,
         };
         use proptest::prelude::*;
-        use soroban_sdk::{testutils::Address as _, token, vec, Address, Env, String};
+        use soroban_sdk::{testutils::Address as _, token, vec, Address, BytesN, Env, String};
 
         fn make_test_env() -> (Env, Address, Address, Address, Address, Address, Address) {
             let env = Env::default();
@@ -587,7 +599,7 @@ mod milestone_percent_fuzz {
             (env, contract_id, token_id, buyer, supplier, logistics, arbiter)
         }
 
-        fn default_options() -> ShipmentOptions {
+        fn default_options(env: &Env) -> ShipmentOptions {
             ShipmentOptions {
                 response_deadline: 0,
                 penalty_bps: 0,
@@ -598,6 +610,17 @@ mod milestone_percent_fuzz {
                 auto_confirm_ledgers: 0,
                 dispute_bond_amount: 0,
                 arbiter_fee_bps: 0,
+                logistics_fee_bps: 0,
+                supplier_collateral: 0,
+                expires_at_ledger: None,
+
+
+                metadata_hash: None,
+                referrer: None,
+                buyer_cancel_fee_bps: 0,
+        early_bonus_pool: 0,
+        review_window_ledgers: None,
+
             }
         }
 
@@ -610,6 +633,8 @@ mod milestone_percent_fuzz {
                 release_after_ledger: 0,
                 proof_submitted_ledger: None,
                 dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
             }
         }
 
@@ -636,7 +661,7 @@ mod milestone_percent_fuzz {
                     &supplier, &logistics, &arbiter, &tid,
                     &1_000_000i128,
                     &ms,
-                    &default_options(),
+                    &default_options(&env),
                 );
                 prop_assert!(
                     result.is_ok(),
@@ -658,7 +683,7 @@ mod milestone_percent_fuzz {
                     &supplier, &logistics, &arbiter, &tid,
                     &1_000_000i128,
                     &ms,
-                    &default_options(),
+                    &default_options(&env),
                 );
                 prop_assert!(
                     result.is_err(),
@@ -684,7 +709,7 @@ mod milestone_percent_fuzz {
                     &supplier, &logistics, &arbiter, &tid,
                     &1_000_000i128,
                     &ms,
-                    &default_options(),
+                    &default_options(&env),
                 );
                 prop_assert!(
                     result.is_err(),
@@ -705,7 +730,7 @@ mod milestone_percent_fuzz {
                     &supplier, &logistics, &arbiter, &tid,
                     &1_000_000i128,
                     &ms,
-                    &default_options(),
+                    &default_options(&env),
                 );
                 prop_assert!(result.is_ok(), "single 100% milestone must be accepted");
             }
