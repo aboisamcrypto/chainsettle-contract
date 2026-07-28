@@ -74,6 +74,7 @@ fn default_options(_env: &Env) -> ShipmentOptions {
         default_resolution: Resolution::Buyer,
         backup_arbiter: None,
         confirmation_cooldown_ledgers: None,
+        arbiter_panel: soroban_sdk::Vec::new(_env),
     }
 }
 
