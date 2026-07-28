@@ -348,6 +348,46 @@ pub struct ReputationScore {
     pub cancelled: u32,
 }
 
+/// Global policy: suppliers meeting these thresholds skip the proof confirmation cooldown.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ReputationFastTrack {
+    pub min_completed: u32,
+    /// Max (disputed / completed) ratio in basis points (e.g. 500 = 5%).
+    pub max_disputed_ratio_bps: u32,
+}
+
+/// Pending mutual-consent pause or resume request for a single shipment.
+#[contracttype]
+#[derive(Clone)]
+pub struct ShipmentPauseRequest {
+    pub requester: Address,
+    /// false = pause request, true = resume request
+    pub is_resume: bool,
+}
+
+/// Informational note attached to a milestone (no effect on status/payments).
+#[contracttype]
+#[derive(Clone)]
+pub struct MilestoneNote {
+    pub author: Address,
+    pub note: String,
+    pub ledger: u32,
+}
+
+/// Compact summary retained after a finished shipment is archived.
+#[contracttype]
+#[derive(Clone)]
+pub struct ArchivedShipment {
+    pub id: String,
+    pub buyer: Address,
+    pub supplier: Address,
+    pub status: ShipmentStatus,
+    pub total_amount: i128,
+    pub released_amount: i128,
+    pub completed_at: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct ArbiterStats {
@@ -755,6 +795,9 @@ pub enum ChainSettleError {
 const RECOVERY_THRESHOLD_LEDGERS: u32 = 100;
 #[cfg(not(test))]
 const RECOVERY_THRESHOLD_LEDGERS: u32 = 12_614_400;
+
+/// Max notes retained per milestone (oldest dropped on overflow).
+const MAX_MILESTONE_NOTES: u32 = 10;
 
 // ============================================================
 // CONTRACT
@@ -2679,6 +2722,7 @@ impl ChainSettleContract {
         if shipment.status != ShipmentStatus::Active {
             panic!("shipment is not active");
         }
+        Self::assert_shipment_not_paused(&env, &shipment_id);
         if milestone_index as usize >= shipment.milestones.len() as usize {
             panic!("invalid milestone index");
         }
@@ -2719,6 +2763,8 @@ impl ChainSettleContract {
                 panic!("MilestoneOutOfOrder");
             }
         }
+
+        Self::assert_shipment_not_paused(&env, &shipment_id);
 
         let current_ledger = env.ledger().sequence();
         let is_resubmission = milestone.proof_hash.len() > 0;
@@ -2905,8 +2951,11 @@ impl ChainSettleContract {
             panic!("milestone proof not yet submitted");
         }
 
+        Self::assert_shipment_not_paused(&env, &shipment_id);
+
         let cooldown = Self::get_confirmation_cooldown_internal(&env, &shipment_id);
-        if cooldown > 0 {
+        let fast_track = Self::is_fast_track_eligible_internal(&env, &shipment.supplier);
+        if cooldown > 0 && !fast_track {
             let proof_ledger = milestone.proof_submitted_ledger.unwrap_or(0);
             if env.ledger().sequence() < proof_ledger + cooldown {
                 panic!("confirmation cooldown not elapsed");
@@ -3446,7 +3495,10 @@ impl ChainSettleContract {
         }
         Self::assert_is_buyer(&shipment, &buyer);
 
+        Self::assert_shipment_not_paused(&env, &shipment_id);
+
         let cooldown = Self::get_confirmation_cooldown_internal(&env, &shipment_id);
+        let fast_track = Self::is_fast_track_eligible_internal(&env, &shipment.supplier);
 
         // Validate all indices and statuses before mutating anything.
         for i in 0..milestone_indices.len() {
@@ -3458,7 +3510,7 @@ impl ChainSettleContract {
             if m.status != MilestoneStatus::ProofSubmitted {
                 panic!("milestone proof not yet submitted");
             }
-            if cooldown > 0 {
+            if cooldown > 0 && !fast_track {
                 let proof_ledger = m.proof_submitted_ledger.unwrap_or(0);
                 if env.ledger().sequence() < proof_ledger + cooldown {
                     panic!("confirmation cooldown not elapsed");
@@ -3610,6 +3662,7 @@ impl ChainSettleContract {
         if shipment.status != ShipmentStatus::Active {
             panic!("shipment is not active");
         }
+        Self::assert_shipment_not_paused(&env, &shipment_id);
         Self::require_buyer_auth(&shipment, &buyer);
 
         // Dispute cooldown check.
@@ -6533,6 +6586,11 @@ impl ChainSettleContract {
             .unwrap_or(false)
     }
 
+    /// Whether a specific shipment is mutually-consent paused.
+    pub fn is_shipment_paused(env: Env, shipment_id: String) -> bool {
+        Self::is_shipment_paused_internal(&env, &shipment_id)
+    }
+
     pub fn get_total_escrowed_value(env: Env, token: Address) -> i128 {
         env.storage()
             .persistent()
@@ -6754,6 +6812,93 @@ impl ChainSettleContract {
             .unwrap_or(false);
         if paused {
             panic!("contract is paused");
+        }
+    }
+
+    fn is_shipment_paused_internal(env: &Env, shipment_id: &String) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt::ShipmentPaused(shipment_id.clone()))
+            .unwrap_or(false)
+    }
+
+    fn assert_shipment_not_paused(env: &Env, shipment_id: &String) {
+        if Self::is_shipment_paused_internal(env, shipment_id) {
+            panic!("shipment is paused");
+        }
+    }
+
+    fn is_fast_track_eligible_internal(env: &Env, supplier: &Address) -> bool {
+        let policy: Option<ReputationFastTrack> = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt::ReputationFastTrack);
+        let Some(policy) = policy else {
+            return false;
+        };
+        let score = Self::get_reputation_internal(env, supplier);
+        if score.completed < policy.min_completed {
+            return false;
+        }
+        if score.completed == 0 {
+            return false;
+        }
+        let ratio_bps = (score.disputed as u64)
+            .saturating_mul(10_000)
+            / (score.completed as u64);
+        ratio_bps <= policy.max_disputed_ratio_bps as u64
+    }
+
+    fn assert_buyer_or_supplier(shipment: &Shipment, caller: &Address) {
+        if !Self::is_buyer(shipment, caller) && *caller != shipment.supplier {
+            panic!("unauthorized");
+        }
+    }
+
+    fn assert_shipment_participant(shipment: &Shipment, caller: &Address) {
+        if !Self::is_buyer(shipment, caller)
+            && *caller != shipment.supplier
+            && *caller != shipment.logistics
+        {
+            panic!("unauthorized");
+        }
+    }
+
+    fn bump_shipment_deadlines_for_pause(env: &Env, shipment: &mut Shipment, delta: u32) {
+        if delta == 0 {
+            return;
+        }
+        for i in 0..shipment.milestones.len() {
+            let mut m = shipment.milestones.get(i).unwrap();
+            if m.deadline_ledger > 0 {
+                m.deadline_ledger = m.deadline_ledger.saturating_add(delta);
+            }
+            if let Some(ps) = m.proof_submitted_ledger {
+                m.proof_submitted_ledger = Some(ps.saturating_add(delta));
+            }
+            if let Some(d) = m.dispute_opened_ledger {
+                m.dispute_opened_ledger = Some(d.saturating_add(delta));
+            }
+            if m.release_after_ledger > 0 {
+                m.release_after_ledger = m.release_after_ledger.saturating_add(delta);
+            }
+            shipment.milestones.set(i, m);
+
+            let deadline_key = DataKeyExt::MilestoneDeadline(shipment.id.clone(), i);
+            if let Some(dl) = env
+                .storage()
+                .persistent()
+                .get::<DataKeyExt, u32>(&deadline_key)
+            {
+                if dl > 0 {
+                    env.storage()
+                        .persistent()
+                        .set(&deadline_key, &(dl.saturating_add(delta)));
+                }
+            }
+        }
+        if let Some(exp) = shipment.expires_at_ledger {
+            shipment.expires_at_ledger = Some(exp.saturating_add(delta));
         }
     }
 
@@ -7553,6 +7698,7 @@ mod storage;
 mod test_arbiter_pool;
 mod test_common;
 mod test_new_features;
+mod test_feat_four;
 mod test_correct_proof;
 mod test_cancellation_reason;
 
