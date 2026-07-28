@@ -127,6 +127,7 @@ pub fn default_options(_env: &Env) -> ShipmentOptions {
         default_resolution: Resolution::Buyer,
         backup_arbiter: None,
         confirmation_cooldown_ledgers: None,
+        arbiter_panel: vec![_env],
     }
 }
 
