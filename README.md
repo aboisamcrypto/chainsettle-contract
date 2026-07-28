@@ -431,6 +431,35 @@ A basis point (bps) is one-hundredth of a percent: `1 bps = 0.01%`, and
 fraction of the total protocol fee using the configured bps value, so a
 setting of `500` bps means the referrer receives `5%` of that fee on
 shipment completion.
+
+Volume-based fee tiers
+Buyers can receive a reduced platform fee once their lifetime shipment volume
+crosses admin-configured thresholds. Each `FeeTier` entry is a pair:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `min_lifetime_volume` | `i128` | Minimum cumulative volume (token base units) the address must have accrued |
+| `fee_bps` | `u32` | Fee in basis points applied when that threshold is met |
+
+`set_fee_tiers(admin, tiers: Vec<FeeTier>)` — admin-only. Stores up to 5 tier
+entries on instance storage. Prefer listing higher `min_lifetime_volume` values
+first; at lookup time the contract still picks the **lowest** `fee_bps` among
+every tier whose threshold the address meets.
+`get_fee_tier(address) → u32` (read-only) — returns the effective fee bps for
+`address`:
+1. Load the address's `LifetimeVolume`.
+2. Among configured tiers where `volume >= min_lifetime_volume`, take the
+   smallest `fee_bps`.
+3. If no tier matches (or no tiers are configured), fall back to
+   `FeeConfig.fee_bps`, or `0` if fee config was never set.
+
+Per-address application: when a shipment is created, the primary buyer's
+resolved tier bps is locked onto that shipment (`ShipmentFeeBps`) so later
+volume changes do not alter fees mid-flight. Subsequent payouts for that
+shipment use the locked value; `get_fee_tier` always reflects the address's
+*current* volume against the live tier table (useful for dashboards and for
+previewing the rate the next shipment would lock).
+
 `set_max_concurrent_disputes(admin, limit: u32)`
 Admin-only. Sets how many milestones on a single shipment can be under
 dispute at the same time. Defaults to `1` if never called. `raise_dispute`

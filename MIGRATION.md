@@ -8,8 +8,11 @@ Issue #137 proposes replacing the `String`-typed `shipment_id` with `BytesN<32>`
 the contract to eliminate variable-length storage overhead, improve key collision resistance,
 and align with Soroban identifier best practices.
 
-**Status:** Planned — not yet applied to production. This document describes the migration path
-when the refactor is executed in a future upgrade.
+**Status:** Deferred — issue [#137](https://github.com/shakurJJ/chainsettle-contract/issues/137)
+was closed by documenting this migration path only ([PR #157](https://github.com/shakurJJ/chainsettle-contract/pull/157));
+the `String` → `BytesN<32>` type change was **not** implemented. `lib.rs` still uses `String`
+for `shipment_id` everywhere. This guide remains the plan for a future upgrade that actually
+applies the refactor; closing #137 did not mean the migration shipped.
 
 ---
 
