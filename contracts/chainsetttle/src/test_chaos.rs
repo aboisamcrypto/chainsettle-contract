@@ -116,10 +116,42 @@ fn exec(
             }
             let id = String::from_str(env, SLOT_IDS[*slot]);
             let milestones = two_milestone_chaos(env);
+            let buyers = vec![env, buyer.clone()];
+            let milestone_mode = if *sequential {
+                MilestoneMode::Sequential
+            } else {
+                MilestoneMode::Parallel
+            };
+            let options = ShipmentOptions {
+                response_deadline: 0,
+                penalty_bps: 0,
+                milestone_mode,
+                holdback_ledgers: *holdback,
+                dispute_cooldown_ledgers: 0,
+                late_penalty_bps_per_ledger: 0,
+                auto_confirm_ledgers: 0,
+                dispute_bond_amount: 0,
+                arbiter_fee_bps: 0,
+                logistics_fee_bps: 0,
+                supplier_collateral: 0,
+                expires_at_ledger: None,
+                metadata_hash: None,
+                referrer: None,
+                buyer_cancel_fee_bps: 0,
+                early_bonus_pool: 0,
+                review_window_ledgers: None,
+                milestone_splits: vec![env],
+                deadlines: vec![env],
+                dispute_timeout_seconds: 0,
+                default_resolution: Resolution::Buyer,
+                backup_arbiter: None,
+                confirmation_cooldown_ledgers: None,
+                arbiter_panel: vec![env],
+            };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 client.create_shipment(
-                    &id, buyer, supplier, logistics, arbiter, token_id,
-                    amount, &milestones, sequential, holdback,
+                    &id, &buyers, supplier, logistics, arbiter, token_id,
+                    amount, &milestones, &options,
                 );
             }));
             if result.is_ok() {
@@ -134,7 +166,7 @@ fn exec(
             let id = String::from_str(env, SLOT_IDS[*slot]);
             let proof = String::from_str(env, "ipfs://chaos");
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                client.submit_proof(supplier, &id, m, &proof, &Symbol::new(&env, "ipfs"));
+                client.submit_proof(supplier, &id, m, &proof, &Symbol::new(env, "ipfs"));
             }));
         }
 

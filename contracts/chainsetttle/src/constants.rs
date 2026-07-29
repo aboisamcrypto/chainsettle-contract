@@ -5,9 +5,6 @@ pub const TTL_INITIAL_LEDGERS: u32 = 100_000;
 /// 6_300_000 ≈ 5s × 86_400s/day × 365 days.
 pub const TTL_MAX_LEDGERS: u32 = 6_300_000;
 
-/// Maximum number of milestones allowed per shipment.
-pub const MAX_MILESTONES: u32 = 20;
-
 /// Minimum shipment amount in token base units (stroops). Must be > 0.
 pub const MIN_SHIPMENT_AMOUNT: i128 = 1;
 
