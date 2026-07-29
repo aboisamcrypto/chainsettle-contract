@@ -7916,7 +7916,7 @@ mod test_cancellation_reason;
 // mod test_dispute;
 // mod test_errors;
 mod test_permissions;
-// mod test_query;
+mod test_query;
 mod test_shipment;
 mod test_issues;
 mod test_arbiter_security;
