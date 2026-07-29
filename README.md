@@ -949,9 +949,9 @@ Roadmap
 [x] Dispute resolution via arbiter
 [x] USDC token transfers via Stellar Asset Contract
 [x] Full unit test suite
-[ ] Sequential milestone enforcement (optional)
-[ ] Multi-token support (XLM, EURC)
-[ ] Partial cancellation (after some milestones confirmed)
+[x] Sequential milestone enforcement (#162)
+[x] Multi-token support (XLM, EURC)
+[x] Partial cancellation (after some milestones confirmed) (#163)
 [x] Contract upgrade mechanism
 [ ] Mainnet deployment + verification
 [ ] Integration with `chainsetttle-backend` event listener
