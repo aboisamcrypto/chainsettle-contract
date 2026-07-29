@@ -1,3 +1,4 @@
+
 ChainSettle — Contract Repo
 ![CI](https://github.com/shakurJJ/chainsettle-contract/actions/workflows/ci.yml/badge.svg)
 ![codecov](https://codecov.io/gh/shakurJJ/chainsettle-contract/branch/main/graph/badge.svg)
@@ -20,6 +21,7 @@ rebalance_milestones
 Partial Disputes & Escalation Checks
 Advance Payment Lifecycle
 Admin Succession & Emergency Recovery
+Multisig Admin Governance
 Contract Upgrades & Migration
 Events
 Error Codes
@@ -711,6 +713,85 @@ Because recovered funds go to the admin rather than back to the buyer,
 this function is meant purely as a break-glass measure for abandoned
 escrow, not as a way to resolve normal disputes — those should go through
 `raise_dispute` / `raise_partial_dispute` and `resolve_dispute` instead.
+---
+Multisig Admin Governance
+ChainSettle supports multi-signature admin governance to prevent unilateral contract
+changes. Once enabled, sensitive admin operations require approval from multiple
+trusted keys, and the legacy single-key `upgrade()` path is disabled.
+
+`initialize_multisig_admin(admin, admins, threshold)`
+Replaces single-admin mode with a multisig scheme. Only the current single admin
+can call this. It stores the set of registered admin keys (`admins`) and the
+minimum number of distinct approvals required (`threshold`). After this call:
+- Any registered admin can propose or approve admin actions.
+- The single-key `upgrade()` function panics; upgrades must use
+  `propose_upgrade` / `approve_upgrade` instead.
+- `threshold` must be between `1` and `admins.len()`. A threshold of `1`
+  executes immediately on first proposal.
+
+`propose_admin_action(admin, action_id, operation, params)`
+Registers an approval from `admin` for the action identified by `action_id`.
+The caller must be one of the registered multisig admins. Each admin can approve
+a given `action_id` at most once. When the number of collected approvals reaches
+`threshold`, the contract executes the action and clears the pending approvals.
+
+`get_pending_admin_actions(action_id) → Vec<Address>`
+Returns the list of admin addresses that have already approved the specified
+`action_id`. Useful for off-chain dashboards or wallets to display how many
+more approvals are needed before the action executes.
+
+Workflow example — enable multisig and execute a protected action:
+```bash
+# 1. Current single admin enables multisig with 2-of-3 control
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source current-admin-account \
+  --network testnet \
+  -- initialize_multisig_admin \
+  --admin <CURRENT_ADMIN> \
+  --admins '["<ADMIN_A>","<ADMIN_B>","<ADMIN_C>"]' \
+  --threshold 2
+
+# 2. Any registered admin proposes an action (e.g. set_fee_config)
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source admin-a-account \
+  --network testnet \
+  -- propose_admin_action \
+  --admin <ADMIN_A> \
+  --action_id "fee-update-2026-01" \
+  --operation set_fee_config \
+  --params '{"fee_bps": 300, "treasury": "<TREASURY_ADDR>"}'
+
+# 3. A second admin approves the same action_id
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source admin-b-account \
+  --network testnet \
+  -- propose_admin_action \
+  --admin <ADMIN_B> \
+  --action_id "fee-update-2026-01" \
+  --operation set_fee_config \
+  --params '{"fee_bps": 300, "treasury": "<TREASURY_ADDR>"}'
+# Threshold (2) is now met → action executes automatically
+
+# 4. Query pending approvals for an action
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  -- get_pending_admin_actions \
+  --action_id "fee-update-2026-01"
+```
+
+Security notes:
+- `initialize_multisig_admin` is irreversible on-chain. To change the admin set
+  or threshold, the multisig itself must propose and approve a new
+  `initialize_multisig_admin` call.
+- The current single admin retains full control until `initialize_multisig_admin`
+  is called. After that, every sensitive admin action requires the configured
+  threshold of distinct admin signatures.
+- `get_pending_admin_actions` is read-only and does not require authorization.
+
 ---
 Contract Upgrades & Migration
 ChainSettle supports in-place WebAssembly (WASM) contract upgrades on Soroban using the contract deployer's `update_current_contract_wasm` interface. In-place upgrades preserve the existing contract ID, token escrow balances, state indices, and historical shipment records.
