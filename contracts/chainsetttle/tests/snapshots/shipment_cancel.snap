@@ -1,0 +1,120 @@
+{
+  "after_cancel": {
+    "arbiter": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5)",
+    "audit_log": [
+      {
+        "action": "Symbol(shipment_created)",
+        "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4)",
+        "detail": "Symbol(create_shipment)",
+        "ledger": 0
+      }
+    ],
+    "auto_confirm_ledgers": 0,
+    "buyers": [
+      "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4)"
+    ],
+    "created_at": 0,
+    "dispute_bond_amount": 0,
+    "dispute_cooldown_ledgers": 0,
+    "holdback_ledgers": 0,
+    "id": "SHIP-CANCEL-SNAPSHOT",
+    "last_dispute_resolved_ledger": null,
+    "late_penalty_bps_per_ledger": 0,
+    "logistics": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM)",
+    "milestone_mode": "parallel",
+    "milestones": [
+      {
+        "dispute_opened_ledger": null,
+        "name": "Goods Dispatched",
+        "payment_percent": 25,
+        "proof_hash": "",
+        "proof_submitted_ledger": null,
+        "release_after_ledger": 0,
+        "status": "pending"
+      },
+      {
+        "dispute_opened_ledger": null,
+        "name": "In Transit",
+        "payment_percent": 50,
+        "proof_hash": "",
+        "proof_submitted_ledger": null,
+        "release_after_ledger": 0,
+        "status": "pending"
+      },
+      {
+        "dispute_opened_ledger": null,
+        "name": "Delivered",
+        "payment_percent": 25,
+        "proof_hash": "",
+        "proof_submitted_ledger": null,
+        "release_after_ledger": 0,
+        "status": "pending"
+      }
+    ],
+    "open_dispute_count": 0,
+    "released_amount": 0,
+    "status": "cancelled",
+    "supplier": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4)",
+    "token": "Contract(CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF)",
+    "total_amount": 1000000000
+  },
+  "create": {
+    "arbiter": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5)",
+    "audit_log": [
+      {
+        "action": "Symbol(shipment_created)",
+        "caller": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4)",
+        "detail": "Symbol(create_shipment)",
+        "ledger": 0
+      }
+    ],
+    "auto_confirm_ledgers": 0,
+    "buyers": [
+      "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4)"
+    ],
+    "created_at": 0,
+    "dispute_bond_amount": 0,
+    "dispute_cooldown_ledgers": 0,
+    "holdback_ledgers": 0,
+    "id": "SHIP-CANCEL-SNAPSHOT",
+    "last_dispute_resolved_ledger": null,
+    "late_penalty_bps_per_ledger": 0,
+    "logistics": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM)",
+    "milestone_mode": "parallel",
+    "milestones": [
+      {
+        "dispute_opened_ledger": null,
+        "name": "Goods Dispatched",
+        "payment_percent": 25,
+        "proof_hash": "",
+        "proof_submitted_ledger": null,
+        "release_after_ledger": 0,
+        "status": "pending"
+      },
+      {
+        "dispute_opened_ledger": null,
+        "name": "In Transit",
+        "payment_percent": 50,
+        "proof_hash": "",
+        "proof_submitted_ledger": null,
+        "release_after_ledger": 0,
+        "status": "pending"
+      },
+      {
+        "dispute_opened_ledger": null,
+        "name": "Delivered",
+        "payment_percent": 25,
+        "proof_hash": "",
+        "proof_submitted_ledger": null,
+        "release_after_ledger": 0,
+        "status": "pending"
+      }
+    ],
+    "open_dispute_count": 0,
+    "released_amount": 0,
+    "status": "active",
+    "supplier": "Contract(CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4)",
+    "token": "Contract(CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF)",
+    "total_amount": 1000000000
+  }
+}

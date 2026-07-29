@@ -2,7 +2,7 @@ use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 use crate::{
     constants::{TTL_INITIAL_LEDGERS, TTL_MAX_LEDGERS},
-    AuditEntry, CancelPolicy, ContractStats, DisputeEntry, FeeConfig, MultiAdminConfig, Shipment,
+    AuditEntry, CancelPolicy, ContractStats, DisputeEntry, FeeConfig, MultiAdminConfig, ReputationScore, Shipment,
     ShipmentStatus,
 };
 
@@ -20,6 +20,8 @@ pub enum DataKey {
     V1AllShipments,
     /// Supplier-to-shipments index.
     V1SupplierShipments(Address),
+    /// Supplier reputation score.
+    V1SupplierRep(Address),
     /// Buyer-to-shipments index.
     V1BuyerShipments(Address),
     V1Admin,
@@ -144,6 +146,21 @@ pub fn get_supplier_shipments(env: &Env, supplier: &Address) -> Vec<String> {
 pub fn set_supplier_shipments(env: &Env, supplier: &Address, list: &Vec<String>) {
     let key = DataKey::V1SupplierShipments(supplier.clone());
     env.storage().persistent().set(&key, list);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_INITIAL_LEDGERS, TTL_MAX_LEDGERS);
+}
+
+pub fn get_supplier_reputation(env: &Env, supplier: &Address) -> ReputationScore {
+    env.storage()
+        .persistent()
+        .get(&DataKey::V1SupplierRep(supplier.clone()))
+        .unwrap_or_default()
+}
+
+pub fn set_supplier_reputation(env: &Env, supplier: &Address, score: &ReputationScore) {
+    let key = DataKey::V1SupplierRep(supplier.clone());
+    env.storage().persistent().set(&key, score);
     env.storage()
         .persistent()
         .extend_ttl(&key, TTL_INITIAL_LEDGERS, TTL_MAX_LEDGERS);
@@ -535,6 +552,44 @@ pub fn remove_arbiter_rotation(env: &Env, shipment_id: &String) {
     env.storage()
         .temporary()
         .remove(&DataKey::V1ArbiterRotation(shipment_id.clone()));
+}
+
+// ============================================================
+// ARBITER FEE TIERS
+// ============================================================
+
+pub fn get_arbiter_fee_tiers(env: &Env) -> Vec<(i128, u32)> {
+    env.storage()
+        .persistent()
+        .get(&crate::DataKeyExt::ArbiterFeeTiers)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_arbiter_fee_tiers(env: &Env, tiers: &Vec<(i128, u32)>) {
+    let key = crate::DataKeyExt::ArbiterFeeTiers;
+    env.storage().persistent().set(&key, tiers);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, crate::constants::TTL_INITIAL_LEDGERS, crate::constants::TTL_MAX_LEDGERS);
+}
+
+// ============================================================
+// ARBITER STATS
+// ============================================================
+
+pub fn get_arbiter_stats(env: &Env, arbiter: &Address) -> crate::ArbiterStats {
+    env.storage()
+        .persistent()
+        .get(&crate::DataKeyExt::ArbiterStats(arbiter.clone()))
+        .unwrap_or_default()
+}
+
+pub fn set_arbiter_stats(env: &Env, arbiter: &Address, stats: &crate::ArbiterStats) {
+    let key = crate::DataKeyExt::ArbiterStats(arbiter.clone());
+    env.storage().persistent().set(&key, stats);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, crate::constants::TTL_INITIAL_LEDGERS, crate::constants::TTL_MAX_LEDGERS);
 }
 
 // ============================================================

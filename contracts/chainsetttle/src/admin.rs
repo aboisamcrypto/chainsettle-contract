@@ -35,6 +35,10 @@ impl ChainSettleContract {
         storage::set_circuit_breaker_window(&env, 0u32);
         storage::set_circuit_breaker_window_start(&env, 0u32);
         storage::set_circuit_breaker_window_outflow(&env, 0i128);
+        env.events().publish(
+            (Symbol::new(&env, "admin_action"), Symbol::new(&env, "init")),
+            (admin, env.ledger().sequence()),
+        );
     }
 
     // ----------------------------------------------------------
@@ -66,7 +70,7 @@ impl ChainSettleContract {
         storage::set_paused(&env, true);
         env.events().publish(
             (Symbol::new(&env, "contract_paused"),),
-            env.ledger().sequence(),
+            (admin, env.ledger().sequence()),
         );
     }
 
@@ -77,7 +81,7 @@ impl ChainSettleContract {
         storage::set_paused(&env, false);
         env.events().publish(
             (Symbol::new(&env, "contract_unpaused"),),
-            env.ledger().sequence(),
+            (admin, env.ledger().sequence()),
         );
     }
 
@@ -215,7 +219,11 @@ impl ChainSettleContract {
             panic!("fee_bps exceeds maximum of 1000");
         }
         Self::append_admin_action(&env, Symbol::new(&env, "set_fee_config"), Symbol::new(&env, "fee_config_updated"));
-        storage::set_fee_config(&env, &FeeConfig { fee_bps, treasury });
+        storage::set_fee_config(&env, &FeeConfig { fee_bps, treasury: treasury.clone() });
+        env.events().publish(
+            (Symbol::new(&env, "admin_action"), Symbol::new(&env, "set_fee_config")),
+            (admin, fee_bps, treasury, env.ledger().sequence()),
+        );
     }
 
     pub fn set_max_concurrent_disputes(env: Env, admin: Address, limit: u32) {
@@ -251,6 +259,10 @@ impl ChainSettleContract {
             &env,
             Symbol::new(&env, "blacklist_address"),
             Symbol::new(&env, "address_blacklisted"),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "admin_action"), Symbol::new(&env, "blacklist_address")),
+            (admin, address, reason_hash, env.ledger().sequence()),
         );
     }
 
@@ -339,6 +351,41 @@ impl ChainSettleContract {
             (Symbol::new(&env, "nomination_revoked"),),
             env.ledger().sequence(),
         );
+    }
+
+    // ----------------------------------------------------------
+    // ARBITER FEE TIERS
+    // ----------------------------------------------------------
+
+    pub fn set_arbiter_fee_tiers(env: Env, admin: Address, mut tiers: Vec<(i128, u32)>) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+
+        let mut prev_threshold = -1_i128;
+        for i in 0..tiers.len() {
+            let (threshold, bps) = tiers.get(i).unwrap();
+            if threshold < 0 {
+                panic!("threshold must be non-negative");
+            }
+            if threshold <= prev_threshold {
+                panic!("tiers must be strictly ascending by threshold");
+            }
+            if bps > MAX_FEE_BPS {
+                panic!("fee_bps exceeds maximum");
+            }
+            prev_threshold = threshold;
+        }
+
+        Self::append_admin_action(&env, Symbol::new(&env, "set_arbiter_fee_tiers"), Symbol::new(&env, "arbiter_fee_tiers_updated"));
+        storage::set_arbiter_fee_tiers(&env, &tiers);
+        env.events().publish(
+            (Symbol::new(&env, "admin_action"), Symbol::new(&env, "set_arbiter_fee_tiers")),
+            (admin, env.ledger().sequence()),
+        );
+    }
+
+    pub fn get_arbiter_fee_tiers(env: Env) -> Vec<(i128, u32)> {
+        storage::get_arbiter_fee_tiers(&env)
     }
 
     // ----------------------------------------------------------
