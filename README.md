@@ -438,6 +438,24 @@ stellar contract invoke \
   --window_ledgers 1000
 ```
 
+Platform fee configuration
+The admin can configure a platform fee deducted from each milestone payment.
+`set_fee_config(admin, fee_bps, treasury)` — admin-only. Sets the platform
+fee rate and treasury address.
+`get_fee_config() → Option<FeeConfig>` (read-only) — returns the current
+configuration, or `None` if no fee has been configured (effective rate = `0` bps).
+
+| Parameter | Type | Description |
+|---|---|---|
+| `fee_bps` | `u32` | Fee rate in basis points (0–1000, where 100 = 1%). Capped at 1000 (10%). |
+| `treasury` | `Address` | Wallet address that receives the collected platform fees. |
+
+The fee is deducted from each milestone payout at confirmation or dispute
+resolution time. If no fee config has been set, the effective fee rate is
+`0` bps and no platform fees are charged.
+
+---
+
 Referral fee program
 The referral fee mechanism lets an admin reward a referrer when a shipment
 completes successfully. The fee is paid out of the protocol fee that would
