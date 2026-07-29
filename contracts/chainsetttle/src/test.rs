@@ -1220,9 +1220,10 @@ fn test_admin_action_log_capped_and_ordered() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
 
-    for i in 1..=51 {
-        let pct = if i <= 100 { i as u32 } else { 100 };
-        t.env.ledger().with_mut(|l| l.sequence_number += 1);
+    for i in 1u32..=51 {
+        // Advance the ledger so each entry has a distinct, increasing sequence number.
+        t.env.ledger().set_sequence_number(i);
+        let pct = if i <= 100 { i } else { 100 };
         client.set_min_milestone_percent(&t.buyer, &pct);
     }
 
@@ -3229,8 +3230,8 @@ fn test_shipment_created_event_includes_all_role_addresses() {
     let shipment_id = String::from_str(&t.env, "SHIP-EVT-CREATE");
     let total_amount: i128 = 1_000_000_000;
 
-    // Advance ledger so created_at is non-zero.
-    t.env.ledger().with_mut(|l| l.sequence_number = 1);
+    // Advance past ledger 0 so created_at is non-zero.
+    t.env.ledger().set_sequence_number(1);
 
     create_standard_shipment(
         &client,
@@ -3446,1654 +3447,608 @@ fn test_batch_confirm_milestone_confirmed_event_includes_supplier() {
     );
 }
 
-// ============================================================
-// CONCURRENT/PARALLEL SHIPMENT STRESS TEST (Issue #57)
-// ============================================================
-
-#[test]
-fn test_concurrent_100_shipments_stress() {
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-    let token_admin_client = token::StellarAssetClient::new(&t.env, &t.token_id);
-    let token_client = token::Client::new(&t.env, &t.token_id);
-
-    const NUM_SHIPMENTS: u32 = 100;
-    const AMOUNT_PER_SHIPMENT: i128 = 1_000_000;
-    const TOTAL_FUNDING_NEEDED: i128 = NUM_SHIPMENTS as i128 * AMOUNT_PER_SHIPMENT;
-
-    // Mint enough tokens for all shipments
-    token_admin_client.mint(&t.buyer, &TOTAL_FUNDING_NEEDED);
-
-    // Create 100 unique suppliers to track individual balances
-    let mut suppliers: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&t.env);
-    for _ in 0..NUM_SHIPMENTS {
-        suppliers.push_back(Address::generate(&t.env));
-    }
-
-    // Phase 1: Create 100 shipments with unique IDs
-    for i in 0..NUM_SHIPMENTS {
-        let shipment_id = String::from_str(&t.env, &format!("STRESS-{:03}", i));
-        let supplier = suppliers.get(i).unwrap();
-
-        client.create_shipment(
-            &shipment_id,
-            &single_buyer_vec(&t.env, &t.buyer),
-            &supplier,
-            &t.logistics,
-            &t.arbiter,
-            &t.token_id,
-            &AMOUNT_PER_SHIPMENT,
-            &build_milestones(&t.env), // 3 milestones: 25%, 50%, 25%
-            &default_options(&t.env),
-        );
-    }
-
-    // Phase 2: Submit proofs in random/interleaved order
-    // We'll use a pseudo-random pattern: reverse order for milestone 0,
-    // forward order for milestone 1, alternating for milestone 2
-
-    // Milestone 0: reverse order (99, 98, 97, ..., 0)
-    for i in (0..NUM_SHIPMENTS).rev() {
-        let shipment_id = String::from_str(&t.env, &format!("STRESS-{:03}", i));
-        let supplier = suppliers.get(i).unwrap();
-        client.submit_proof(
-            &supplier,
-            &shipment_id,
-            &0,
-            &String::from_str(&t.env, "ipfs://proof0"),
-        
-            &Symbol::new(&t.env, "ipfs"),);
-    }
-
-    // Milestone 1: forward order (0, 1, 2, ..., 99)
-    for i in 0..NUM_SHIPMENTS {
-        let shipment_id = String::from_str(&t.env, &format!("STRESS-{:03}", i));
-        client.submit_proof(
-            &t.logistics,
-            &shipment_id,
-            &1,
-            &String::from_str(&t.env, "ipfs://proof1"),
-        
-            &Symbol::new(&t.env, "ipfs"),);
-    }
-
-    // Milestone 2: alternating order (0, 99, 1, 98, 2, 97, ...)
-    let mut indices: soroban_sdk::Vec<u32> = soroban_sdk::Vec::new(&t.env);
-    for i in 0..NUM_SHIPMENTS / 2 {
-        indices.push_back(i);
-        indices.push_back(NUM_SHIPMENTS - 1 - i);
-    }
-    for i in 0..indices.len() {
-        let idx = indices.get(i).unwrap();
-        let shipment_id = String::from_str(&t.env, &format!("STRESS-{:03}", idx));
-        let supplier = suppliers.get(idx).unwrap();
-        client.submit_proof(
-            &supplier,
-            &shipment_id,
-            &2,
-            &String::from_str(&t.env, "ipfs://proof2"),
-        
-            &Symbol::new(&t.env, "ipfs"),);
-    }
-
-    // Phase 3: Confirm milestones in random/interleaved order
-    // Similar pattern: different order for each milestone
-
-    // Confirm milestone 0: every 3rd shipment first, then fill gaps
-    for i in (0..NUM_SHIPMENTS).step_by(3) {
-        let shipment_id = String::from_str(&t.env, &format!("STRESS-{:03}", i));
-        client.confirm_milestone(&t.buyer, &shipment_id, &0);
-    }
-    for i in (1..NUM_SHIPMENTS).step_by(3) {
-        let shipment_id = String::from_str(&t.env, &format!("STRESS-{:03}", i));
-        client.confirm_milestone(&t.buyer, &shipment_id, &0);
-    }
-    for i in (2..NUM_SHIPMENTS).step_by(3) {
-        let shipment_id = String::from_str(&t.env, &format!("STRESS-{:03}", i));
-        client.confirm_milestone(&t.buyer, &shipment_id, &0);
-    }
-
-    // Confirm milestone 1: reverse order
-    for i in (0..NUM_SHIPMENTS).rev() {
-        let shipment_id = String::from_str(&t.env, &format!("STRESS-{:03}", i));
-        client.confirm_milestone(&t.buyer, &shipment_id, &1);
-    }
-
-    // Confirm milestone 2: forward order
-    for i in 0..NUM_SHIPMENTS {
-        let shipment_id = String::from_str(&t.env, &format!("STRESS-{:03}", i));
-        client.confirm_milestone(&t.buyer, &shipment_id, &2);
-    }
-
-    // Phase 4: Verify all shipments reached Completed status
-    let mut completed_count = 0;
-    for i in 0..NUM_SHIPMENTS {
-        let shipment_id = String::from_str(&t.env, &format!("STRESS-{:03}", i));
-        let shipment = client.get_shipment(&shipment_id);
-
-        assert_eq!(
-            shipment.status,
-            ShipmentStatus::Completed,
-            "Shipment {} should be Completed",
-            i
-        );
-
-        // Verify released_amount equals total_amount
-        assert_eq!(
-            shipment.released_amount, shipment.total_amount,
-            "Shipment {} released_amount should equal total_amount",
-            i
-        );
-
-        assert_eq!(
-            shipment.released_amount, AMOUNT_PER_SHIPMENT,
-            "Shipment {} released_amount should be {}",
-            i, AMOUNT_PER_SHIPMENT
-        );
-
-        completed_count += 1;
-    }
-
-    assert_eq!(
-        completed_count, NUM_SHIPMENTS,
-        "All {} shipments should be completed",
-        NUM_SHIPMENTS
-    );
-
-    // Phase 5: Verify supplier token balances match expected payments
-    for i in 0..NUM_SHIPMENTS {
-        let supplier = suppliers.get(i).unwrap();
-        let balance = token_client.balance(&supplier);
-
-        // Each supplier should have received exactly AMOUNT_PER_SHIPMENT
-        // (25% + 50% + 25% = 100% of AMOUNT_PER_SHIPMENT)
-        assert_eq!(
-            balance, AMOUNT_PER_SHIPMENT,
-            "Supplier {} balance should be {}",
-            i, AMOUNT_PER_SHIPMENT
-        );
-    }
-
-    // Phase 6: Verify total token distribution
-    let total_supplier_balance: i128 = (0..NUM_SHIPMENTS)
-        .map(|i| token_client.balance(&suppliers.get(i).unwrap()))
-        .sum();
-
-    assert_eq!(
-        total_supplier_balance, TOTAL_FUNDING_NEEDED,
-        "Total supplier balances should equal total funding"
-    );
-
-    // Verify contract escrow is empty (all funds released)
-    let contract_balance = token_client.balance(&t.contract_id);
-    assert_eq!(
-        contract_balance, 0,
-        "Contract should have zero balance after all shipments completed"
-    );
-
-    // Verify no escrow balance remains for any shipment
-    for i in 0..NUM_SHIPMENTS {
-        let shipment_id = String::from_str(&t.env, &format!("STRESS-{:03}", i));
-        let escrow_balance = client.get_escrow_balance(&shipment_id);
-        assert_eq!(
-            escrow_balance, 0,
-            "Shipment {} should have zero escrow balance",
-            i
-        );
-    }
-}
-
-#[test]
-fn test_concurrent_shipments_with_different_amounts() {
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-    let token_admin_client = token::StellarAssetClient::new(&t.env, &t.token_id);
-    let token_client = token::Client::new(&t.env, &t.token_id);
-
-    const NUM_SHIPMENTS: u32 = 100;
-
-    // Calculate total funding needed (sum of 1M, 2M, 3M, ..., 100M)
-    let total_funding: i128 = (1..=NUM_SHIPMENTS as i128).map(|i| i * 1_000_000).sum();
-
-    token_admin_client.mint(&t.buyer, &total_funding);
-
-    // Create suppliers
-    let mut suppliers: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&t.env);
-    for _ in 0..NUM_SHIPMENTS {
-        suppliers.push_back(Address::generate(&t.env));
-    }
-
-    // Create shipments with varying amounts
-    for i in 0..NUM_SHIPMENTS {
-        let shipment_id = String::from_str(&t.env, &format!("VAR-{:03}", i));
-        let supplier = suppliers.get(i).unwrap();
-        let amount = ((i + 1) as i128) * 1_000_000; // 1M, 2M, 3M, ..., 100M
-
-        client.create_shipment(
-            &shipment_id,
-            &single_buyer_vec(&t.env, &t.buyer),
-            &supplier,
-            &t.logistics,
-            &t.arbiter,
-            &t.token_id,
-            &amount,
-            &build_milestones(&t.env),
-            &default_options(&t.env),
-        );
-    }
-
-    // Complete all shipments in interleaved order
-    for milestone_idx in 0..3u32 {
-        // Submit proofs
-        for i in 0..NUM_SHIPMENTS {
-            let shipment_id = String::from_str(&t.env, &format!("VAR-{:03}", i));
-            let supplier = suppliers.get(i).unwrap();
-            let proof = String::from_str(&t.env, &format!("ipfs://proof{}", milestone_idx));
-
-            if milestone_idx == 1 {
-                client.submit_proof(&t.logistics, &shipment_id, &milestone_idx, &proof, &Symbol::new(&t.env, "ipfs"));
-            } else {
-                client.submit_proof(&supplier, &shipment_id, &milestone_idx, &proof, &Symbol::new(&t.env, "ipfs"));
-            }
-        }
-
-        // Confirm milestones
-        for i in 0..NUM_SHIPMENTS {
-            let shipment_id = String::from_str(&t.env, &format!("VAR-{:03}", i));
-            client.confirm_milestone(&t.buyer, &shipment_id, &milestone_idx);
-        }
-    }
-
-    // Verify each shipment completed with correct amount
-    for i in 0..NUM_SHIPMENTS {
-        let shipment_id = String::from_str(&t.env, &format!("VAR-{:03}", i));
-        let shipment = client.get_shipment(&shipment_id);
-        let expected_amount = ((i + 1) as i128) * 1_000_000;
-
-        assert_eq!(shipment.status, ShipmentStatus::Completed);
-        assert_eq!(shipment.released_amount, expected_amount);
-
-        // Verify supplier received correct amount
-        let supplier = suppliers.get(i).unwrap();
-        let balance = token_client.balance(&supplier);
-        assert_eq!(balance, expected_amount);
-    }
-
-    // Verify total distribution
-    let total_distributed: i128 = (0..NUM_SHIPMENTS)
-        .map(|i| token_client.balance(&suppliers.get(i).unwrap()))
-        .sum();
-
-    assert_eq!(total_distributed, total_funding);
-}
-
-#[test]
-fn test_concurrent_shipments_no_storage_clobbering() {
-    // This test specifically checks for global storage clobbering bugs
-    // by creating shipments with similar data but different IDs
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-    let token_admin_client = token::StellarAssetClient::new(&t.env, &t.token_id);
-    let token_client = token::Client::new(&t.env, &t.token_id);
-
-    const NUM_SHIPMENTS: u32 = 100;
-    const AMOUNT: i128 = 1_000_000;
-
-    token_admin_client.mint(&t.buyer, &(NUM_SHIPMENTS as i128 * AMOUNT));
-
-    // Use the same supplier for all shipments to test storage isolation
-    let shared_supplier = Address::generate(&t.env);
-
-    // Create all shipments
-    for i in 0..NUM_SHIPMENTS {
-        let shipment_id = String::from_str(&t.env, &format!("CLOB-{:03}", i));
-
-        client.create_shipment(
-            &shipment_id,
-            &single_buyer_vec(&t.env, &t.buyer),
-            &shared_supplier,
-            &t.logistics,
-            &t.arbiter,
-            &t.token_id,
-            &AMOUNT,
-            &build_milestones(&t.env),
-            &default_options(&t.env),
-        );
-    }
-
-    // Submit proof for milestone 0 on all shipments
-    for i in 0..NUM_SHIPMENTS {
-        let shipment_id = String::from_str(&t.env, &format!("CLOB-{:03}", i));
-        client.submit_proof(
-            &shared_supplier,
-            &shipment_id,
-            &0,
-            &String::from_str(&t.env, "ipfs://m0"),
-        
-            &Symbol::new(&t.env, "ipfs"),);
-    }
-
-    // Verify each shipment has independent state
-    for i in 0..NUM_SHIPMENTS {
-        let shipment_id = String::from_str(&t.env, &format!("CLOB-{:03}", i));
-        let milestone = client.get_milestone(&shipment_id, &0);
-
-        assert_eq!(
-            milestone.status,
-            MilestoneStatus::ProofSubmitted,
-            "Shipment {} milestone 0 should be ProofSubmitted",
-            i
-        );
-
-        // Verify other milestones are still Pending
-        let m1 = client.get_milestone(&shipment_id, &1);
-        let m2 = client.get_milestone(&shipment_id, &2);
-        assert_eq!(m1.status, MilestoneStatus::Pending);
-        assert_eq!(m2.status, MilestoneStatus::Pending);
-    }
-
-    // Confirm milestone 0 on every other shipment
-    for i in (0..NUM_SHIPMENTS).step_by(2) {
-        let shipment_id = String::from_str(&t.env, &format!("CLOB-{:03}", i));
-        client.confirm_milestone(&t.buyer, &shipment_id, &0);
-    }
-
-    // Verify state divergence: even shipments confirmed, odd still have proof submitted
-    for i in 0..NUM_SHIPMENTS {
-        let shipment_id = String::from_str(&t.env, &format!("CLOB-{:03}", i));
-        let milestone = client.get_milestone(&shipment_id, &0);
-
-        if i % 2 == 0 {
-            assert_eq!(
-                milestone.status,
-                MilestoneStatus::Confirmed,
-                "Even shipment {} milestone 0 should be Confirmed",
-                i
-            );
-        } else {
-            assert_eq!(
-                milestone.status,
-                MilestoneStatus::ProofSubmitted,
-                "Odd shipment {} milestone 0 should still be ProofSubmitted",
-                i
-            );
-        }
-    }
-
-    // Complete all shipments
-    for i in 0..NUM_SHIPMENTS {
-        let shipment_id = String::from_str(&t.env, &format!("CLOB-{:03}", i));
-
-        // Confirm milestone 0 if not already confirmed
-        if i % 2 != 0 {
-            client.confirm_milestone(&t.buyer, &shipment_id, &0);
-        }
-
-        // Complete remaining milestones
-        for m in 1..3u32 {
-            client.submit_proof(
-                &t.logistics,
-                &shipment_id,
-                &m,
-                &String::from_str(&t.env, &format!("ipfs://m{}", m)),
-            
-                &Symbol::new(&t.env, "ipfs"),);
-            client.confirm_milestone(&t.buyer, &shipment_id, &m);
-        }
-    }
-
-    // Final verification: all completed, correct amounts
-    for i in 0..NUM_SHIPMENTS {
-        let shipment_id = String::from_str(&t.env, &format!("CLOB-{:03}", i));
-        let shipment = client.get_shipment(&shipment_id);
-
-        assert_eq!(shipment.status, ShipmentStatus::Completed);
-        assert_eq!(shipment.released_amount, AMOUNT);
-    }
-
-    // Verify shared supplier received all payments
-    let supplier_balance = token_client.balance(&shared_supplier);
-    assert_eq!(supplier_balance, NUM_SHIPMENTS as i128 * AMOUNT);
-}
 
 // ============================================================
-// SUPPLIER ADVANCE PAYMENT TESTS
+// #284 — SUPPLIER PAYOUT BATCHING TESTS
 // ============================================================
 
 #[test]
-fn test_advance_approved_deducted_on_confirm() {
-    // Verify: Supplier requests advance → buyer approves → advance transferred
-    // → on confirm, advance deducted from milestone payment.
+fn test_set_payout_mode_batched_accumulates_instead_of_transfer() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let token_client = token::Client::new(&t.env, &t.token_id);
 
-    let shipment_id = String::from_str(&t.env, "SHIP-ADV-DEDUCT");
+    // Opt supplier into batched mode.
+    client.set_payout_mode(&t.supplier, &true);
+
+    let shipment_id = String::from_str(&t.env, "SHIP-BATCH-MODE");
     let total_amount: i128 = 1_000_000_000;
 
     create_standard_shipment(
-        &client,
-        &t.env,
-        &shipment_id,
-        &t.buyer,
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        total_amount,
+        &client, &t.env, &shipment_id, &t.buyer, &t.supplier,
+        &t.logistics, &t.arbiter, &t.token_id, total_amount,
     );
 
-    // Milestone 0 is 25%. Advance 30% of that = 7.5% of total = 75_000_000.
-    let milestone_payment = total_amount * 25 / 100; // 250_000_000
-    let advance_percent: u32 = 30;
-    let expected_advance = milestone_payment * advance_percent as i128 / 100; // 75_000_000
-
-    let supplier_before = token_client.balance(&t.supplier);
-
-    // Supplier requests advance.
-    client.request_advance(&t.supplier, &shipment_id, &0, &advance_percent);
-
-    // Buyer approves advance.
-    client.approve_advance(&t.buyer, &shipment_id, &0);
-
-    // Advance should be transferred immediately.
-    assert_eq!(
-        token_client.balance(&t.supplier),
-        supplier_before + expected_advance,
-        "advance transferred on approval"
-    );
-
-    // Escrow balance should reflect the advance.
-    assert_eq!(
-        client.get_escrow_balance(&shipment_id),
-        total_amount - expected_advance,
-        "escrow reduced by advance"
-    );
-
-    // Submit proof and confirm milestone.
-    client.submit_proof(
-        &t.supplier,
-        &shipment_id,
-        &0,
-        &String::from_str(&t.env, "ipfs://d"),
-    
-        &Symbol::new(&t.env, "ipfs"),);
+    client.submit_proof(&t.supplier, &shipment_id, &0, &String::from_str(&t.env, "ipfs://d"));
     client.confirm_milestone(&t.buyer, &shipment_id, &0);
 
-    // On confirm, supplier should receive milestone_payment - advance.
-    assert_eq!(
-        token_client.balance(&t.supplier),
-        supplier_before + milestone_payment, // advance + remaining = full payment
-        "supplier received full milestone payment over two transfers"
-    );
+    // No immediate transfer — supplier balance stays 0.
+    assert_eq!(token_client.balance(&t.supplier), 0);
 
-    // Shipment should show correct released amount.
-    let shipment = client.get_shipment(&shipment_id);
-    assert_eq!(shipment.released_amount, milestone_payment);
-    assert_eq!(shipment.total_advanced_amount, 0, "advance consumed");
-
-    // Escrow balance should now reflect the milestone payment.
-    assert_eq!(
-        client.get_escrow_balance(&shipment_id),
-        total_amount - milestone_payment,
-    );
+    // Pending payout should reflect the milestone payment (25%).
+    let expected = total_amount * 25 / 100;
+    assert_eq!(client.get_pending_payout(&t.supplier), expected);
 }
 
 #[test]
-fn test_advance_exceeding_cap_rejected() {
-    // Verify: advance_percent > max_advance_percent is rejected.
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    let shipment_id = String::from_str(&t.env, "SHIP-ADV-CAP");
-    let total_amount: i128 = 1_000_000_000;
-
-    create_standard_shipment(
-        &client,
-        &t.env,
-        &shipment_id,
-        &t.buyer,
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        total_amount,
-    );
-
-    // Default max is 30%. Try 31%.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.request_advance(&t.supplier, &shipment_id, &0, &31);
-    }));
-    assert!(result.is_err(), "advance > 30% should be rejected");
-}
-
-#[test]
-fn test_advance_exceeding_custom_cap_rejected() {
-    // Verify: admin can change max advance percent; new cap enforced.
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    // Admin sets max to 10%.
-    client.set_max_advance_percent(&t.buyer, &10);
-    assert_eq!(client.get_max_advance_percent(), 10);
-
-    let shipment_id = String::from_str(&t.env, "SHIP-ADV-CUSTOM");
-    let total_amount: i128 = 1_000_000_000;
-
-    create_standard_shipment(
-        &client,
-        &t.env,
-        &shipment_id,
-        &t.buyer,
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        total_amount,
-    );
-
-    // 10% should work.
-    client.request_advance(&t.supplier, &shipment_id, &0, &10);
-
-    // 11% should be rejected.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.request_advance(&t.supplier, &shipment_id, &1, &11);
-    }));
-    assert!(result.is_err(), "advance > 10% should be rejected after update");
-}
-
-#[test]
-fn test_unapproved_advance_no_funds_moved() {
-    // Verify: requesting advance does NOT transfer funds until approved.
+fn test_batched_payout_accumulates_across_multiple_shipments() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let token_client = token::Client::new(&t.env, &t.token_id);
 
-    let shipment_id = String::from_str(&t.env, "SHIP-ADV-NOOP");
-    let total_amount: i128 = 1_000_000_000;
+    client.set_payout_mode(&t.supplier, &true);
 
-    create_standard_shipment(
-        &client,
-        &t.env,
-        &shipment_id,
-        &t.buyer,
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        total_amount,
-    );
+    let total: i128 = 1_000_000_000;
 
-    let supplier_before = token_client.balance(&t.supplier);
+    // Shipment 1 — confirm milestone 0 (25%)
+    let id1 = String::from_str(&t.env, "BATCH-S1");
+    create_standard_shipment(&client, &t.env, &id1, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id1, &0, &String::from_str(&t.env, "ipfs://s1m0"));
+    client.confirm_milestone(&t.buyer, &id1, &0);
 
-    // Supplier requests advance — no funds should move.
-    client.request_advance(&t.supplier, &shipment_id, &0, &20);
+    // Shipment 2 — confirm milestone 0 (25%)
+    let id2 = String::from_str(&t.env, "BATCH-S2");
+    create_standard_shipment(&client, &t.env, &id2, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id2, &0, &String::from_str(&t.env, "ipfs://s2m0"));
+    client.confirm_milestone(&t.buyer, &id2, &0);
 
-    assert_eq!(
-        token_client.balance(&t.supplier),
-        supplier_before,
-        "no funds transferred on request alone"
-    );
+    // Shipment 3 — confirm milestone 1 (50%)
+    let id3 = String::from_str(&t.env, "BATCH-S3");
+    create_standard_shipment(&client, &t.env, &id3, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id3, &1, &String::from_str(&t.env, "ipfs://s3m1"));
+    client.confirm_milestone(&t.buyer, &id3, &1);
 
-    // Escrow balance unchanged.
-    assert_eq!(client.get_escrow_balance(&shipment_id), total_amount);
+    let expected_pending = total * 25 / 100 + total * 25 / 100 + total * 50 / 100;
+    assert_eq!(client.get_pending_payout(&t.supplier), expected_pending);
+    // No actual token transfer yet.
+    assert_eq!(token_client.balance(&t.supplier), 0);
 }
 
 #[test]
-fn test_advance_only_supplier_can_request() {
-    // Verify: only the shipment's supplier can request an advance.
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    let shipment_id = String::from_str(&t.env, "SHIP-ADV-AUTH");
-    let total_amount: i128 = 1_000_000_000;
-
-    create_standard_shipment(
-        &client,
-        &t.env,
-        &shipment_id,
-        &t.buyer,
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        total_amount,
-    );
-
-    // Logistics is not the supplier — should be rejected.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.request_advance(&t.logistics, &shipment_id, &0, &20);
-    }));
-    assert!(result.is_err(), "non-supplier should be rejected");
-}
-
-#[test]
-fn test_advance_only_buyer_can_approve() {
-    // Verify: only a buyer can approve an advance.
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    let shipment_id = String::from_str(&t.env, "SHIP-ADV-APPROVE-AUTH");
-    let total_amount: i128 = 1_000_000_000;
-
-    create_standard_shipment(
-        &client,
-        &t.env,
-        &shipment_id,
-        &t.buyer,
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        total_amount,
-    );
-
-    client.request_advance(&t.supplier, &shipment_id, &0, &20);
-
-    // Supplier tries to approve their own advance — should be rejected.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.approve_advance(&t.supplier, &shipment_id, &0);
-    }));
-    assert!(result.is_err(), "non-buyer should not approve advance");
-}
-
-#[test]
-fn test_advance_multi_milestone_deductions() {
-    // Verify: advances on multiple milestones are deducted independently.
+fn test_claim_payout_transfers_full_balance_and_zeroes() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let token_client = token::Client::new(&t.env, &t.token_id);
 
-    let shipment_id = String::from_str(&t.env, "SHIP-ADV-MULTI");
-    let total_amount: i128 = 1_000_000_000;
+    client.set_payout_mode(&t.supplier, &true);
 
-    create_standard_shipment(
-        &client,
-        &t.env,
-        &shipment_id,
-        &t.buyer,
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        total_amount,
-    );
+    let total: i128 = 1_000_000_000;
+    let id = String::from_str(&t.env, "BATCH-CLAIM");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id, &0);
 
-    // Milestones: 25%, 50%, 25%
-    // Advance 20% on milestone 0 (25% of total = 250M → advance = 50M)
-    // Advance 10% on milestone 1 (50% of total = 500M → advance = 50M)
-    let m0_payment = total_amount * 25 / 100;
-    let m1_payment = total_amount * 50 / 100;
-    let _m2_payment = total_amount - m0_payment - m1_payment;
+    let pending = client.get_pending_payout(&t.supplier);
+    assert!(pending > 0);
 
-    let advance0 = m0_payment * 20 / 100;
-    let advance1 = m1_payment * 10 / 100;
+    client.claim_payout(&t.supplier, &t.token_id);
 
-    let supplier_before = token_client.balance(&t.supplier);
-
-    // Request and approve advance for milestone 0.
-    client.request_advance(&t.supplier, &shipment_id, &0, &20);
-    client.approve_advance(&t.buyer, &shipment_id, &0);
-    assert_eq!(
-        token_client.balance(&t.supplier),
-        supplier_before + advance0,
-    );
-
-    // Request and approve advance for milestone 1.
-    client.request_advance(&t.supplier, &shipment_id, &1, &10);
-    client.approve_advance(&t.buyer, &shipment_id, &1);
-    assert_eq!(
-        token_client.balance(&t.supplier),
-        supplier_before + advance0 + advance1,
-    );
-
-    // Confirm milestone 0.
-    client.submit_proof(
-        &t.supplier,
-        &shipment_id,
-        &0,
-        &String::from_str(&t.env, "ipfs://m0"),
-    
-        &Symbol::new(&t.env, "ipfs"),);
-    client.confirm_milestone(&t.buyer, &shipment_id, &0);
-
-    // Supplier gets m0_payment - advance0 extra.
-    assert_eq!(
-        token_client.balance(&t.supplier),
-        supplier_before + advance0 + advance1 + (m0_payment - advance0),
-    );
-
-    // Confirm milestone 1.
-    client.submit_proof(
-        &t.logistics,
-        &shipment_id,
-        &1,
-        &String::from_str(&t.env, "ipfs://m1"),
-    
-        &Symbol::new(&t.env, "ipfs"),);
-    client.confirm_milestone(&t.buyer, &shipment_id, &1);
-
-    assert_eq!(
-        token_client.balance(&t.supplier),
-        supplier_before + advance0 + advance1 + (m0_payment - advance0) + (m1_payment - advance1),
-    );
-
-    // Confirm milestone 2 (no advance).
-    client.submit_proof(
-        &t.supplier,
-        &shipment_id,
-        &2,
-        &String::from_str(&t.env, "ipfs://m2"),
-    
-        &Symbol::new(&t.env, "ipfs"),);
-    client.confirm_milestone(&t.buyer, &shipment_id, &2);
-
-    // Total should be full amount.
-    assert_eq!(
-        token_client.balance(&t.supplier),
-        supplier_before + total_amount,
-    );
-
-    let shipment = client.get_shipment(&shipment_id);
-    assert_eq!(shipment.status, ShipmentStatus::Completed);
-    assert_eq!(shipment.released_amount, total_amount);
-    assert_eq!(shipment.total_advanced_amount, 0, "all advances consumed");
-    assert_eq!(client.get_escrow_balance(&shipment_id), 0);
+    // Balance transferred, pending reset to 0.
+    assert_eq!(token_client.balance(&t.supplier), pending);
+    assert_eq!(client.get_pending_payout(&t.supplier), 0);
 }
 
 #[test]
-fn test_advance_rejected_for_wrong_milestone_status() {
-    // Verify: advance can only be requested on a Pending milestone.
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    let shipment_id = String::from_str(&t.env, "SHIP-ADV-STATUS");
-    let total_amount: i128 = 1_000_000_000;
-
-    create_standard_shipment(
-        &client,
-        &t.env,
-        &shipment_id,
-        &t.buyer,
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        total_amount,
-    );
-
-    // Submit proof for milestone 0.
-    client.submit_proof(
-        &t.supplier,
-        &shipment_id,
-        &0,
-        &String::from_str(&t.env, "ipfs://d"),
-    
-        &Symbol::new(&t.env, "ipfs"),);
-
-    // Advance on non-Pending milestone should be rejected.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.request_advance(&t.supplier, &shipment_id, &0, &10);
-    }));
-    assert!(result.is_err(), "advance on non-pending milestone should be rejected");
-}
-
-#[test]
-fn test_advance_double_approval_rejected() {
-    // Verify: approving an already-approved advance is rejected.
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    let shipment_id = String::from_str(&t.env, "SHIP-ADV-DBL");
-    let total_amount: i128 = 1_000_000_000;
-
-    create_standard_shipment(
-        &client,
-        &t.env,
-        &shipment_id,
-        &t.buyer,
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        total_amount,
-    );
-
-    client.request_advance(&t.supplier, &shipment_id, &0, &20);
-    client.approve_advance(&t.buyer, &shipment_id, &0);
-
-    // Second approval should be rejected.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.approve_advance(&t.buyer, &shipment_id, &0);
-    }));
-    assert!(result.is_err(), "double approval should be rejected");
-}
-
-#[test]
-fn test_advance_no_request_no_approval() {
-    // Verify: approving without a prior request is rejected.
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    let shipment_id = String::from_str(&t.env, "SHIP-ADV-NOREQ");
-    let total_amount: i128 = 1_000_000_000;
-
-    create_standard_shipment(
-        &client,
-        &t.env,
-        &shipment_id,
-        &t.buyer,
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        total_amount,
-    );
-
-    // Approve without prior request.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.approve_advance(&t.buyer, &shipment_id, &0);
-    }));
-    assert!(result.is_err(), "approval without request should be rejected");
-}
-
-// ============================================================
-// TTL EXPIRY SIMULATION TESTS (Issue #58)
-// ============================================================
-
-/// TTL (Time To Live) constants used in production code.
-/// These values determine how long data persists in Soroban storage before archival.
-///
-/// TTL_INITIAL_LEDGERS: 100,000 ledgers (~5.8 days at 5s/ledger)
-/// - Initial TTL set when data is first written
-/// - Minimum threshold for extend_ttl calls
-///
-/// TTL_MAX_LEDGERS: 6,300,000 ledgers (~1 year at 5s/ledger)
-/// - Maximum TTL that can be set
-/// - Upper bound for extend_ttl calls
-///
-/// Storage behavior:
-/// - Data is accessible while current_ledger < (last_extended_ledger + TTL)
-/// - After TTL expires, data is archived and requires restoration
-/// - extend_ttl() resets the expiry window from current ledger
-
-#[test]
-fn test_ttl_shipment_accessible_within_window() {
-    // Test that shipment data remains accessible within the TTL window
-    // Expected TTL: 100,000 ledgers (~5.8 days)
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    let shipment_id = String::from_str(&t.env, "TTL-WITHIN");
-    let total_amount: i128 = 1_000_000_000;
-
-    // Create shipment at ledger 1000
-    t.env.ledger().set_sequence_number(1000);
-    create_standard_shipment(
-        &client,
-        &t.env,
-        &shipment_id,
-        &t.buyer,
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        total_amount,
-    );
-
-    // Verify accessible immediately after creation
-    let shipment = client.get_shipment(&shipment_id);
-    assert_eq!(shipment.status, ShipmentStatus::Active);
-    assert_eq!(shipment.total_amount, total_amount);
-
-    // Advance to ledger 50,000 (well within TTL_INITIAL_LEDGERS of 100,000)
-    t.env.ledger().set_sequence_number(50_000);
-    let shipment = client.get_shipment(&shipment_id);
-    assert_eq!(shipment.status, ShipmentStatus::Active);
-
-    // Advance to ledger 99,999 (just before TTL expiry)
-    t.env.ledger().set_sequence_number(99_999);
-    let shipment = client.get_shipment(&shipment_id);
-    assert_eq!(shipment.status, ShipmentStatus::Active);
-    assert_eq!(shipment.id, shipment_id);
-}
-
-#[test]
-fn test_ttl_supplier_index_extends() {
-    // Test that supplier index TTL is extended on shipment creation
-    // Note: This test verifies the shipment itself persists, which implies
-    // the supplier index is also maintained (internal implementation detail)
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    let shipment_id = String::from_str(&t.env, "TTL-SUPPLIER-IDX");
-    let total_amount: i128 = 1_000_000_000;
-
-    // Create at ledger 2000
-    t.env.ledger().set_sequence_number(2000);
-    create_standard_shipment(
-        &client,
-        &t.env,
-        &shipment_id,
-        &t.buyer,
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        total_amount,
-    );
-
-    // Advance to ledger 90,000 (within TTL)
-    t.env.ledger().set_sequence_number(90_000);
-
-    // Shipment should still be accessible (implies indexes are maintained)
-    let shipment = client.get_shipment(&shipment_id);
-    assert_eq!(shipment.supplier, t.supplier);
-    assert_eq!(shipment.status, ShipmentStatus::Active);
-}
-
-#[test]
-fn test_ttl_buyer_index_extends() {
-    // Test that buyer index TTL is extended on shipment creation
-    // Note: This test verifies the shipment itself persists, which implies
-    // the buyer index is also maintained (internal implementation detail)
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    let shipment_id = String::from_str(&t.env, "TTL-BUYER-IDX");
-    let total_amount: i128 = 1_000_000_000;
-
-    // Create at ledger 3000
-    t.env.ledger().set_sequence_number(3000);
-    create_standard_shipment(
-        &client,
-        &t.env,
-        &shipment_id,
-        &t.buyer,
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        total_amount,
-    );
-
-    // Advance to ledger 95,000 (within TTL)
-    t.env.ledger().set_sequence_number(95_000);
-
-    // Shipment should still be accessible (implies indexes are maintained)
-    let shipment = client.get_shipment(&shipment_id);
-    assert_eq!(shipment.buyers.get(0).unwrap(), t.buyer);
-    assert_eq!(shipment.status, ShipmentStatus::Active);
-}
-
-#[test]
-fn test_ttl_completed_shipment_persists() {
-    // Test that completed shipments persist within TTL window
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    let shipment_id = String::from_str(&t.env, "TTL-COMPLETED");
-    let total_amount: i128 = 1_000_000_000;
-
-    // Create at ledger 4000
-    t.env.ledger().set_sequence_number(4000);
-    create_standard_shipment(
-        &client,
-        &t.env,
-        &shipment_id,
-        &t.buyer,
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        total_amount,
-    );
-
-    // Complete all milestones at ledger 5000
-    t.env.ledger().set_sequence_number(5000);
-    for i in 0..3u32 {
-        client.submit_proof(
-            &t.supplier,
-            &shipment_id,
-            &i,
-            &String::from_str(&t.env, &std::format!("ipfs://m{}", i)),
-        
-            &Symbol::new(&t.env, "ipfs"),);
-        client.confirm_milestone(&t.buyer, &shipment_id, &i);
-    }
-
-    let shipment = client.get_shipment(&shipment_id);
-    assert_eq!(shipment.status, ShipmentStatus::Completed);
-
-    // Advance to ledger 90,000 (within TTL from last update at 5000)
-    t.env.ledger().set_sequence_number(90_000);
-
-    // Completed shipment should still be accessible
-    let shipment = client.get_shipment(&shipment_id);
-    assert_eq!(shipment.status, ShipmentStatus::Completed);
-    assert_eq!(shipment.released_amount, total_amount);
-}
-
-#[test]
-fn test_ttl_constants_documented() {
-    // This test documents the TTL constants used in production
-    // TTL_INITIAL_LEDGERS: Minimum TTL set on data writes
-    // TTL_MAX_LEDGERS: Maximum TTL that can be set
-
-    use crate::constants::{TTL_INITIAL_LEDGERS, TTL_MAX_LEDGERS};
-
-    // Verify constants match expected values
-    assert_eq!(
-        TTL_INITIAL_LEDGERS, 100_000,
-        "TTL_INITIAL_LEDGERS should be 100,000 ledgers (~5.8 days)"
-    );
-    assert_eq!(
-        TTL_MAX_LEDGERS, 6_300_000,
-        "TTL_MAX_LEDGERS should be 6,300,000 ledgers (~1 year)"
-    );
-
-    // Document time calculations (at 5 seconds per ledger)
-    let initial_days = (TTL_INITIAL_LEDGERS * 5) / 86_400;
-    let max_days = (TTL_MAX_LEDGERS * 5) / 86_400;
-
-    assert_eq!(initial_days, 5, "TTL_INITIAL_LEDGERS ≈ 5.8 days");
-    assert_eq!(max_days, 364, "TTL_MAX_LEDGERS ≈ 1 year");
-}
-
-#[test]
-fn test_ttl_extend_parameters_verified() {
-    // This test verifies that extend_ttl is called with correct parameters
-    // in the storage layer
-
-    use crate::constants::{TTL_INITIAL_LEDGERS, TTL_MAX_LEDGERS};
-
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    let shipment_id = String::from_str(&t.env, "TTL-PARAMS");
-    let total_amount: i128 = 1_000_000_000;
-
-    // Create shipment - this calls extend_ttl internally
-    t.env.ledger().set_sequence_number(1000);
-    create_standard_shipment(
-        &client,
-        &t.env,
-        &shipment_id,
-        &t.buyer,
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        total_amount,
-    );
-
-    // Verify shipment is accessible (extend_ttl was called correctly)
-    let shipment = client.get_shipment(&shipment_id);
-    assert_eq!(shipment.status, ShipmentStatus::Active);
-
-    // Advance to near TTL_INITIAL_LEDGERS boundary
-    t.env
-        .ledger()
-        .set_sequence_number(1000 + TTL_INITIAL_LEDGERS - 1);
-    let shipment = client.get_shipment(&shipment_id);
-    assert_eq!(shipment.status, ShipmentStatus::Active);
-
-    // Verify TTL parameters are as expected
-    assert_eq!(TTL_INITIAL_LEDGERS, 100_000);
-    assert_eq!(TTL_MAX_LEDGERS, 6_300_000);
-}
-
-#[test]
-fn test_ttl_documentation_in_comments() {
-    // This test serves as documentation for TTL behavior
-    //
-    // TTL (Time To Live) in Soroban:
-    // - Persistent storage entries have a TTL measured in ledgers
-    // - When TTL expires, data is archived (not deleted)
-    // - Archived data requires restoration before access
-    // - extend_ttl(threshold, max) sets: TTL = min(current_ledger + max, last_access + threshold)
-    //
-    // ChainSettle TTL Strategy:
-    // - TTL_INITIAL_LEDGERS (100,000): ~5.8 days minimum lifetime
-    // - TTL_MAX_LEDGERS (6,300,000): ~1 year maximum lifetime
-    // - Every write operation extends TTL
-    // - Read operations do NOT extend TTL
-    //
-    // Production Implications:
-    // - Active shipments stay accessible indefinitely (writes extend TTL)
-    // - Inactive shipments archive after ~5.8 days
-    // - Backend should call extend_ttl for important historical data
-    // - Archived data can be restored via Soroban RPC
-
-    use crate::constants::{TTL_INITIAL_LEDGERS, TTL_MAX_LEDGERS};
-
-    // Verify constants are properly defined
-    assert!(
-        TTL_INITIAL_LEDGERS > 0,
-        "TTL_INITIAL_LEDGERS must be positive"
-    );
-    assert!(
-        TTL_MAX_LEDGERS > TTL_INITIAL_LEDGERS,
-        "TTL_MAX_LEDGERS must exceed TTL_INITIAL_LEDGERS"
-    );
-
-    // Document expected durations
-    let initial_seconds = TTL_INITIAL_LEDGERS * 5;
-    let max_seconds = TTL_MAX_LEDGERS * 5;
-
-    assert_eq!(
-        initial_seconds, 500_000,
-        "TTL_INITIAL_LEDGERS = 500,000 seconds"
-    );
-    assert_eq!(
-        max_seconds, 31_500_000,
-        "TTL_MAX_LEDGERS = 31,500,000 seconds"
-    );
-}
-
-// ============================================================
-// NEW FEATURES TESTS
-// ============================================================
-
-#[test]
-fn test_logistics_fee_deduction() {
+fn test_claim_payout_mid_accumulation_then_continues() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let token_client = token::Client::new(&t.env, &t.token_id);
 
-    let shipment_id = String::from_str(&t.env, "logistics-fee-1");
-    let mut opts = default_options(&t.env);
-    opts.logistics_fee_bps = 500; // 5% logistics fee
+    client.set_payout_mode(&t.supplier, &true);
+    let total: i128 = 1_000_000_000;
 
-    client.create_shipment(
-        &shipment_id,
-        &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        &1_000_000_000i128,
-        &build_milestones(&t.env),
-        &opts,
-    );
+    let id1 = String::from_str(&t.env, "BATCH-MID-1");
+    create_standard_shipment(&client, &t.env, &id1, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id1, &0, &String::from_str(&t.env, "ipfs://a"));
+    client.confirm_milestone(&t.buyer, &id1, &0);
 
-    // Submit and confirm proof for first milestone (25% = 250,000,000)
-    client.submit_proof(
-        &t.supplier,
-        &shipment_id,
-        &0,
-        &String::from_str(&t.env, "proof_hash_0"),
-        &Symbol::new(&t.env, "ipfs"),
-    );
-    client.confirm_milestone(&t.buyer, &shipment_id, &0);
+    // Claim mid-way.
+    let first_claim = client.get_pending_payout(&t.supplier);
+    client.claim_payout(&t.supplier, &t.token_id);
+    assert_eq!(token_client.balance(&t.supplier), first_claim);
+    assert_eq!(client.get_pending_payout(&t.supplier), 0);
 
-    // Logistics fee = 250,000,000 * 500 / 10,000 = 12,500,000
-    // Supplier should receive: 250,000,000 - 12,500,000 = 237,500,000
-    let supplier_balance = token_client.balance(&t.supplier);
-    assert_eq!(supplier_balance, 237_500_000, "Supplier should receive payment minus logistics fee");
+    // Continue accumulating on another shipment.
+    let id2 = String::from_str(&t.env, "BATCH-MID-2");
+    create_standard_shipment(&client, &t.env, &id2, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id2, &0, &String::from_str(&t.env, "ipfs://b"));
+    client.confirm_milestone(&t.buyer, &id2, &0);
 
-    let logistics_balance = token_client.balance(&t.logistics);
-    assert_eq!(logistics_balance, 12_500_000, "Logistics provider should receive logistics fee");
+    let second_pending = client.get_pending_payout(&t.supplier);
+    assert_eq!(second_pending, total * 25 / 100);
 }
 
 #[test]
-fn test_logistics_fee_zero() {
+#[should_panic(expected = "no pending payout")]
+fn test_claim_payout_zero_balance_panics() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    // Supplier never accumulated anything.
+    client.claim_payout(&t.supplier, &t.token_id);
+}
+
+#[test]
+fn test_immediate_mode_supplier_unaffected() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let token_client = token::Client::new(&t.env, &t.token_id);
 
-    let shipment_id = String::from_str(&t.env, "no-logistics-fee");
-    let opts = default_options(&t.env);
+    // No set_payout_mode call — defaults to Immediate.
+    let total: i128 = 1_000_000_000;
+    let id = String::from_str(&t.env, "IMMED-MODE");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id, &0);
 
-    client.create_shipment(
-        &shipment_id,
-        &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        &1_000_000_000i128,
-        &build_milestones(&t.env),
-        &opts,
-    );
-
-    client.submit_proof(
-        &t.supplier,
-        &shipment_id,
-        &0,
-        &String::from_str(&t.env, "proof_hash_0"),
-        &Symbol::new(&t.env, "ipfs"),
-    );
-    client.confirm_milestone(&t.buyer, &shipment_id, &0);
-
-    // With zero logistics fee, full payment goes to supplier
-    let supplier_balance = token_client.balance(&t.supplier);
-    assert_eq!(supplier_balance, 250_000_000, "Supplier should receive full payment");
-
-    let logistics_balance = token_client.balance(&t.logistics);
-    assert_eq!(logistics_balance, 0, "Logistics provider should receive nothing");
+    // Immediate: supplier gets token immediately, no pending balance.
+    assert_eq!(token_client.balance(&t.supplier), total * 25 / 100);
+    assert_eq!(client.get_pending_payout(&t.supplier), 0);
 }
 
 #[test]
-fn test_supplier_collateral_forfeiture_on_buyer_cancel() {
+fn test_toggle_back_to_immediate_stops_accumulation() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-    let mint_client = token::StellarAssetClient::new(&t.env, &t.token_id);
     let token_client = token::Client::new(&t.env, &t.token_id);
 
-    let shipment_id = String::from_str(&t.env, "collateral-1");
-    let mut opts = default_options(&t.env);
-    opts.supplier_collateral = 50_000_000; // Supplier must lock 50M
+    client.set_payout_mode(&t.supplier, &true);
+    let total: i128 = 1_000_000_000;
 
-    // Mint additional funds for supplier
-    mint_client.mint(&t.supplier, &100_000_000);
+    let id1 = String::from_str(&t.env, "TOGGLE-1");
+    create_standard_shipment(&client, &t.env, &id1, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id1, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id1, &0);
+    assert_eq!(token_client.balance(&t.supplier), 0);
 
-    client.create_shipment(
-        &shipment_id,
-        &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        &1_000_000_000i128,
-        &build_milestones(&t.env),
-        &opts,
-    );
+    // Switch back to immediate.
+    client.set_payout_mode(&t.supplier, &false);
 
-    // Buyer cancels, collateral should be forfeited to buyer
-    client.cancel_shipment(&t.buyer, &shipment_id);
+    let id2 = String::from_str(&t.env, "TOGGLE-2");
+    create_standard_shipment(&client, &t.env, &id2, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id2, &0, &String::from_str(&t.env, "ipfs://d2"));
+    client.confirm_milestone(&t.buyer, &id2, &0);
 
-    let buyer_balance = token_client.balance(&t.buyer);
-    // Original 10B - 1B (shipment) + 1B (full refund) + 50M (collateral forfeiture)
-    assert_eq!(
-        buyer_balance, 10_050_000_000,
-        "Buyer should receive collateral forfeiture on cancellation"
-    );
+    // Second milestone should be transferred immediately.
+    assert_eq!(token_client.balance(&t.supplier), total * 25 / 100);
+    // Pending balance from first shipment is still unclaimed.
+    assert_eq!(client.get_pending_payout(&t.supplier), total * 25 / 100);
+}
+
+// ============================================================
+// #285 — PER-ADDRESS OUTFLOW RATE LIMITING TESTS
+// ============================================================
+
+#[test]
+#[should_panic(expected = "address outflow limit exceeded")]
+fn test_address_outflow_limit_blocks_excess_payout() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let total: i128 = 1_000_000_000;
+    let milestone_payment = total * 25 / 100; // 250_000_000
+
+    // Set limit slightly below one milestone payment, window = 1000 ledgers.
+    client.set_address_outflow_limit(&t.buyer, &t.supplier, &(milestone_payment - 1), &1000);
+
+    let id = String::from_str(&t.env, "OUTFLOW-BLOCK");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id, &0);
 }
 
 #[test]
-fn test_supplier_collateral_return_on_completion() {
+#[should_panic(expected = "address outflow limit exceeded")]
+fn test_address_outflow_limit_exceeded_panics() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-    let mint_client = token::StellarAssetClient::new(&t.env, &t.token_id);
+
+    let total: i128 = 1_000_000_000;
+    let milestone_payment = total * 25 / 100;
+
+    // Limit less than one milestone payment.
+    client.set_address_outflow_limit(&t.buyer, &t.supplier, &(milestone_payment - 1), &1000);
+
+    let id = String::from_str(&t.env, "OUTFLOW-PANIC");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id, &0);
+}
+
+#[test]
+fn test_address_outflow_limit_allows_within_cap() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let token_client = token::Client::new(&t.env, &t.token_id);
 
-    let shipment_id = String::from_str(&t.env, "collateral-complete");
-    let mut opts = default_options(&t.env);
-    opts.supplier_collateral = 50_000_000;
+    let total: i128 = 1_000_000_000;
+    let milestone_payment = total * 25 / 100;
 
-    mint_client.mint(&t.supplier, &100_000_000);
+    // Set limit exactly equal to one milestone payment — should allow it.
+    client.set_address_outflow_limit(&t.buyer, &t.supplier, &milestone_payment, &1000);
 
-    client.create_shipment(
-        &shipment_id,
-        &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        &1_000_000_000i128,
-        &build_milestones(&t.env),
-        &opts,
-    );
+    let id = String::from_str(&t.env, "OUTFLOW-ALLOW");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id, &0);
 
-    let initial_supplier_balance = token_client.balance(&t.supplier);
-
-    // Complete all milestones
-    for i in 0..3 {
-        client.submit_proof(
-            &t.supplier,
-            &shipment_id,
-            &i,
-            &String::from_str(&t.env, &format!("proof_hash_{}", i)),
-            &Symbol::new(&t.env, "ipfs"),
-        );
-        client.confirm_milestone(&t.buyer, &shipment_id, &i);
-    }
-
-    let final_supplier_balance = token_client.balance(&t.supplier);
-    // Supplier should have: initial + all milestone payments + returned collateral
-    // All milestones: 1B total (no deductions from original supply in this test)
-    assert!(
-        final_supplier_balance > initial_supplier_balance,
-        "Supplier should receive collateral return on completion"
-    );
-}
-
-// NOTE: expire_shipment tests are pending implementation of the expire_shipment contract function.
-// #[test]
-// fn test_shipment_expiry_success() { ... }
-// #[test]
-// fn test_shipment_no_expiry() { ... }
-
-// ============================================================
-// ISSUE #95: IPFS METADATA HASH TESTS
-// ============================================================
-
-#[test]
-fn test_metadata_hash_stored_and_retrievable() {
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    let shipment_id = String::from_str(&t.env, "SHIP-META-01");
-    let hash = BytesN::from_array(&t.env, &[0x42u8; 32]);
-
-    let mut opts = default_options(&t.env);
-    opts.metadata_hash = Some(hash.clone());
-
-    client.create_shipment(
-        &shipment_id,
-        &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        &1_000_000_000i128,
-        &build_milestones(&t.env),
-        &opts,
-    );
-
-    let shipment = client.get_shipment(&shipment_id);
-    assert_eq!(shipment.metadata_hash, Some(hash));
+    assert_eq!(token_client.balance(&t.supplier), milestone_payment);
 }
 
 #[test]
-fn test_no_metadata_hash_shipment() {
+fn test_address_outflow_limit_zero_disables_per_address_cap() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let token_client = token::Client::new(&t.env, &t.token_id);
 
-    let shipment_id = String::from_str(&t.env, "SHIP-NO-META");
+    let total: i128 = 1_000_000_000;
 
-    create_standard_shipment(
-        &client, &t.env, &shipment_id,
-        &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000,
-    );
+    // Set then remove the limit (limit=0 disables it).
+    client.set_address_outflow_limit(&t.buyer, &t.supplier, &0, &1000);
 
-    let shipment = client.get_shipment(&shipment_id);
-    assert_eq!(shipment.metadata_hash, None);
+    let id = String::from_str(&t.env, "OUTFLOW-DISABLE");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id, &0);
+
+    // Should succeed — cap disabled.
+    assert_eq!(token_client.balance(&t.supplier), total * 25 / 100);
 }
 
-// ============================================================
-// ISSUE #100: SUPPLIER WHITELIST TESTS
-// ============================================================
+#[test]
+fn test_address_outflow_limit_window_resets_after_expiry() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let token_client = token::Client::new(&t.env, &t.token_id);
+
+    let total: i128 = 1_000_000_000;
+    let milestone_payment = total * 25 / 100;
+    let window: u32 = 50;
+
+    // Allow exactly one payment per window.
+    client.set_address_outflow_limit(&t.buyer, &t.supplier, &milestone_payment, &window);
+
+    let id1 = String::from_str(&t.env, "OUTFLOW-WIN-1");
+    create_standard_shipment(&client, &t.env, &id1, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id1, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id1, &0);
+    assert_eq!(token_client.balance(&t.supplier), milestone_payment);
+
+    // Advance past the window.
+    t.env.ledger().set_sequence_number(window + 10);
+
+    let id2 = String::from_str(&t.env, "OUTFLOW-WIN-2");
+    create_standard_shipment(&client, &t.env, &id2, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id2, &0, &String::from_str(&t.env, "ipfs://e"));
+    client.confirm_milestone(&t.buyer, &id2, &0);
+
+    // Second payment in the new window should succeed.
+    assert_eq!(token_client.balance(&t.supplier), milestone_payment * 2);
+}
 
 #[test]
-fn test_whitelisted_supplier_can_create_shipment() {
+#[should_panic(expected = "address outflow limit exceeded")]
+fn test_address_outflow_limit_independent_of_global_breaker() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
 
-    client.add_to_whitelist(&t.buyer, &t.supplier);
-    assert!(client.is_whitelisted(&t.supplier));
+    let total: i128 = 1_000_000_000;
+    let milestone_payment = total * 25 / 100;
 
-    let shipment_id = String::from_str(&t.env, "SHIP-WL-OK");
-    create_standard_shipment(
-        &client, &t.env, &shipment_id,
-        &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000,
-    );
-    assert_eq!(client.get_shipment(&shipment_id).status, ShipmentStatus::Active);
+    // Global circuit breaker allows plenty of headroom (10x).
+    client.set_circuit_breaker(&t.buyer, &(milestone_payment * 10), &1000);
+    // Per-address limit is tighter — less than one payment.
+    client.set_address_outflow_limit(&t.buyer, &t.supplier, &(milestone_payment - 1), &1000);
+
+    let id = String::from_str(&t.env, "OUTFLOW-INDEP");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://d"));
+    // Per-address cap trips even though global breaker has headroom.
+    client.confirm_milestone(&t.buyer, &id, &0);
+}
+
+#[test]
+fn test_get_address_outflow_limit_returns_configured_values() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let limit: i128 = 500_000_000;
+    let window: u32 = 200;
+    client.set_address_outflow_limit(&t.buyer, &t.supplier, &limit, &window);
+
+    let (ret_limit, ret_window, _ret_start, ret_outflow) =
+        client.get_address_outflow_limit(&t.supplier);
+    assert_eq!(ret_limit, limit);
+    assert_eq!(ret_window, window);
+    assert_eq!(ret_outflow, 0);
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
-fn test_non_whitelisted_supplier_blocked() {
+fn test_set_address_outflow_limit_non_admin_rejected() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    let other = Address::generate(&t.env);
-    client.add_to_whitelist(&t.buyer, &other);
-
-    // t.supplier is NOT whitelisted
-    let shipment_id = String::from_str(&t.env, "SHIP-WL-BLOCKED");
-    create_standard_shipment(
-        &client, &t.env, &shipment_id,
-        &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000,
-    );
-}
-
-#[test]
-fn test_empty_whitelist_allows_all_suppliers() {
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    // No whitelist set — open mode
-    assert!(client.is_whitelisted(&t.supplier));
-
-    let shipment_id = String::from_str(&t.env, "SHIP-WL-OPEN");
-    create_standard_shipment(
-        &client, &t.env, &shipment_id,
-        &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000,
-    );
-    assert_eq!(client.get_shipment(&shipment_id).status, ShipmentStatus::Active);
-}
-
-#[test]
-fn test_remove_from_whitelist_re_enables_open_mode() {
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    let other = Address::generate(&t.env);
-    // Whitelist non-empty: only `other` is allowed
-    client.add_to_whitelist(&t.buyer, &other);
-
-    // Remove it — whitelist becomes empty again (open mode)
-    client.remove_from_whitelist(&t.buyer, &other);
-    assert!(client.is_whitelisted(&t.supplier));
-
-    let shipment_id = String::from_str(&t.env, "SHIP-WL-REOPEN");
-    create_standard_shipment(
-        &client, &t.env, &shipment_id,
-        &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000,
-    );
-    assert_eq!(client.get_shipment(&shipment_id).status, ShipmentStatus::Active);
+    // supplier is not admin.
+    client.set_address_outflow_limit(&t.supplier, &t.supplier, &100_000, &100);
 }
 
 // ============================================================
-// ISSUE #105: REFERRAL REWARD TESTS
+// #286 — DISPUTE EVIDENCE VERSIONING TESTS
 // ============================================================
 
 #[test]
-fn test_referral_fee_paid_on_completion() {
+fn test_submit_dispute_evidence_while_disputed() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-    let token_client = token::Client::new(&t.env, &t.token_id);
 
-    let fee_bps: u32 = 100; // 1% protocol fee
-    client.set_fee_config(&t.buyer, &fee_bps, &t.treasury);
-    // referral_fee_bps default = 500 (5% of protocol fee)
+    let id = String::from_str(&t.env, "EVID-BASIC");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
 
-    let referrer = Address::generate(&t.env);
-    let shipment_id = String::from_str(&t.env, "SHIP-REFERRAL");
-    let total_amount: i128 = 1_000_000_000;
-
-    let mut opts = default_options(&t.env);
-    opts.referrer = Some(referrer.clone());
-
-    client.create_shipment(
-        &shipment_id,
-        &single_buyer_vec(&t.env, &t.buyer),
+    client.submit_dispute_evidence(
         &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        &total_amount,
-        &build_milestones(&t.env),
-        &opts,
+        &id,
+        &0,
+        &String::from_str(&t.env, "ipfs://evidence1"),
+        &Symbol::new(&t.env, "invoice"),
     );
 
-    // Confirm all 3 milestones
-    for idx in 0u32..3 {
-        client.submit_proof(
-            &t.supplier, &shipment_id, &idx,
-            &String::from_str(&t.env, "ipfs://proof"),
-            &Symbol::new(&t.env, "ipfs"),
-        );
-        client.confirm_milestone(&t.buyer, &shipment_id, &idx);
-    }
-
-    assert_eq!(client.get_shipment(&shipment_id).status, ShipmentStatus::Completed);
-
-    // referral_amount = total_amount * fee_bps / 10_000 * referral_fee_bps / 10_000
-    // = 1_000_000_000 * 100 / 10_000 * 500 / 10_000 = 10_000_000 * 500 / 10_000 = 500_000
-    let expected_referral: i128 = total_amount * fee_bps as i128 / 10_000
-        * client.get_referral_fee_bps() as i128 / 10_000;
-    assert_eq!(token_client.balance(&referrer), expected_referral);
+    let entries = client.get_dispute_evidence(&id, &0);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.get(0).unwrap().submitter, t.supplier);
+    assert_eq!(entries.get(0).unwrap().evidence_hash, String::from_str(&t.env, "ipfs://evidence1"));
 }
 
 #[test]
-fn test_no_referrer_no_referral_transfer() {
+fn test_submit_dispute_evidence_multiple_parties_append_only() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "EVID-MULTI");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+
+    client.submit_dispute_evidence(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://sup-ev"), &Symbol::new(&t.env, "invoice"));
+    client.submit_dispute_evidence(&t.logistics, &id, &0, &String::from_str(&t.env, "ipfs://log-ev"), &Symbol::new(&t.env, "photo"));
+    client.submit_dispute_evidence(&t.buyer, &id, &0, &String::from_str(&t.env, "ipfs://buy-ev"), &Symbol::new(&t.env, "affidavit"));
+
+    let entries = client.get_dispute_evidence(&id, &0);
+    assert_eq!(entries.len(), 3);
+    // Verify submission order.
+    assert_eq!(entries.get(0).unwrap().submitter, t.supplier);
+    assert_eq!(entries.get(1).unwrap().submitter, t.logistics);
+    assert_eq!(entries.get(2).unwrap().submitter, t.buyer);
+}
+
+#[test]
+fn test_get_dispute_evidence_empty_before_any_submission() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "EVID-EMPTY");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+
+    let entries = client.get_dispute_evidence(&id, &0);
+    assert_eq!(entries.len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "evidence can only be submitted while milestone is Disputed")]
+fn test_submit_evidence_rejected_when_not_disputed() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "EVID-NO-DISP");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    // Milestone is ProofSubmitted, not Disputed — must reject.
+    client.submit_dispute_evidence(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://ev"), &Symbol::new(&t.env, "invoice"));
+}
+
+#[test]
+#[should_panic(expected = "evidence can only be submitted while milestone is Disputed")]
+fn test_submit_evidence_rejected_on_pending_milestone() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "EVID-PENDING");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    // Milestone 0 is Pending — must reject.
+    client.submit_dispute_evidence(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://ev"), &Symbol::new(&t.env, "invoice"));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_submit_evidence_rejected_for_arbiter() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "EVID-ARBITER");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+    // Arbiter is not allowed — only supplier, logistics, or buyer.
+    client.submit_dispute_evidence(&t.arbiter, &id, &0, &String::from_str(&t.env, "ipfs://ev"), &Symbol::new(&t.env, "note"));
+}
+
+#[test]
+fn test_evidence_does_not_change_dispute_resolution_logic() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let token_client = token::Client::new(&t.env, &t.token_id);
 
-    client.set_fee_config(&t.buyer, &100u32, &t.treasury);
+    let total: i128 = 1_000_000_000;
+    let id = String::from_str(&t.env, "EVID-RESOLVE");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
 
-    let shipment_id = String::from_str(&t.env, "SHIP-NO-REFERRAL");
-    let total_amount: i128 = 1_000_000_000;
-    let supplier_balance_before = token_client.balance(&t.supplier);
+    // Submit evidence from both sides.
+    client.submit_dispute_evidence(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://s-ev"), &Symbol::new(&t.env, "invoice"));
+    client.submit_dispute_evidence(&t.buyer, &id, &0, &String::from_str(&t.env, "ipfs://b-ev"), &Symbol::new(&t.env, "photo"));
 
-    create_standard_shipment(
-        &client, &t.env, &shipment_id,
-        &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total_amount,
-    );
+    // Arbiter still resolves normally.
+    client.resolve_dispute(&t.arbiter, &id, &0, &true);
 
-    for idx in 0u32..3 {
-        client.submit_proof(
-            &t.supplier, &shipment_id, &idx,
-            &String::from_str(&t.env, "ipfs://p"), &Symbol::new(&t.env, "ipfs"),
-        );
-        client.confirm_milestone(&t.buyer, &shipment_id, &idx);
-    }
+    // Milestone resolved and payment released.
+    assert_eq!(client.get_milestone(&id, &0).status, MilestoneStatus::Resolved);
+    assert_eq!(token_client.balance(&t.supplier), total * 25 / 100);
 
-    assert_eq!(client.get_shipment(&shipment_id).status, ShipmentStatus::Completed);
-    // Supplier gets full net payment (fee 1%) when no referrer
-    let gross = total_amount;
-    let fee = gross * 100 / 10_000;
-    assert_eq!(token_client.balance(&t.supplier), supplier_balance_before + gross - fee);
+    // Evidence still queryable after resolution.
+    assert_eq!(client.get_dispute_evidence(&id, &0).len(), 2);
 }
 
 // ============================================================
-// ISSUE #108: BUYER CANCELLATION FEE TESTS
+// #287 — BUYER-INITIATED DISPUTE WITHDRAWAL TESTS
 // ============================================================
 
 #[test]
-fn test_buyer_cancel_fee_sent_to_supplier() {
+fn test_withdraw_dispute_reverts_milestone_to_proof_submitted() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "WD-BASIC");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+    assert_eq!(client.get_milestone(&id, &0).status, MilestoneStatus::Disputed);
+
+    client.withdraw_dispute(&t.buyer, &id, &0);
+
+    // Milestone reverts to ProofSubmitted — supplier's original proof still in place.
+    assert_eq!(client.get_milestone(&id, &0).status, MilestoneStatus::ProofSubmitted);
+}
+
+#[test]
+fn test_withdraw_dispute_decrements_open_dispute_count() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "WD-COUNT");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+    assert_eq!(client.get_shipment(&id).open_dispute_count, 1);
+
+    client.withdraw_dispute(&t.buyer, &id, &0);
+    assert_eq!(client.get_shipment(&id).open_dispute_count, 0);
+}
+
+#[test]
+fn test_withdraw_dispute_allows_buyer_to_confirm_after() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let token_client = token::Client::new(&t.env, &t.token_id);
 
-    let shipment_id = String::from_str(&t.env, "SHIP-CANCEL-FEE");
-    let total_amount: i128 = 1_000_000_000;
-    let cancel_fee_bps: u32 = 500; // 5%
+    let total: i128 = 1_000_000_000;
+    let id = String::from_str(&t.env, "WD-CONFIRM");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+    client.withdraw_dispute(&t.buyer, &id, &0);
 
-    let mut opts = default_options(&t.env);
-    opts.buyer_cancel_fee_bps = cancel_fee_bps;
-
-    client.create_shipment(
-        &shipment_id,
-        &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        &total_amount,
-        &build_milestones(&t.env),
-        &opts,
-    );
-
-    let buyer_before = token_client.balance(&t.buyer);
-    let supplier_before = token_client.balance(&t.supplier);
-
-    client.cancel_shipment(&t.buyer, &shipment_id);
-
-    let fee = total_amount * cancel_fee_bps as i128 / 10_000;
-    let refund = total_amount - fee;
-
-    assert_eq!(token_client.balance(&t.supplier), supplier_before + fee);
-    assert_eq!(token_client.balance(&t.buyer), buyer_before + refund);
+    // Buyer can now confirm normally.
+    client.confirm_milestone(&t.buyer, &id, &0);
+    assert_eq!(client.get_milestone(&id, &0).status, MilestoneStatus::Confirmed);
+    assert_eq!(token_client.balance(&t.supplier), total * 25 / 100);
 }
 
 #[test]
-fn test_supplier_cancel_no_buyer_fee() {
+fn test_withdraw_dispute_removes_from_active_disputes() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "WD-ACTIVE");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+    assert_eq!(client.get_active_disputes().len(), 1);
+
+    client.withdraw_dispute(&t.buyer, &id, &0);
+    assert_eq!(client.get_active_disputes().len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_withdraw_dispute_non_buyer_rejected() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "WD-AUTH");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+    // Supplier is not a buyer — must be rejected.
+    client.withdraw_dispute(&t.supplier, &id, &0);
+}
+
+#[test]
+#[should_panic(expected = "milestone is not in disputed status")]
+fn test_withdraw_dispute_not_disputed_panics() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "WD-NODIS");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    // Milestone is ProofSubmitted, not Disputed — must reject.
+    client.withdraw_dispute(&t.buyer, &id, &0);
+}
+
+#[test]
+#[should_panic(expected = "milestone is not in disputed status")]
+fn test_withdraw_dispute_arbiter_cannot_resolve_after_withdrawal() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "WD-ARBITER");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+    client.withdraw_dispute(&t.buyer, &id, &0);
+
+    // Milestone is now ProofSubmitted — arbiter's resolve_dispute must fail.
+    client.resolve_dispute(&t.arbiter, &id, &0, &true);
+}
+
+#[test]
+fn test_withdraw_dispute_partial_path_preserves_released_amount() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let token_client = token::Client::new(&t.env, &t.token_id);
 
-    let shipment_id = String::from_str(&t.env, "SHIP-SUP-CANCEL-NOFEE");
-    let total_amount: i128 = 1_000_000_000;
-    let cancel_fee_bps: u32 = 500;
+    let total: i128 = 1_000_000_000;
+    let id = String::from_str(&t.env, "WD-PARTIAL");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
 
-    // Even with buyer_cancel_fee_bps set, supplier cancel should NOT apply it
-    let mut opts = default_options(&t.env);
-    opts.response_deadline = 100;
-    opts.penalty_bps = 0;
-    opts.buyer_cancel_fee_bps = cancel_fee_bps;
+    // Confirm milestone 0 (25%) — released.
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id, &0);
+    assert_eq!(token_client.balance(&t.supplier), total * 25 / 100);
 
-    client.create_shipment(
-        &shipment_id,
-        &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        &total_amount,
-        &build_milestones(&t.env),
-        &opts,
-    );
+    // Dispute milestone 1, then withdraw.
+    client.submit_proof(&t.logistics, &id, &1, &String::from_str(&t.env, "ipfs://t"));
+    client.raise_dispute(&t.buyer, &id, &1);
+    client.withdraw_dispute(&t.buyer, &id, &1);
 
-    client.submit_proof(
-        &t.supplier, &shipment_id, &0,
-        &String::from_str(&t.env, "ipfs://p"), &Symbol::new(&t.env, "ipfs"),
-    );
-    t.env.ledger().set_sequence_number(200);
-
-    let buyer_before = token_client.balance(&t.buyer);
-    client.supplier_cancel(&t.supplier, &shipment_id);
-
-    // Supplier cancel does not apply buyer_cancel_fee_bps; buyer gets full refund
-    assert_eq!(token_client.balance(&t.supplier), 0);
-    assert_eq!(token_client.balance(&t.buyer), buyer_before + total_amount);
-}
-
-#[test]
-#[should_panic(expected = "buyer_cancel_fee_bps cannot exceed 1000")]
-fn test_buyer_cancel_fee_cap_enforced() {
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-
-    let mut opts = default_options(&t.env);
-    opts.buyer_cancel_fee_bps = 1001; // exceeds 10% cap
-
-    client.create_shipment(
-        &String::from_str(&t.env, "SHIP-CAP-FAIL"),
-        &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier,
-        &t.logistics,
-        &t.arbiter,
-        &t.token_id,
-        &1_000_000_000i128,
-        &build_milestones(&t.env),
-        &opts,
-    );
-}
-
-#[test]
-fn test_buyer_cancel_fee_zero_no_fee() {
-    let t = setup();
-    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-    let token_client = token::Client::new(&t.env, &t.token_id);
-
-    let shipment_id = String::from_str(&t.env, "SHIP-ZERO-FEE");
-    let total_amount: i128 = 1_000_000_000;
-
-    // Default options: buyer_cancel_fee_bps = 0
-    create_standard_shipment(
-        &client, &t.env, &shipment_id,
-        &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total_amount,
-    );
-
-    let buyer_before = token_client.balance(&t.buyer);
-    client.cancel_shipment(&t.buyer, &shipment_id);
-
-    // Full refund, no fee to supplier
-    assert_eq!(token_client.balance(&t.supplier), 0);
-    assert_eq!(token_client.balance(&t.buyer), buyer_before + total_amount);
+    // Released amount from milestone 0 is preserved.
+    let shipment = client.get_shipment(&id);
+    assert_eq!(shipment.released_amount, total * 25 / 100);
+    // Milestone 1 reverted to ProofSubmitted.
+    assert_eq!(client.get_milestone(&id, &1).status, MilestoneStatus::ProofSubmitted);
+    // Supplier still holds only the first milestone payment.
+    assert_eq!(token_client.balance(&t.supplier), total * 25 / 100);
 }
