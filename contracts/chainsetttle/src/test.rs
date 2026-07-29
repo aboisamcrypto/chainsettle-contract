@@ -833,8 +833,10 @@ fn test_admin_action_log_capped_and_ordered() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
 
-    for i in 1..=51 {
-        let pct = if i <= 100 { i as u32 } else { 100 };
+    for i in 1u32..=51 {
+        // Advance the ledger so each entry has a distinct, increasing sequence number.
+        t.env.ledger().set_sequence_number(i);
+        let pct = if i <= 100 { i } else { 100 };
         client.set_min_milestone_percent(&t.buyer, &pct);
     }
 
@@ -1905,6 +1907,9 @@ fn test_shipment_created_event_includes_all_role_addresses() {
     let shipment_id = String::from_str(&t.env, "SHIP-EVT-CREATE");
     let total_amount: i128 = 1_000_000_000;
 
+    // Advance past ledger 0 so created_at is non-zero.
+    t.env.ledger().set_sequence_number(1);
+
     create_standard_shipment(
         &client, &t.env, &shipment_id, &t.buyer, &t.supplier,
         &t.logistics, &t.arbiter, &t.token_id, total_amount,
@@ -2039,3 +2044,608 @@ fn test_batch_confirm_milestone_confirmed_event_includes_supplier() {
     assert_eq!(shipment.supplier, t.supplier, "event supplier field is correct");
 }
 
+
+// ============================================================
+// #284 — SUPPLIER PAYOUT BATCHING TESTS
+// ============================================================
+
+#[test]
+fn test_set_payout_mode_batched_accumulates_instead_of_transfer() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let token_client = token::Client::new(&t.env, &t.token_id);
+
+    // Opt supplier into batched mode.
+    client.set_payout_mode(&t.supplier, &true);
+
+    let shipment_id = String::from_str(&t.env, "SHIP-BATCH-MODE");
+    let total_amount: i128 = 1_000_000_000;
+
+    create_standard_shipment(
+        &client, &t.env, &shipment_id, &t.buyer, &t.supplier,
+        &t.logistics, &t.arbiter, &t.token_id, total_amount,
+    );
+
+    client.submit_proof(&t.supplier, &shipment_id, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &shipment_id, &0);
+
+    // No immediate transfer — supplier balance stays 0.
+    assert_eq!(token_client.balance(&t.supplier), 0);
+
+    // Pending payout should reflect the milestone payment (25%).
+    let expected = total_amount * 25 / 100;
+    assert_eq!(client.get_pending_payout(&t.supplier), expected);
+}
+
+#[test]
+fn test_batched_payout_accumulates_across_multiple_shipments() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let token_client = token::Client::new(&t.env, &t.token_id);
+
+    client.set_payout_mode(&t.supplier, &true);
+
+    let total: i128 = 1_000_000_000;
+
+    // Shipment 1 — confirm milestone 0 (25%)
+    let id1 = String::from_str(&t.env, "BATCH-S1");
+    create_standard_shipment(&client, &t.env, &id1, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id1, &0, &String::from_str(&t.env, "ipfs://s1m0"));
+    client.confirm_milestone(&t.buyer, &id1, &0);
+
+    // Shipment 2 — confirm milestone 0 (25%)
+    let id2 = String::from_str(&t.env, "BATCH-S2");
+    create_standard_shipment(&client, &t.env, &id2, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id2, &0, &String::from_str(&t.env, "ipfs://s2m0"));
+    client.confirm_milestone(&t.buyer, &id2, &0);
+
+    // Shipment 3 — confirm milestone 1 (50%)
+    let id3 = String::from_str(&t.env, "BATCH-S3");
+    create_standard_shipment(&client, &t.env, &id3, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id3, &1, &String::from_str(&t.env, "ipfs://s3m1"));
+    client.confirm_milestone(&t.buyer, &id3, &1);
+
+    let expected_pending = total * 25 / 100 + total * 25 / 100 + total * 50 / 100;
+    assert_eq!(client.get_pending_payout(&t.supplier), expected_pending);
+    // No actual token transfer yet.
+    assert_eq!(token_client.balance(&t.supplier), 0);
+}
+
+#[test]
+fn test_claim_payout_transfers_full_balance_and_zeroes() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let token_client = token::Client::new(&t.env, &t.token_id);
+
+    client.set_payout_mode(&t.supplier, &true);
+
+    let total: i128 = 1_000_000_000;
+    let id = String::from_str(&t.env, "BATCH-CLAIM");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id, &0);
+
+    let pending = client.get_pending_payout(&t.supplier);
+    assert!(pending > 0);
+
+    client.claim_payout(&t.supplier, &t.token_id);
+
+    // Balance transferred, pending reset to 0.
+    assert_eq!(token_client.balance(&t.supplier), pending);
+    assert_eq!(client.get_pending_payout(&t.supplier), 0);
+}
+
+#[test]
+fn test_claim_payout_mid_accumulation_then_continues() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let token_client = token::Client::new(&t.env, &t.token_id);
+
+    client.set_payout_mode(&t.supplier, &true);
+    let total: i128 = 1_000_000_000;
+
+    let id1 = String::from_str(&t.env, "BATCH-MID-1");
+    create_standard_shipment(&client, &t.env, &id1, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id1, &0, &String::from_str(&t.env, "ipfs://a"));
+    client.confirm_milestone(&t.buyer, &id1, &0);
+
+    // Claim mid-way.
+    let first_claim = client.get_pending_payout(&t.supplier);
+    client.claim_payout(&t.supplier, &t.token_id);
+    assert_eq!(token_client.balance(&t.supplier), first_claim);
+    assert_eq!(client.get_pending_payout(&t.supplier), 0);
+
+    // Continue accumulating on another shipment.
+    let id2 = String::from_str(&t.env, "BATCH-MID-2");
+    create_standard_shipment(&client, &t.env, &id2, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id2, &0, &String::from_str(&t.env, "ipfs://b"));
+    client.confirm_milestone(&t.buyer, &id2, &0);
+
+    let second_pending = client.get_pending_payout(&t.supplier);
+    assert_eq!(second_pending, total * 25 / 100);
+}
+
+#[test]
+#[should_panic(expected = "no pending payout")]
+fn test_claim_payout_zero_balance_panics() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    // Supplier never accumulated anything.
+    client.claim_payout(&t.supplier, &t.token_id);
+}
+
+#[test]
+fn test_immediate_mode_supplier_unaffected() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let token_client = token::Client::new(&t.env, &t.token_id);
+
+    // No set_payout_mode call — defaults to Immediate.
+    let total: i128 = 1_000_000_000;
+    let id = String::from_str(&t.env, "IMMED-MODE");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id, &0);
+
+    // Immediate: supplier gets token immediately, no pending balance.
+    assert_eq!(token_client.balance(&t.supplier), total * 25 / 100);
+    assert_eq!(client.get_pending_payout(&t.supplier), 0);
+}
+
+#[test]
+fn test_toggle_back_to_immediate_stops_accumulation() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let token_client = token::Client::new(&t.env, &t.token_id);
+
+    client.set_payout_mode(&t.supplier, &true);
+    let total: i128 = 1_000_000_000;
+
+    let id1 = String::from_str(&t.env, "TOGGLE-1");
+    create_standard_shipment(&client, &t.env, &id1, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id1, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id1, &0);
+    assert_eq!(token_client.balance(&t.supplier), 0);
+
+    // Switch back to immediate.
+    client.set_payout_mode(&t.supplier, &false);
+
+    let id2 = String::from_str(&t.env, "TOGGLE-2");
+    create_standard_shipment(&client, &t.env, &id2, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id2, &0, &String::from_str(&t.env, "ipfs://d2"));
+    client.confirm_milestone(&t.buyer, &id2, &0);
+
+    // Second milestone should be transferred immediately.
+    assert_eq!(token_client.balance(&t.supplier), total * 25 / 100);
+    // Pending balance from first shipment is still unclaimed.
+    assert_eq!(client.get_pending_payout(&t.supplier), total * 25 / 100);
+}
+
+// ============================================================
+// #285 — PER-ADDRESS OUTFLOW RATE LIMITING TESTS
+// ============================================================
+
+#[test]
+#[should_panic(expected = "address outflow limit exceeded")]
+fn test_address_outflow_limit_blocks_excess_payout() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let total: i128 = 1_000_000_000;
+    let milestone_payment = total * 25 / 100; // 250_000_000
+
+    // Set limit slightly below one milestone payment, window = 1000 ledgers.
+    client.set_address_outflow_limit(&t.buyer, &t.supplier, &(milestone_payment - 1), &1000);
+
+    let id = String::from_str(&t.env, "OUTFLOW-BLOCK");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id, &0);
+}
+
+#[test]
+#[should_panic(expected = "address outflow limit exceeded")]
+fn test_address_outflow_limit_exceeded_panics() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let total: i128 = 1_000_000_000;
+    let milestone_payment = total * 25 / 100;
+
+    // Limit less than one milestone payment.
+    client.set_address_outflow_limit(&t.buyer, &t.supplier, &(milestone_payment - 1), &1000);
+
+    let id = String::from_str(&t.env, "OUTFLOW-PANIC");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id, &0);
+}
+
+#[test]
+fn test_address_outflow_limit_allows_within_cap() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let token_client = token::Client::new(&t.env, &t.token_id);
+
+    let total: i128 = 1_000_000_000;
+    let milestone_payment = total * 25 / 100;
+
+    // Set limit exactly equal to one milestone payment — should allow it.
+    client.set_address_outflow_limit(&t.buyer, &t.supplier, &milestone_payment, &1000);
+
+    let id = String::from_str(&t.env, "OUTFLOW-ALLOW");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id, &0);
+
+    assert_eq!(token_client.balance(&t.supplier), milestone_payment);
+}
+
+#[test]
+fn test_address_outflow_limit_zero_disables_per_address_cap() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let token_client = token::Client::new(&t.env, &t.token_id);
+
+    let total: i128 = 1_000_000_000;
+
+    // Set then remove the limit (limit=0 disables it).
+    client.set_address_outflow_limit(&t.buyer, &t.supplier, &0, &1000);
+
+    let id = String::from_str(&t.env, "OUTFLOW-DISABLE");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id, &0);
+
+    // Should succeed — cap disabled.
+    assert_eq!(token_client.balance(&t.supplier), total * 25 / 100);
+}
+
+#[test]
+fn test_address_outflow_limit_window_resets_after_expiry() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let token_client = token::Client::new(&t.env, &t.token_id);
+
+    let total: i128 = 1_000_000_000;
+    let milestone_payment = total * 25 / 100;
+    let window: u32 = 50;
+
+    // Allow exactly one payment per window.
+    client.set_address_outflow_limit(&t.buyer, &t.supplier, &milestone_payment, &window);
+
+    let id1 = String::from_str(&t.env, "OUTFLOW-WIN-1");
+    create_standard_shipment(&client, &t.env, &id1, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id1, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id1, &0);
+    assert_eq!(token_client.balance(&t.supplier), milestone_payment);
+
+    // Advance past the window.
+    t.env.ledger().set_sequence_number(window + 10);
+
+    let id2 = String::from_str(&t.env, "OUTFLOW-WIN-2");
+    create_standard_shipment(&client, &t.env, &id2, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id2, &0, &String::from_str(&t.env, "ipfs://e"));
+    client.confirm_milestone(&t.buyer, &id2, &0);
+
+    // Second payment in the new window should succeed.
+    assert_eq!(token_client.balance(&t.supplier), milestone_payment * 2);
+}
+
+#[test]
+#[should_panic(expected = "address outflow limit exceeded")]
+fn test_address_outflow_limit_independent_of_global_breaker() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let total: i128 = 1_000_000_000;
+    let milestone_payment = total * 25 / 100;
+
+    // Global circuit breaker allows plenty of headroom (10x).
+    client.set_circuit_breaker(&t.buyer, &(milestone_payment * 10), &1000);
+    // Per-address limit is tighter — less than one payment.
+    client.set_address_outflow_limit(&t.buyer, &t.supplier, &(milestone_payment - 1), &1000);
+
+    let id = String::from_str(&t.env, "OUTFLOW-INDEP");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://d"));
+    // Per-address cap trips even though global breaker has headroom.
+    client.confirm_milestone(&t.buyer, &id, &0);
+}
+
+#[test]
+fn test_get_address_outflow_limit_returns_configured_values() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let limit: i128 = 500_000_000;
+    let window: u32 = 200;
+    client.set_address_outflow_limit(&t.buyer, &t.supplier, &limit, &window);
+
+    let (ret_limit, ret_window, _ret_start, ret_outflow) =
+        client.get_address_outflow_limit(&t.supplier);
+    assert_eq!(ret_limit, limit);
+    assert_eq!(ret_window, window);
+    assert_eq!(ret_outflow, 0);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_set_address_outflow_limit_non_admin_rejected() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    // supplier is not admin.
+    client.set_address_outflow_limit(&t.supplier, &t.supplier, &100_000, &100);
+}
+
+// ============================================================
+// #286 — DISPUTE EVIDENCE VERSIONING TESTS
+// ============================================================
+
+#[test]
+fn test_submit_dispute_evidence_while_disputed() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "EVID-BASIC");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+
+    client.submit_dispute_evidence(
+        &t.supplier,
+        &id,
+        &0,
+        &String::from_str(&t.env, "ipfs://evidence1"),
+        &Symbol::new(&t.env, "invoice"),
+    );
+
+    let entries = client.get_dispute_evidence(&id, &0);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.get(0).unwrap().submitter, t.supplier);
+    assert_eq!(entries.get(0).unwrap().evidence_hash, String::from_str(&t.env, "ipfs://evidence1"));
+}
+
+#[test]
+fn test_submit_dispute_evidence_multiple_parties_append_only() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "EVID-MULTI");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+
+    client.submit_dispute_evidence(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://sup-ev"), &Symbol::new(&t.env, "invoice"));
+    client.submit_dispute_evidence(&t.logistics, &id, &0, &String::from_str(&t.env, "ipfs://log-ev"), &Symbol::new(&t.env, "photo"));
+    client.submit_dispute_evidence(&t.buyer, &id, &0, &String::from_str(&t.env, "ipfs://buy-ev"), &Symbol::new(&t.env, "affidavit"));
+
+    let entries = client.get_dispute_evidence(&id, &0);
+    assert_eq!(entries.len(), 3);
+    // Verify submission order.
+    assert_eq!(entries.get(0).unwrap().submitter, t.supplier);
+    assert_eq!(entries.get(1).unwrap().submitter, t.logistics);
+    assert_eq!(entries.get(2).unwrap().submitter, t.buyer);
+}
+
+#[test]
+fn test_get_dispute_evidence_empty_before_any_submission() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "EVID-EMPTY");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+
+    let entries = client.get_dispute_evidence(&id, &0);
+    assert_eq!(entries.len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "evidence can only be submitted while milestone is Disputed")]
+fn test_submit_evidence_rejected_when_not_disputed() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "EVID-NO-DISP");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    // Milestone is ProofSubmitted, not Disputed — must reject.
+    client.submit_dispute_evidence(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://ev"), &Symbol::new(&t.env, "invoice"));
+}
+
+#[test]
+#[should_panic(expected = "evidence can only be submitted while milestone is Disputed")]
+fn test_submit_evidence_rejected_on_pending_milestone() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "EVID-PENDING");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    // Milestone 0 is Pending — must reject.
+    client.submit_dispute_evidence(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://ev"), &Symbol::new(&t.env, "invoice"));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_submit_evidence_rejected_for_arbiter() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "EVID-ARBITER");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+    // Arbiter is not allowed — only supplier, logistics, or buyer.
+    client.submit_dispute_evidence(&t.arbiter, &id, &0, &String::from_str(&t.env, "ipfs://ev"), &Symbol::new(&t.env, "note"));
+}
+
+#[test]
+fn test_evidence_does_not_change_dispute_resolution_logic() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let token_client = token::Client::new(&t.env, &t.token_id);
+
+    let total: i128 = 1_000_000_000;
+    let id = String::from_str(&t.env, "EVID-RESOLVE");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+
+    // Submit evidence from both sides.
+    client.submit_dispute_evidence(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://s-ev"), &Symbol::new(&t.env, "invoice"));
+    client.submit_dispute_evidence(&t.buyer, &id, &0, &String::from_str(&t.env, "ipfs://b-ev"), &Symbol::new(&t.env, "photo"));
+
+    // Arbiter still resolves normally.
+    client.resolve_dispute(&t.arbiter, &id, &0, &true);
+
+    // Milestone resolved and payment released.
+    assert_eq!(client.get_milestone(&id, &0).status, MilestoneStatus::Resolved);
+    assert_eq!(token_client.balance(&t.supplier), total * 25 / 100);
+
+    // Evidence still queryable after resolution.
+    assert_eq!(client.get_dispute_evidence(&id, &0).len(), 2);
+}
+
+// ============================================================
+// #287 — BUYER-INITIATED DISPUTE WITHDRAWAL TESTS
+// ============================================================
+
+#[test]
+fn test_withdraw_dispute_reverts_milestone_to_proof_submitted() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "WD-BASIC");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+    assert_eq!(client.get_milestone(&id, &0).status, MilestoneStatus::Disputed);
+
+    client.withdraw_dispute(&t.buyer, &id, &0);
+
+    // Milestone reverts to ProofSubmitted — supplier's original proof still in place.
+    assert_eq!(client.get_milestone(&id, &0).status, MilestoneStatus::ProofSubmitted);
+}
+
+#[test]
+fn test_withdraw_dispute_decrements_open_dispute_count() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "WD-COUNT");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+    assert_eq!(client.get_shipment(&id).open_dispute_count, 1);
+
+    client.withdraw_dispute(&t.buyer, &id, &0);
+    assert_eq!(client.get_shipment(&id).open_dispute_count, 0);
+}
+
+#[test]
+fn test_withdraw_dispute_allows_buyer_to_confirm_after() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let token_client = token::Client::new(&t.env, &t.token_id);
+
+    let total: i128 = 1_000_000_000;
+    let id = String::from_str(&t.env, "WD-CONFIRM");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+    client.withdraw_dispute(&t.buyer, &id, &0);
+
+    // Buyer can now confirm normally.
+    client.confirm_milestone(&t.buyer, &id, &0);
+    assert_eq!(client.get_milestone(&id, &0).status, MilestoneStatus::Confirmed);
+    assert_eq!(token_client.balance(&t.supplier), total * 25 / 100);
+}
+
+#[test]
+fn test_withdraw_dispute_removes_from_active_disputes() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "WD-ACTIVE");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+    assert_eq!(client.get_active_disputes().len(), 1);
+
+    client.withdraw_dispute(&t.buyer, &id, &0);
+    assert_eq!(client.get_active_disputes().len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_withdraw_dispute_non_buyer_rejected() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "WD-AUTH");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+    // Supplier is not a buyer — must be rejected.
+    client.withdraw_dispute(&t.supplier, &id, &0);
+}
+
+#[test]
+#[should_panic(expected = "milestone is not in disputed status")]
+fn test_withdraw_dispute_not_disputed_panics() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "WD-NODIS");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    // Milestone is ProofSubmitted, not Disputed — must reject.
+    client.withdraw_dispute(&t.buyer, &id, &0);
+}
+
+#[test]
+#[should_panic(expected = "milestone is not in disputed status")]
+fn test_withdraw_dispute_arbiter_cannot_resolve_after_withdrawal() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+
+    let id = String::from_str(&t.env, "WD-ARBITER");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, 1_000_000_000);
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://proof"));
+    client.raise_dispute(&t.buyer, &id, &0);
+    client.withdraw_dispute(&t.buyer, &id, &0);
+
+    // Milestone is now ProofSubmitted — arbiter's resolve_dispute must fail.
+    client.resolve_dispute(&t.arbiter, &id, &0, &true);
+}
+
+#[test]
+fn test_withdraw_dispute_partial_path_preserves_released_amount() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let token_client = token::Client::new(&t.env, &t.token_id);
+
+    let total: i128 = 1_000_000_000;
+    let id = String::from_str(&t.env, "WD-PARTIAL");
+    create_standard_shipment(&client, &t.env, &id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter, &t.token_id, total);
+
+    // Confirm milestone 0 (25%) — released.
+    client.submit_proof(&t.supplier, &id, &0, &String::from_str(&t.env, "ipfs://d"));
+    client.confirm_milestone(&t.buyer, &id, &0);
+    assert_eq!(token_client.balance(&t.supplier), total * 25 / 100);
+
+    // Dispute milestone 1, then withdraw.
+    client.submit_proof(&t.logistics, &id, &1, &String::from_str(&t.env, "ipfs://t"));
+    client.raise_dispute(&t.buyer, &id, &1);
+    client.withdraw_dispute(&t.buyer, &id, &1);
+
+    // Released amount from milestone 0 is preserved.
+    let shipment = client.get_shipment(&id);
+    assert_eq!(shipment.released_amount, total * 25 / 100);
+    // Milestone 1 reverted to ProofSubmitted.
+    assert_eq!(client.get_milestone(&id, &1).status, MilestoneStatus::ProofSubmitted);
+    // Supplier still holds only the first milestone payment.
+    assert_eq!(token_client.balance(&t.supplier), total * 25 / 100);
+}

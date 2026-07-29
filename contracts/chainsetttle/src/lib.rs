@@ -204,6 +204,38 @@ pub struct AdminAction {
 }
 
 // ============================================================
+// #284 — SUPPLIER PAYOUT BATCHING
+// ============================================================
+
+/// Controls payout delivery for a given supplier.
+/// - Immediate: each confirm/resolve triggers a SAC transfer on the spot (default, backward-compat).
+/// - Batched: payments accumulate in a per-supplier balance until claim_payout is called.
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum PayoutMode {
+    Immediate,
+    Batched,
+}
+
+// ============================================================
+// #286 — DISPUTE EVIDENCE VERSIONING
+// ============================================================
+
+/// A single versioned evidence entry appended to a disputed milestone.
+#[contracttype]
+#[derive(Clone)]
+pub struct DisputeEvidence {
+    /// Address that submitted this evidence (supplier, logistics, or buyer).
+    pub submitter: Address,
+    /// IPFS CID or other off-chain evidence pointer.
+    pub evidence_hash: String,
+    /// Caller-supplied category tag (e.g. "invoice", "photo", "affidavit").
+    pub evidence_type: Symbol,
+    /// Ledger sequence at submission time.
+    pub submitted_ledger: u32,
+}
+
+// ============================================================
 // STORAGE KEYS
 // ============================================================
 
@@ -265,6 +297,23 @@ pub enum DataKey {
     AdminApprovals(String),
     /// Pending admin nominee for two-step admin transfer.
     PendingAdmin,
+    // ── #284 Supplier payout batching ─────────────────────────────────────
+    /// Per-supplier payout mode (Immediate or Batched).
+    PayoutMode(Address),
+    /// Accumulated pending payout balance for a batched-mode supplier.
+    PendingPayout(Address),
+    // ── #285 Per-address outflow rate limiting ─────────────────────────────
+    /// Per-address outflow cap in i128 (0 = disabled, falls back to global breaker only).
+    AddressOutflowLimit(Address),
+    /// Per-address outflow window in ledgers.
+    AddressOutflowWindow(Address),
+    /// Per-address window start ledger.
+    AddressOutflowWindowStart(Address),
+    /// Per-address window outflow accumulated so far.
+    AddressOutflowWindowOutflow(Address),
+    // ── #286 Dispute evidence versioning ──────────────────────────────────
+    /// Ordered list of evidence entries for a disputed milestone.
+    DisputeEvidence(String, u32),
 }
 
 // ============================================================
@@ -291,6 +340,10 @@ pub enum ChainSettleError {
     DisputeCooldownActive = 14,
     TransferDisallowed = 15,
     CircuitBreakerTripped = 16,
+    /// Per-address outflow rate limit exceeded (#285).
+    AddressOutflowLimitExceeded = 17,
+    /// No pending payout to claim (#284).
+    NoPendingPayout = 18,
 }
 
 // ============================================================
@@ -625,7 +678,7 @@ impl ChainSettleContract {
     pub fn is_blacklisted(env: Env, address: Address) -> bool {
         env.storage()
             .instance()
-            .get(&DataKey::Blacklisted(address))
+            .get::<DataKey, soroban_sdk::BytesN<32>>(&DataKey::Blacklisted(address))
             .is_some()
     }
 
@@ -750,14 +803,14 @@ impl ChainSettleContract {
             if env
                 .storage()
                 .instance()
-                .get(&DataKey::Blacklisted(buyers.get(i).unwrap().clone()))
+                .get::<DataKey, soroban_sdk::BytesN<32>>(&DataKey::Blacklisted(buyers.get(i).unwrap().clone()))
                 .is_some()
             {
                 panic!("unauthorized");
             }
         }
         for addr in [supplier.clone(), logistics.clone(), arbiter.clone()] {
-            if env.storage().instance().get(&DataKey::Blacklisted(addr)).is_some() {
+            if env.storage().instance().get::<DataKey, soroban_sdk::BytesN<32>>(&DataKey::Blacklisted(addr)).is_some() {
                 panic!("unauthorized");
             }
         }
@@ -1125,23 +1178,46 @@ impl ChainSettleContract {
             let mut fee_amount: i128 = 0;
             let net_payment = Self::deduct_fee(&env, payment, &shipment.token, &mut fee_amount);
 
-            // Check circuit breaker before transferring payment
+            // Check global circuit breaker before transferring payment
             Self::check_circuit_breaker(&env, payment);
+            // Check per-address outflow limit (#285)
+            Self::check_address_outflow(&env, &shipment.supplier, payment);
 
             milestone.status = MilestoneStatus::Confirmed;
             shipment.milestones.set(milestone_index, milestone);
             shipment.released_amount += payment;
 
-            let token_client = token::Client::new(&env, &shipment.token);
-            token_client.transfer(
-                &env.current_contract_address(),
-                &shipment.supplier,
-                &net_payment,
-            );
+            // #284: Batched vs immediate payout
+            let payout_mode: PayoutMode = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PayoutMode(shipment.supplier.clone()))
+                .unwrap_or(PayoutMode::Immediate);
+
+            if payout_mode == PayoutMode::Batched {
+                // Accumulate into supplier's pending balance instead of transferring now.
+                let pending: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::PendingPayout(shipment.supplier.clone()))
+                    .unwrap_or(0);
+                env.storage().persistent().set(
+                    &DataKey::PendingPayout(shipment.supplier.clone()),
+                    &(pending + net_payment),
+                );
+            } else {
+                let token_client = token::Client::new(&env, &shipment.token);
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &shipment.supplier,
+                    &net_payment,
+                );
+            }
 
             // Return penalty to buyer if any.
             if penalty_deducted > 0 {
                 let primary_buyer = shipment.buyers.get(0).unwrap();
+                let token_client = token::Client::new(&env, &shipment.token);
                 token_client.transfer(
                     &env.current_contract_address(),
                     &primary_buyer,
@@ -1218,20 +1294,41 @@ impl ChainSettleContract {
         let mut fee_amount: i128 = 0;
         let net_payment = Self::deduct_fee(&env, payment, &shipment.token, &mut fee_amount);
 
-        // Check circuit breaker before transferring payment
+        // Check global circuit breaker before transferring payment
         Self::check_circuit_breaker(&env, payment);
+        // Check per-address outflow limit (#285)
+        Self::check_address_outflow(&env, &shipment.supplier, payment);
 
         milestone.status = MilestoneStatus::Confirmed;
         milestone.release_after_ledger = 0;
         shipment.milestones.set(milestone_index, milestone);
         shipment.released_amount += payment;
 
-        let token_client = token::Client::new(&env, &shipment.token);
-        token_client.transfer(
-            &env.current_contract_address(),
-            &shipment.supplier,
-            &net_payment,
-        );
+        // #284: Batched vs immediate payout
+        let payout_mode: PayoutMode = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PayoutMode(shipment.supplier.clone()))
+            .unwrap_or(PayoutMode::Immediate);
+
+        if payout_mode == PayoutMode::Batched {
+            let pending: i128 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PendingPayout(shipment.supplier.clone()))
+                .unwrap_or(0);
+            env.storage().persistent().set(
+                &DataKey::PendingPayout(shipment.supplier.clone()),
+                &(pending + net_payment),
+            );
+        } else {
+            let token_client = token::Client::new(&env, &shipment.token);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &shipment.supplier,
+                &net_payment,
+            );
+        }
 
         if Self::all_milestones_done(&shipment) {
             shipment.status = ShipmentStatus::Completed;
@@ -1320,18 +1417,39 @@ impl ChainSettleContract {
             let payment = (shipment.total_amount * milestone.payment_percent as i128) / 100;
             let mut fee_amount: i128 = 0;
             let net_payment = Self::deduct_fee(&env, payment, &shipment.token, &mut fee_amount);
-            
-            // Check circuit breaker before transferring payment
+
+            // Check global circuit breaker before transferring payment
             Self::check_circuit_breaker(&env, payment);
-            
+            // Check per-address outflow limit (#285)
+            Self::check_address_outflow(&env, &shipment.supplier, payment);
+
             shipment.released_amount += payment;
 
-            let token_client = token::Client::new(&env, &shipment.token);
-            token_client.transfer(
-                &env.current_contract_address(),
-                &shipment.supplier,
-                &net_payment,
-            );
+            // #284: Batched vs immediate payout
+            let payout_mode: PayoutMode = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PayoutMode(shipment.supplier.clone()))
+                .unwrap_or(PayoutMode::Immediate);
+
+            if payout_mode == PayoutMode::Batched {
+                let pending: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::PendingPayout(shipment.supplier.clone()))
+                    .unwrap_or(0);
+                env.storage().persistent().set(
+                    &DataKey::PendingPayout(shipment.supplier.clone()),
+                    &(pending + net_payment),
+                );
+            } else {
+                let token_client = token::Client::new(&env, &shipment.token);
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &shipment.supplier,
+                    &net_payment,
+                );
+            }
 
             // Decrement total escrowed value.
             let current_escrowed: i128 = env
@@ -2547,6 +2665,272 @@ impl ChainSettleContract {
         }
     }
 
+    // ============================================================
+    // #284 — SUPPLIER PAYOUT BATCHING: public functions
+    // ============================================================
+
+    /// Toggle batched vs immediate payout mode for a supplier.
+    /// When batched, milestone payments accumulate in a per-supplier balance
+    /// instead of being SAC-transferred on each confirmation.
+    pub fn set_payout_mode(env: Env, supplier: Address, batched: bool) {
+        supplier.require_auth();
+        let mode = if batched { PayoutMode::Batched } else { PayoutMode::Immediate };
+        env.storage()
+            .persistent()
+            .set(&DataKey::PayoutMode(supplier.clone()), &mode);
+        env.events().publish(
+            (Symbol::new(&env, "payout_mode_set"), supplier.clone()),
+            batched,
+        );
+    }
+
+    /// Withdraw the full accumulated pending payout balance in one transaction.
+    /// Panics if the balance is zero. Resets the balance to zero after transfer.
+    pub fn claim_payout(env: Env, supplier: Address, token: Address) {
+        Self::assert_not_paused(&env);
+        supplier.require_auth();
+
+        let pending: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingPayout(supplier.clone()))
+            .unwrap_or(0);
+
+        if pending <= 0 {
+            panic!("no pending payout");
+        }
+
+        // Zero out first (checks-effects-interactions).
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingPayout(supplier.clone()), &0i128);
+
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&env.current_contract_address(), &supplier, &pending);
+
+        env.events().publish(
+            (Symbol::new(&env, "payout_claimed"), supplier.clone()),
+            pending,
+        );
+    }
+
+    /// Read-only getter for the supplier's accumulated pending payout balance.
+    pub fn get_pending_payout(env: Env, supplier: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingPayout(supplier))
+            .unwrap_or(0)
+    }
+
+    // ============================================================
+    // #285 — PER-ADDRESS OUTFLOW RATE LIMITING: public functions
+    // ============================================================
+
+    /// Configure a per-address sliding-window outflow cap.
+    /// `limit = 0` disables the per-address cap for that address.
+    pub fn set_address_outflow_limit(
+        env: Env,
+        admin: Address,
+        address: Address,
+        limit: i128,
+        window_ledgers: u32,
+    ) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AddressOutflowLimit(address.clone()), &limit);
+        env.storage()
+            .persistent()
+            .set(&DataKey::AddressOutflowWindow(address.clone()), &window_ledgers);
+        // Reset window tracking on config change.
+        env.storage().persistent().set(
+            &DataKey::AddressOutflowWindowStart(address.clone()),
+            &env.ledger().sequence(),
+        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::AddressOutflowWindowOutflow(address.clone()), &0i128);
+
+        env.events().publish(
+            (Symbol::new(&env, "address_outflow_limit_set"), address.clone()),
+            (limit, window_ledgers),
+        );
+    }
+
+    /// Read-only getter for per-address outflow config.
+    /// Returns (limit, window_ledgers, window_start, window_outflow).
+    pub fn get_address_outflow_limit(
+        env: Env,
+        address: Address,
+    ) -> (i128, u32, u32, i128) {
+        let limit: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AddressOutflowLimit(address.clone()))
+            .unwrap_or(0);
+        let window: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AddressOutflowWindow(address.clone()))
+            .unwrap_or(0);
+        let window_start: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AddressOutflowWindowStart(address.clone()))
+            .unwrap_or(0);
+        let window_outflow: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AddressOutflowWindowOutflow(address.clone()))
+            .unwrap_or(0);
+        (limit, window, window_start, window_outflow)
+    }
+
+    // ============================================================
+    // #286 — DISPUTE EVIDENCE VERSIONING: public functions
+    // ============================================================
+
+    /// Submit versioned evidence for a disputed milestone.
+    /// Callable by supplier, logistics, or buyer while the milestone is Disputed.
+    /// Evidence entries are appended (never overwritten).
+    pub fn submit_dispute_evidence(
+        env: Env,
+        caller: Address,
+        shipment_id: String,
+        milestone_index: u32,
+        evidence_hash: String,
+        evidence_type: Symbol,
+    ) {
+        caller.require_auth();
+
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+
+        if milestone_index as usize >= shipment.milestones.len() as usize {
+            panic!("invalid milestone index");
+        }
+
+        let milestone = shipment.milestones.get(milestone_index).unwrap();
+        if milestone.status != MilestoneStatus::Disputed {
+            panic!("evidence can only be submitted while milestone is Disputed");
+        }
+
+        // Only supplier, logistics, or a buyer may submit evidence.
+        let is_buyer = Self::is_buyer(&shipment, &caller);
+        if !is_buyer && caller != shipment.supplier && caller != shipment.logistics {
+            panic!("unauthorized");
+        }
+
+        let evidence_key = DataKey::DisputeEvidence(shipment_id.clone(), milestone_index);
+        let mut entries: Vec<DisputeEvidence> = env
+            .storage()
+            .persistent()
+            .get(&evidence_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        entries.push_back(DisputeEvidence {
+            submitter: caller.clone(),
+            evidence_hash: evidence_hash.clone(),
+            evidence_type: evidence_type.clone(),
+            submitted_ledger: env.ledger().sequence(),
+        });
+
+        env.storage().persistent().set(&evidence_key, &entries);
+        env.storage()
+            .persistent()
+            .extend_ttl(&evidence_key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (Symbol::new(&env, "dispute_evidence_submitted"), shipment_id.clone()),
+            (milestone_index, caller, evidence_hash, evidence_type),
+        );
+    }
+
+    /// Read-only getter returning all evidence entries for a disputed milestone,
+    /// in the order they were submitted.
+    pub fn get_dispute_evidence(
+        env: Env,
+        shipment_id: String,
+        milestone_index: u32,
+    ) -> Vec<DisputeEvidence> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeEvidence(shipment_id, milestone_index))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    // ============================================================
+    // #287 — BUYER-INITIATED DISPUTE WITHDRAWAL: public function
+    // ============================================================
+
+    /// Buyer withdraws their own open dispute, reverting the milestone back to
+    /// ProofSubmitted. Only callable while the milestone is Disputed and the
+    /// caller is the shipment's registered buyer.
+    /// Emits `dispute_withdrawn` with (shipment_id, milestone_index).
+    pub fn withdraw_dispute(
+        env: Env,
+        buyer: Address,
+        shipment_id: String,
+        milestone_index: u32,
+    ) {
+        Self::assert_not_paused(&env);
+        buyer.require_auth();
+
+        let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
+
+        if shipment.status != ShipmentStatus::Active {
+            panic!("shipment is not active");
+        }
+
+        Self::assert_is_buyer(&shipment, &buyer);
+
+        if milestone_index as usize >= shipment.milestones.len() as usize {
+            panic!("invalid milestone index");
+        }
+
+        let mut milestone = shipment.milestones.get(milestone_index).unwrap();
+        if milestone.status != MilestoneStatus::Disputed {
+            panic!("milestone is not in disputed status");
+        }
+
+        // Revert to ProofSubmitted so the supplier's original proof stands.
+        milestone.status = MilestoneStatus::ProofSubmitted;
+        milestone.dispute_opened_ledger = None;
+        shipment.milestones.set(milestone_index, milestone);
+        shipment.open_dispute_count = shipment.open_dispute_count.saturating_sub(1);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
+
+        // Remove from active disputes list.
+        let disputes: Vec<DisputeEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ActiveDisputes)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut new_disputes: Vec<DisputeEntry> = Vec::new(&env);
+        for i in 0..disputes.len() {
+            let d = disputes.get(i).unwrap();
+            if !(d.shipment_id == shipment_id && d.milestone_index == milestone_index) {
+                new_disputes.push_back(d);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::ActiveDisputes, &new_disputes);
+
+        env.events().publish(
+            (Symbol::new(&env, "dispute_withdrawn"), shipment_id.clone()),
+            (milestone_index, buyer),
+        );
+    }
+
+    // ============================================================
+    // INTERNAL HELPERS
+    // ============================================================
+
     fn check_circuit_breaker(env: &Env, payment: i128) {
         let limit: i128 = env.storage().instance().get(&DataKey::CircuitBreakerLimit).unwrap_or(0);
         if limit == 0 {
@@ -2573,6 +2957,58 @@ impl ChainSettleContract {
         // Update window outflow
         window_outflow += payment;
         env.storage().instance().set(&DataKey::CircuitBreakerWindowOutflow, &window_outflow);
+    }
+
+    /// Check (and update) the per-address outflow sliding-window for `address`.
+    /// If the address has no configured limit (limit == 0), the check is skipped.
+    /// Panics with "address outflow limit exceeded" if the window cap is breached.
+    fn check_address_outflow(env: &Env, address: &Address, payment: i128) {
+        let limit: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AddressOutflowLimit(address.clone()))
+            .unwrap_or(0);
+
+        if limit == 0 {
+            return; // Per-address cap disabled; only global breaker applies.
+        }
+
+        let window: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AddressOutflowWindow(address.clone()))
+            .unwrap_or(0);
+        let window_start: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AddressOutflowWindowStart(address.clone()))
+            .unwrap_or(0);
+        let mut window_outflow: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AddressOutflowWindowOutflow(address.clone()))
+            .unwrap_or(0);
+
+        let current_ledger = env.ledger().sequence();
+
+        // Reset window if the window period has elapsed.
+        if window == 0 || current_ledger >= window_start + window {
+            window_outflow = 0;
+            env.storage().persistent().set(
+                &DataKey::AddressOutflowWindowStart(address.clone()),
+                &current_ledger,
+            );
+        }
+
+        if window_outflow + payment > limit {
+            panic!("address outflow limit exceeded");
+        }
+
+        window_outflow += payment;
+        env.storage().persistent().set(
+            &DataKey::AddressOutflowWindowOutflow(address.clone()),
+            &window_outflow,
+        );
     }
 
     fn get_shipment_internal(env: &Env, shipment_id: &String) -> Shipment {
