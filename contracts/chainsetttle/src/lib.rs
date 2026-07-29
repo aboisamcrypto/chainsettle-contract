@@ -727,7 +727,7 @@ pub enum ChainSettleError {
 #[cfg(test)]
 const RECOVERY_THRESHOLD_LEDGERS: u32 = 100;
 #[cfg(not(test))]
-const RECOVERY_THRESHOLD_LEDGERS: u32 = 12_614_400;
+const RECOVERY_THRESHOLD_LEDGERS: u32 = constants::RECOVERY_THRESHOLD_LEDGERS;
 
 /// Max notes retained per milestone (oldest dropped on overflow).
 const MAX_MILESTONE_NOTES: u32 = 10;
@@ -877,7 +877,7 @@ impl ChainSettleContract {
         env.storage().persistent().set(&key, &proposal);
         env.storage()
             .persistent()
-            .extend_ttl(&key, 100_000, 6_300_000);
+            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
 
         env.events().publish(
             (Symbol::new(&env, "upgrade_proposed"), proposal_id),
@@ -1208,7 +1208,7 @@ impl ChainSettleContract {
     pub fn set_fee_config(env: Env, admin: Address, fee_bps: u32, treasury: Address) {
         admin.require_auth();
         Self::assert_admin(&env, &admin);
-        if fee_bps > 1000 {
+        if fee_bps > constants::MAX_FEE_BPS {
             panic!("fee_bps exceeds maximum of 1000");
         }
         Self::append_admin_action(
@@ -1527,7 +1527,7 @@ impl ChainSettleContract {
         env.storage().persistent().set(&key, &invoice_hash);
         env.storage()
             .persistent()
-            .extend_ttl(&key, 100_000, 6_300_000);
+            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         env.events().publish(
             (Symbol::new(&env, "invoice_hash_attached"), shipment_id),
             (milestone_index, invoice_hash, caller),
@@ -1595,7 +1595,7 @@ impl ChainSettleContract {
             .set(&key, &ExtensionReq { extra_ledgers });
         env.storage()
             .persistent()
-            .extend_ttl(&key, 100_000, 6_300_000);
+            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         env.events().publish(
             (Symbol::new(&env, "extension_requested"), shipment_id),
             (milestone_index, extra_ledgers, caller),
@@ -1627,7 +1627,7 @@ impl ChainSettleContract {
         env.storage().persistent().set(&deadline_key, &new_deadline);
         env.storage()
             .persistent()
-            .extend_ttl(&deadline_key, 100_000, 6_300_000);
+            .extend_ttl(&deadline_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         env.events().publish(
             (Symbol::new(&env, "extension_approved"), shipment_id),
             (milestone_index, new_deadline, buyer),
@@ -1820,7 +1820,7 @@ impl ChainSettleContract {
         milestones: Vec<Milestone>,
         options: ShipmentOptions,
     ) -> String {
-        env.storage().instance().extend_ttl(100_000, 6_300_000);
+        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
         let response_deadline = options.response_deadline;
         let penalty_bps = options.penalty_bps;
@@ -1847,7 +1847,7 @@ impl ChainSettleContract {
         let confirmation_cooldown_ledgers = options.confirmation_cooldown_ledgers;
         let arbiter_panel = options.arbiter_panel.clone();
 
-        if buyer_cancel_fee_bps > 1000 {
+        if buyer_cancel_fee_bps > constants::MAX_FEE_BPS {
             panic!("buyer_cancel_fee_bps cannot exceed 1000 (10%)");
         }
 
@@ -1865,7 +1865,7 @@ impl ChainSettleContract {
             supplier.require_auth();
         }
 
-        if total_amount <= 0 {
+        if total_amount < constants::MIN_SHIPMENT_AMOUNT {
             panic!("amount must be greater than zero");
         }
 
@@ -2127,8 +2127,8 @@ impl ChainSettleContract {
         );
         env.storage().persistent().extend_ttl(
             &DataKey::Shipment(shipment_id.clone()),
-            100_000,
-            6_300_000,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
         );
 
         // #160: Store basis-point splits when provided.
@@ -2139,8 +2139,8 @@ impl ChainSettleContract {
             );
             env.storage().persistent().extend_ttl(
                 &DataKeyExt::MilestoneSplits(shipment_id.clone()),
-                100_000,
-                6_300_000,
+                constants::TTL_INITIAL_LEDGERS,
+                constants::TTL_MAX_LEDGERS,
             );
         }
 
@@ -2152,8 +2152,8 @@ impl ChainSettleContract {
             );
             env.storage().persistent().extend_ttl(
                 &DataKeyExt::MilestoneTimestampDeadlines(shipment_id.clone()),
-                100_000,
-                6_300_000,
+                constants::TTL_INITIAL_LEDGERS,
+                constants::TTL_MAX_LEDGERS,
             );
         }
 
@@ -2163,8 +2163,8 @@ impl ChainSettleContract {
                 .set(&DataKeyExt::BackupArbiter(shipment_id.clone()), &backup);
             env.storage().persistent().extend_ttl(
                 &DataKeyExt::BackupArbiter(shipment_id.clone()),
-                100_000,
-                6_300_000,
+                constants::TTL_INITIAL_LEDGERS,
+                constants::TTL_MAX_LEDGERS,
             );
         }
 
@@ -2174,8 +2174,8 @@ impl ChainSettleContract {
                 .set(&DataKeyExt::ShipmentConfirmationCooldown(shipment_id.clone()), &cooldown);
             env.storage().persistent().extend_ttl(
                 &DataKeyExt::ShipmentConfirmationCooldown(shipment_id.clone()),
-                100_000,
-                6_300_000,
+                constants::TTL_INITIAL_LEDGERS,
+                constants::TTL_MAX_LEDGERS,
             );
         }
 
@@ -2186,8 +2186,8 @@ impl ChainSettleContract {
                 .set(&DataKeyExt::ArbiterPanel(shipment_id.clone()), &arbiter_panel);
             env.storage().persistent().extend_ttl(
                 &DataKeyExt::ArbiterPanel(shipment_id.clone()),
-                100_000,
-                6_300_000,
+                constants::TTL_INITIAL_LEDGERS,
+                constants::TTL_MAX_LEDGERS,
             );
         }
 
@@ -2214,8 +2214,8 @@ impl ChainSettleContract {
         );
         env.storage().persistent().extend_ttl(
             &DataKey::SupplierShipments(supplier.clone()),
-            100_000,
-            6_300_000,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
         );
 
         // Index by each buyer for buyer-facing dashboards.
@@ -2232,8 +2232,8 @@ impl ChainSettleContract {
                 .set(&DataKey::BuyerShipments(buyer.clone()), &buyer_shipments);
             env.storage().persistent().extend_ttl(
                 &DataKey::BuyerShipments(buyer.clone()),
-                100_000,
-                6_300_000,
+                constants::TTL_INITIAL_LEDGERS,
+                constants::TTL_MAX_LEDGERS,
             );
         }
 
@@ -2365,7 +2365,7 @@ impl ChainSettleContract {
         shipment_id: String,
         new_percents: Vec<u32>,
     ) {
-        env.storage().instance().extend_ttl(100_000, 6_300_000);
+        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
 
         let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
@@ -2436,7 +2436,7 @@ impl ChainSettleContract {
         milestone_index: u32,
         advance_percent: u32,
     ) {
-        env.storage().instance().extend_ttl(100_000, 6_300_000);
+        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
 
         let shipment = Self::get_shipment_internal(&env, &shipment_id);
@@ -2583,7 +2583,7 @@ impl ChainSettleContract {
     /// the supplier immediately. The advance is deducted from the milestone payment
     /// when the milestone is later confirmed.
     pub fn approve_advance(env: Env, buyer: Address, shipment_id: String, milestone_index: u32) {
-        env.storage().instance().extend_ttl(100_000, 6_300_000);
+        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
 
         let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
@@ -2681,7 +2681,7 @@ impl ChainSettleContract {
         milestone_index: u32,
         allowed_types: Vec<Symbol>,
     ) {
-        env.storage().instance().extend_ttl(100_000, 6_300_000);
+        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
 
         let shipment = Self::get_shipment_internal(&env, &shipment_id);
@@ -2760,7 +2760,7 @@ impl ChainSettleContract {
         env.storage().persistent().set(&key, &allowed_types);
         env.storage()
             .persistent()
-            .extend_ttl(&key, 100_000, 6_300_000);
+            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
 
         env.events().publish(
             (
@@ -2806,7 +2806,7 @@ impl ChainSettleContract {
         proof_hash: String,
         proof_type: Symbol,
     ) {
-        env.storage().instance().extend_ttl(100_000, 6_300_000);
+        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
 
         let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
@@ -2889,14 +2889,14 @@ impl ChainSettleContract {
         env.storage().persistent().set(&type_key, &proof_type);
         env.storage()
             .persistent()
-            .extend_ttl(&type_key, 100_000, 6_300_000);
+            .extend_ttl(&type_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
 
         // Record original submitter so correct_proof can enforce same-role corrections.
         let submitter_key = DataKeyExt::ProofSubmitter(shipment_id.clone(), milestone_index);
         env.storage().persistent().set(&submitter_key, &caller);
         env.storage()
             .persistent()
-            .extend_ttl(&submitter_key, 100_000, 6_300_000);
+            .extend_ttl(&submitter_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
 
         let event_topic = if is_resubmission {
             Symbol::new(&env, "proof_resubmitted")
@@ -2938,7 +2938,7 @@ impl ChainSettleContract {
         new_proof_hash: String,
         new_proof_type: Symbol,
     ) {
-        env.storage().instance().extend_ttl(100_000, 6_300_000);
+        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
         caller.require_auth();
 
@@ -3009,7 +3009,7 @@ impl ChainSettleContract {
         env.storage().persistent().set(&type_key, &new_proof_type);
         env.storage()
             .persistent()
-            .extend_ttl(&type_key, 100_000, 6_300_000);
+            .extend_ttl(&type_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
 
         env.events().publish(
             (Symbol::new(&env, "proof_corrected"), shipment_id.clone()),
@@ -3022,7 +3022,7 @@ impl ChainSettleContract {
     // ----------------------------------------------------------
 
     pub fn confirm_milestone(env: Env, buyer: Address, shipment_id: String, milestone_index: u32) {
-        env.storage().instance().extend_ttl(100_000, 6_300_000);
+        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
 
         // Batch read shipment and contract stats in a single context fetch.
@@ -3848,7 +3848,7 @@ impl ChainSettleContract {
             .set(&dispute_opened_at_key, &env.ledger().timestamp());
         env.storage()
             .persistent()
-            .extend_ttl(&dispute_opened_at_key, 100_000, 6_300_000);
+            .extend_ttl(&dispute_opened_at_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         shipment.milestones.set(milestone_index, milestone);
 
         env.storage()
@@ -4028,8 +4028,8 @@ impl ChainSettleContract {
         );
         env.storage().persistent().extend_ttl(
             &DataKey::DisputeContestedPercent(shipment_id.clone(), milestone_index),
-            100_000,
-            6_300_000,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
         );
 
         shipment.open_dispute_count += 1;
@@ -4053,7 +4053,7 @@ impl ChainSettleContract {
             .set(&dispute_opened_at_key, &env.ledger().timestamp());
         env.storage()
             .persistent()
-            .extend_ttl(&dispute_opened_at_key, 100_000, 6_300_000);
+            .extend_ttl(&dispute_opened_at_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         shipment.milestones.set(milestone_index, milestone);
 
         env.storage()
@@ -4305,7 +4305,7 @@ impl ChainSettleContract {
         env.storage().persistent().set(&stats_key, &arbiter_stats);
         env.storage()
             .persistent()
-            .extend_ttl(&stats_key, 100_000, 6_300_000);
+            .extend_ttl(&stats_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
 
         shipment.milestones.set(milestone_index, milestone);
         shipment.open_dispute_count = shipment.open_dispute_count.saturating_sub(1);
@@ -4544,7 +4544,7 @@ impl ChainSettleContract {
     // ----------------------------------------------------------
 
     pub fn cancel_shipment(env: Env, buyer: Address, shipment_id: String) {
-        env.storage().instance().extend_ttl(100_000, 6_300_000);
+        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
         buyer.require_auth();
 
@@ -4930,7 +4930,7 @@ impl ChainSettleContract {
             env.storage().persistent().set(&log_key, &log);
             env.storage()
                 .persistent()
-                .extend_ttl(&log_key, 100_000, 6_300_000);
+                .extend_ttl(&log_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
 
             env.events().publish(
                 (
@@ -6309,7 +6309,7 @@ impl ChainSettleContract {
         env.storage().persistent().set(&votes_key, &votes);
         env.storage()
             .persistent()
-            .extend_ttl(&votes_key, 100_000, 6_300_000);
+            .extend_ttl(&votes_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
 
         env.events().publish(
             (
@@ -6676,7 +6676,7 @@ impl ChainSettleContract {
             env.storage().persistent().set(&key, &payees);
             env.storage()
                 .persistent()
-                .extend_ttl(&key, 100_000, 6_300_000);
+                .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         } else {
             env.storage().persistent().remove(&key);
         }
@@ -6740,7 +6740,7 @@ impl ChainSettleContract {
     // ----------------------------------------------------------
 
     pub fn get_shipment(env: Env, shipment_id: String) -> Shipment {
-        env.storage().instance().extend_ttl(100_000, 6_300_000);
+        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::get_shipment_internal(&env, &shipment_id)
     }
 
@@ -6749,7 +6749,7 @@ impl ChainSettleContract {
     }
 
     pub fn get_milestone(env: Env, shipment_id: String, milestone_index: u32) -> Milestone {
-        env.storage().instance().extend_ttl(100_000, 6_300_000);
+        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         let shipment = Self::get_shipment_internal(&env, &shipment_id);
         shipment
             .milestones
@@ -6781,7 +6781,7 @@ impl ChainSettleContract {
     }
 
     pub fn get_escrow_balance(env: Env, shipment_id: String) -> i128 {
-        env.storage().instance().extend_ttl(100_000, 6_300_000);
+        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         let shipment = Self::get_shipment_internal(&env, &shipment_id);
         shipment.total_amount - shipment.released_amount - shipment.total_advanced_amount
     }
@@ -6888,7 +6888,7 @@ impl ChainSettleContract {
                 .unwrap_or_else(|| Vec::new(&env)),
         };
 
-        let clamped_limit = if limit > 50 { 50 } else { limit };
+        let clamped_limit = if limit > constants::LIST_SHIPMENTS_MAX_PAGE { constants::LIST_SHIPMENTS_MAX_PAGE } else { limit };
         let start_idx = cursor.unwrap_or(0);
         let total_len = source_list.len() as u32;
 
@@ -7268,7 +7268,7 @@ impl ChainSettleContract {
         env.storage().persistent().set(&key, score);
         env.storage()
             .persistent()
-            .extend_ttl(&key, 100_000, 6_300_000);
+            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
     }
 
     fn increment_reputation_internal(
@@ -7409,7 +7409,7 @@ impl ChainSettleContract {
             ledger: env.ledger().sequence(),
             detail: Symbol::new(env, "auto_blacklist_triggered"),
         };
-        if log.len() as usize >= 50 {
+        if log.len() as usize >= constants::AUDIT_LOG_MAX_ENTRIES {
             let mut next: Vec<AuditEntry> = Vec::new(env);
             for i in 1..log.len() {
                 next.push_back(log.get(i).unwrap());
@@ -7593,7 +7593,7 @@ impl ChainSettleContract {
         env.storage().persistent().set(&evidence_key, &entries);
         env.storage()
             .persistent()
-            .extend_ttl(&evidence_key, 100_000, 6_300_000);
+            .extend_ttl(&evidence_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
 
         env.events().publish(
             (Symbol::new(&env, "dispute_evidence_submitted"), shipment_id.clone()),
@@ -7867,7 +7867,7 @@ impl ChainSettleContract {
             detail,
         };
 
-        let max: usize = 20;
+        let max: usize = constants::SHIPMENT_AUDIT_LOG_MAX_ENTRIES;
         if shipment.audit_log.len() as usize >= max {
             // Evict the oldest (index 0) by shifting left.
             let mut new_log: Vec<AuditEntry> = Vec::new(env);
@@ -7897,7 +7897,7 @@ impl ChainSettleContract {
             ledger: env.ledger().sequence(),
             detail,
         };
-        if log.len() as usize >= 50 {
+        if log.len() as usize >= constants::AUDIT_LOG_MAX_ENTRIES {
             let mut next: Vec<AuditEntry> = Vec::new(env);
             for i in 1..log.len() {
                 next.push_back(log.get(i).unwrap());
@@ -8262,9 +8262,9 @@ mod test_cancellation_reason;
 
 // Legacy test modules — some have pre-existing compilation issues.
 // They are kept as source but only enabled when their API drift is resolved.
-// mod benchmarks;
-// mod property_tests;
-// mod test;
+mod benchmarks;
+mod property_tests;
+mod test;
 // mod test_admin;
 // mod test_dispute;
 // mod test_errors;
@@ -8279,23 +8279,6 @@ mod test_new_issues;
 mod test_rebalance_milestones;
 mod test_top_up_escrow;
 mod test_panel_features;
-// mod test_oracle;
-// mod test_upgrade;
-// mod test_concurrent_disputes;
-// mod test_boundaries;
-// mod test_chaos;
-// mod property_tests;
-// mod test;
-// mod test_issues;
-// mod test_arbiter_security;
-// mod test_boundary_validation;
-// mod test_oracle;
-// mod test_upgrade;
-// mod test_concurrent_disputes;
-// mod test_boundaries;
-// mod test_chaos;
-mod property_tests;
-mod test;
 mod test_oracle;
 mod test_upgrade;
 mod test_concurrent_disputes;

@@ -232,7 +232,7 @@ mod contract_prop_tests {
     use super::*;
     use crate::{
         ChainSettleContract, ChainSettleContractClient, Milestone, MilestoneMode, MilestoneStatus,
-        ShipmentOptions,
+        Resolution, ShipmentOptions,
     };
     use soroban_sdk::{testutils::Address as _, token, vec, Address, BytesN, Env, String, Symbol};
 
@@ -321,14 +321,18 @@ mod contract_prop_tests {
                 logistics_fee_bps: 0,
                 supplier_collateral: 0,
                 expires_at_ledger: None,
-
-
                 metadata_hash: None,
                 referrer: None,
                 buyer_cancel_fee_bps: 0,
-        early_bonus_pool: 0,
-        review_window_ledgers: None,
-
+                early_bonus_pool: 0,
+                review_window_ledgers: None,
+                milestone_splits: vec![env],
+                deadlines: vec![env],
+                dispute_timeout_seconds: 0,
+                default_resolution: Resolution::Buyer,
+                backup_arbiter: None,
+                confirmation_cooldown_ledgers: None,
+                arbiter_panel: vec![env],
             },
         );
     }
@@ -576,7 +580,7 @@ mod milestone_percent_fuzz {
     mod contract_percent_tests {
         use crate::{
             ChainSettleContract, ChainSettleContractClient, Milestone, MilestoneMode,
-            MilestoneStatus, ShipmentOptions,
+            MilestoneStatus, Resolution, ShipmentOptions,
         };
         use proptest::prelude::*;
         use soroban_sdk::{testutils::Address as _, token, vec, Address, BytesN, Env, String};
@@ -613,14 +617,18 @@ mod milestone_percent_fuzz {
                 logistics_fee_bps: 0,
                 supplier_collateral: 0,
                 expires_at_ledger: None,
-
-
                 metadata_hash: None,
                 referrer: None,
                 buyer_cancel_fee_bps: 0,
-        early_bonus_pool: 0,
-        review_window_ledgers: None,
-
+                early_bonus_pool: 0,
+                review_window_ledgers: None,
+                milestone_splits: vec![env],
+                deadlines: vec![env],
+                dispute_timeout_seconds: 0,
+                default_resolution: Resolution::Buyer,
+                backup_arbiter: None,
+                confirmation_cooldown_ledgers: None,
+                arbiter_panel: vec![env],
             }
         }
 
