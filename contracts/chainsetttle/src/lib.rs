@@ -8285,4 +8285,4 @@ mod test_concurrent_disputes;
 mod test_boundaries;
 mod test_chaos;
 mod test_302_303_304_306;
-// mod test_features;
+mod test_features;

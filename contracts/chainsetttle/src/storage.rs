@@ -1,3 +1,23 @@
+//! Storage abstraction layer for the ChainSettle contract.
+//!
+//! This module is the **single source of truth** for all persistent, instance,
+//! and temporary storage access. Every read and write to contract state MUST go
+//! through the typed accessor functions defined here.
+//!
+//! Design notes:
+//! - All [`DataKey`] variants are versioned with a `V1` prefix so that a future
+//!   upgrade can introduce `V2_*` keys and run [`migrate_v1_to_v2`] without
+//!   clobbering live state.
+//! - TTL extension is centralised inside each `set_*` helper so callers never
+//!   need to remember to extend manually.
+//! - Extended/feature keys that are not yet covered by `V1DataKey` live in
+//!   [`crate::DataKeyExt`] (defined in `lib.rs`) and are accessed inline; they
+//!   will be migrated to this module incrementally.
+//!
+//! Resolves issue #220 — this file was previously unreachable because `mod storage;`
+//! was absent from `lib.rs`. The declaration has been restored and this module is
+//! now the canonical storage layer for all production code.
+
 use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 use crate::{

@@ -91,6 +91,13 @@ fn default_opts(env: &Env) -> ShipmentOptions {
         buyer_cancel_fee_bps: 0,
         early_bonus_pool: 0,
         review_window_ledgers: None,
+        milestone_splits: Vec::new(env),
+        deadlines: Vec::new(env),
+        dispute_timeout_seconds: 0,
+        default_resolution: Resolution::Buyer,
+        backup_arbiter: None,
+        confirmation_cooldown_ledgers: None,
+        arbiter_panel: Vec::new(env),
     }
 }
 

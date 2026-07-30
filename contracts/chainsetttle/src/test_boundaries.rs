@@ -22,7 +22,7 @@
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
-    token, vec, Address, Env, String,
+    token, vec, Address, Env, String, Symbol,
 };
 
 // ---- shared env setup -------------------------------------------------------
@@ -58,6 +58,40 @@ fn setup_ctx() -> Ctx {
     client.init(&buyer);
 
     Ctx { env, contract_id, token_id, buyer, supplier, logistics, arbiter }
+}
+
+/// Default zero-value ShipmentOptions — all features disabled.
+fn default_opts(env: &Env) -> ShipmentOptions {
+    ShipmentOptions {
+        response_deadline: 0,
+        penalty_bps: 0,
+        milestone_mode: MilestoneMode::Parallel,
+        holdback_ledgers: 0,
+        dispute_cooldown_ledgers: 0,
+        late_penalty_bps_per_ledger: 0,
+        auto_confirm_ledgers: 0,
+        dispute_bond_amount: 0,
+        arbiter_fee_bps: 0,
+        logistics_fee_bps: 0,
+        supplier_collateral: 0,
+        expires_at_ledger: None,
+        metadata_hash: None,
+        referrer: None,
+        buyer_cancel_fee_bps: 0,
+        early_bonus_pool: 0,
+        review_window_ledgers: None,
+        milestone_splits: Vec::new(env),
+        deadlines: Vec::new(env),
+        dispute_timeout_seconds: 0,
+        default_resolution: Resolution::Buyer,
+        backup_arbiter: None,
+        confirmation_cooldown_ledgers: None,
+        arbiter_panel: Vec::new(env),
+    }
+}
+
+fn buyers(env: &Env, buyer: &Address) -> soroban_sdk::Vec<Address> {
+    vec![env, buyer.clone()]
 }
 
 fn milestones_summing_to(env: &Env, pct: u32) -> soroban_sdk::Vec<Milestone> {
@@ -109,8 +143,11 @@ fn create_std(ctx: &Ctx, id: &str, amount: i128) {
     let client = ChainSettleContractClient::new(&ctx.env, &ctx.contract_id);
     client.create_shipment(
         &String::from_str(&ctx.env, id),
-        &ctx.buyer, &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
-        &amount, &standard_milestones(&ctx.env), &false, &0,
+        &buyers(&ctx.env, &ctx.buyer),
+        &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
+        &amount,
+        &standard_milestones(&ctx.env),
+        &default_opts(&ctx.env),
     );
 }
 
@@ -118,8 +155,11 @@ fn create_holdback(ctx: &Ctx, id: &str, amount: i128, holdback: u32) {
     let client = ChainSettleContractClient::new(&ctx.env, &ctx.contract_id);
     client.create_shipment(
         &String::from_str(&ctx.env, id),
-        &ctx.buyer, &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
-        &amount, &standard_milestones(&ctx.env), &false, &holdback,
+        &buyers(&ctx.env, &ctx.buyer),
+        &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
+        &amount,
+        &standard_milestones(&ctx.env),
+        &ShipmentOptions { holdback_ledgers: holdback, ..default_opts(&ctx.env) },
     );
 }
 
@@ -134,10 +174,11 @@ fn accept_create_shipment_amount_one() {
     // Minimum valid positive amount
     client.create_shipment(
         &String::from_str(&ctx.env, "BNDRY-AMT-1"),
-        &ctx.buyer, &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
+        &buyers(&ctx.env, &ctx.buyer),
+        &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
         &1_i128,
         &milestones_summing_to(&ctx.env, 100),
-        &false, &0,
+        &default_opts(&ctx.env),
     );
     let s = client.get_shipment(&String::from_str(&ctx.env, "BNDRY-AMT-1"));
     assert_eq!(s.total_amount, 1);
@@ -151,10 +192,11 @@ fn reject_create_shipment_amount_zero() {
     let client = ChainSettleContractClient::new(&ctx.env, &ctx.contract_id);
     client.create_shipment(
         &String::from_str(&ctx.env, "BNDRY-AMT-0"),
-        &ctx.buyer, &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
+        &buyers(&ctx.env, &ctx.buyer),
+        &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
         &0_i128,
         &milestones_summing_to(&ctx.env, 100),
-        &false, &0,
+        &default_opts(&ctx.env),
     );
 }
 
@@ -165,10 +207,11 @@ fn reject_create_shipment_amount_i128_min() {
     let client = ChainSettleContractClient::new(&ctx.env, &ctx.contract_id);
     client.create_shipment(
         &String::from_str(&ctx.env, "BNDRY-AMT-MIN"),
-        &ctx.buyer, &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
+        &buyers(&ctx.env, &ctx.buyer),
+        &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
         &i128::MIN,
         &milestones_summing_to(&ctx.env, 100),
-        &false, &0,
+        &default_opts(&ctx.env),
     );
 }
 
@@ -180,10 +223,11 @@ fn reject_create_shipment_amount_i128_max_insufficient_balance() {
     let client = ChainSettleContractClient::new(&ctx.env, &ctx.contract_id);
     client.create_shipment(
         &String::from_str(&ctx.env, "BNDRY-AMT-IMAX"),
-        &ctx.buyer, &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
+        &buyers(&ctx.env, &ctx.buyer),
+        &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
         &i128::MAX,
         &milestones_summing_to(&ctx.env, 100),
-        &false, &0,
+        &default_opts(&ctx.env),
     );
 }
 
@@ -199,10 +243,11 @@ fn reject_create_shipment_payment_percent_zero_sum() {
     // All milestones at 0% → sum = 0, not 100
     client.create_shipment(
         &String::from_str(&ctx.env, "BNDRY-PCT-0"),
-        &ctx.buyer, &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
+        &buyers(&ctx.env, &ctx.buyer),
+        &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
         &1_000_000_i128,
         &milestones_summing_to(&ctx.env, 0),
-        &false, &0,
+        &default_opts(&ctx.env),
     );
 }
 
@@ -214,10 +259,11 @@ fn reject_create_shipment_payment_percent_u32_max_overflows_sum() {
     let client = ChainSettleContractClient::new(&ctx.env, &ctx.contract_id);
     client.create_shipment(
         &String::from_str(&ctx.env, "BNDRY-PCT-MAX"),
-        &ctx.buyer, &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
+        &buyers(&ctx.env, &ctx.buyer),
+        &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
         &1_000_000_i128,
         &milestones_summing_to(&ctx.env, u32::MAX),
-        &false, &0,
+        &default_opts(&ctx.env),
     );
 }
 
@@ -227,10 +273,11 @@ fn accept_create_shipment_payment_percent_100_single_milestone() {
     let client = ChainSettleContractClient::new(&ctx.env, &ctx.contract_id);
     client.create_shipment(
         &String::from_str(&ctx.env, "BNDRY-PCT-100"),
-        &ctx.buyer, &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
+        &buyers(&ctx.env, &ctx.buyer),
+        &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
         &1_000_000_i128,
         &milestones_summing_to(&ctx.env, 100),
-        &false, &0,
+        &default_opts(&ctx.env),
     );
     let s = client.get_shipment(&String::from_str(&ctx.env, "BNDRY-PCT-100"));
     assert_eq!(s.milestones.get(0).unwrap().payment_percent, 100);
@@ -247,11 +294,11 @@ fn accept_create_shipment_holdback_u32_max() {
     let client = ChainSettleContractClient::new(&ctx.env, &ctx.contract_id);
     client.create_shipment(
         &String::from_str(&ctx.env, "BNDRY-HOLD-MAX"),
-        &ctx.buyer, &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
+        &buyers(&ctx.env, &ctx.buyer),
+        &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
         &1_000_000_i128,
         &standard_milestones(&ctx.env),
-        &false,
-        &u32::MAX,
+        &ShipmentOptions { holdback_ledgers: u32::MAX, ..default_opts(&ctx.env) },
     );
     let s = client.get_shipment(&String::from_str(&ctx.env, "BNDRY-HOLD-MAX"));
     assert_eq!(s.holdback_ledgers, u32::MAX);
@@ -538,10 +585,11 @@ fn accept_escrow_balance_never_negative_after_full_release() {
     let amount: i128 = 1;
     client.create_shipment(
         &String::from_str(&ctx.env, "BNDRY-ESCROW-MIN"),
-        &ctx.buyer, &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
+        &buyers(&ctx.env, &ctx.buyer),
+        &ctx.supplier, &ctx.logistics, &ctx.arbiter, &ctx.token_id,
         &amount,
         &milestones_summing_to(&ctx.env, 100),
-        &false, &0,
+        &default_opts(&ctx.env),
     );
     let id = String::from_str(&ctx.env, "BNDRY-ESCROW-MIN");
     client.submit_proof(&ctx.supplier, &id, &0, &String::from_str(&ctx.env, "h"), &Symbol::new(&ctx.env, "ipfs"));
