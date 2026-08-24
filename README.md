@@ -1,15 +1,16 @@
-
 ChainSettle — Contract Repo
 ![CI](https://github.com/shakurJJ/chainsettle-contract/actions/workflows/ci.yml/badge.svg)
 ![codecov](https://codecov.io/gh/shakurJJ/chainsettle-contract/branch/main/graph/badge.svg)
+
 > **Milestone-based supply chain escrow on Stellar Soroban**
-ChainSettle is a Soroban smart contract that locks buyer payment in escrow and automatically releases funds to the supplier as each delivery milestone is confirmed on-chain. No middlemen, no delayed wire transfers, no trust required.
-This is Repo 1 of 3 in the ChainSettle project:
-Repo	Description
-`chainsetttle-contract` ← you are here	Soroban smart contract (Rust)
-`chainsetttle-frontend`	React + Freighter wallet UI
-`chainsetttle-backend`	Node.js API, notifications, off-chain metadata
----
+> ChainSettle is a Soroban smart contract that locks buyer payment in escrow and automatically releases funds to the supplier as each delivery milestone is confirmed on-chain. No middlemen, no delayed wire transfers, no trust required.
+> This is Repo 1 of 3 in the ChainSettle project:
+> Repo Description
+> `chainsetttle-contract` ← you are here Soroban smart contract (Rust)
+> `chainsetttle-frontend` React + Freighter wallet UI
+
+## `chainsetttle-backend` Node.js API, notifications, off-chain metadata
+
 Table of Contents
 How It Works
 Architecture
@@ -36,8 +37,11 @@ Deploying to Mainnet
 Security Considerations
 See detailed security model: docs/SECURITY.md
 Roadmap
+
 ---
+
 How It Works
+
 ```
 Buyer creates shipment → USDC locked in contract escrow
          ↓
@@ -55,10 +59,14 @@ Buyer confirms → final 25% released → Shipment Completed ✓
 
 If buyer disputes any proof → milestone frozen → Arbiter resolves
 ```
+
 The contract is deployed once. Multiple independent shipments can be
 created by different buyers using the same contract.
+
 ---
+
 Architecture
+
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                  ChainSettle Contract (Soroban)               │
@@ -74,16 +82,20 @@ Architecture
     Buyer / Supplier     Buyer confirms      Token SAC contract
     call contract fns    or disputes         (USDC on Stellar)
 ```
+
 Roles
-Role	Address	Permissions
-Buyer	Locks USDC, confirms milestones, raises disputes, cancels shipment	Most actions
-Supplier	Submits proof for dispatch and delivery milestones	`submit_proof` only
-Logistics	Submits proof for in-transit milestones	`submit_proof` only
-Arbiter	Resolves disputes — approves or rejects supplier proof	`resolve_dispute` only
-Admin	Contract deployer, set at `init`	Future: upgrade, pause
+Role Address Permissions
+Buyer Locks USDC, confirms milestones, raises disputes, cancels shipment Most actions
+Supplier Submits proof for dispatch and delivery milestones `submit_proof` only
+Logistics Submits proof for in-transit milestones `submit_proof` only
+Arbiter Resolves disputes — approves or rejects supplier proof `resolve_dispute` only
+Admin Contract deployer, set at `init` Future: upgrade, pause
+
 ---
+
 Data Structures
 `Milestone`
+
 ```rust
 pub struct Milestone {
     pub name: String,            // e.g. "Goods Dispatched"
@@ -92,7 +104,9 @@ pub struct Milestone {
     pub status: MilestoneStatus, // Pending | ProofSubmitted | Confirmed | Disputed | Resolved
 }
 ```
+
 `Shipment`
+
 ```rust
 pub struct Shipment {
     pub id: String,              // unique buyer-defined ID e.g. "SHIP-2026-001"
@@ -108,10 +122,12 @@ pub struct Shipment {
     pub created_at: u32,         // ledger sequence number
 }
 ```
+
 `ReputationScore`
 `get_reputation(supplier)` returns cumulative supplier outcome counters. It is
 not a single weighted score; applications can use these counters to calculate
 their own supplier rating:
+
 ```rust
 pub struct ReputationScore {
     pub completed: u32,  // shipments completed successfully
@@ -119,6 +135,7 @@ pub struct ReputationScore {
     pub cancelled: u32,  // shipments cancelled or expired
 }
 ```
+
 The counters are updated automatically:
 `completed` increases once when all milestones in a shipment reach a
 completed state, including successful dispute resolution.
@@ -151,10 +168,12 @@ size, dispute outcome, or the identity of the party that raised the dispute.
 Fetch shipment records separately when those dimensions are required.
 For example, an application may calculate a simple historical completion rate
 from the returned counters:
+
 ```
 outcomes = completed + disputed + cancelled
 completion_rate = completed / outcomes       // when outcomes > 0
 ```
+
 This is only an application-level metric, not a value returned or enforced by
 the contract. Because `disputed` counts milestone dispute events while the
 other fields count shipment outcomes, the ratio should be labelled clearly
@@ -162,6 +181,7 @@ and should not be presented as an official ChainSettle score. A safer UI can
 show the three counters separately and display `Not enough history` until a
 minimum number of completed shipments has been reached.
 Example read-only response:
+
 ```json
 {
   "completed": 18,
@@ -169,6 +189,7 @@ Example read-only response:
   "cancelled": 1
 }
 ```
+
 The example represents 18 completed shipments, two disputed milestones, and
 one cancelled or expired shipment. It does not mean that 18 of 21 shipments
 were completed, because the disputed value is not a shipment-level count.
@@ -179,6 +200,7 @@ renewable Soroban TTL, so indexers should periodically refresh their cached
 value and should not assume that an absent record proves the supplier has
 never used the contract.
 `MilestoneStatus` state machine
+
 ```
 Pending
   └─ submit_proof()  ──→ ProofSubmitted
@@ -190,7 +212,9 @@ Pending
                ├─ resolve_dispute(approve=true)  ──→ Resolved (contested paid to supplier)
                └─ resolve_dispute(approve=false) ──→ Resolved (contested refunded to buyer)
 ```
+
 ---
+
 Contract Functions
 All functions require the relevant party to sign the transaction (Soroban auth).
 `init(admin: Address)`
@@ -198,6 +222,7 @@ Initialises the contract. Called once by the deployer right after deployment.
 `create_shipment(...) → String`
 Creates a new shipment, validates milestone percentages sum to 100,
 and transfers `total_amount` USDC from the buyer into escrow.
+
 ```
 Parameters:
   shipment_id   String    — unique ID for this shipment
@@ -211,21 +236,22 @@ Parameters:
 
 Returns: shipment_id (same as input, for confirmation)
 ```
+
 Allowed token list
 The `token` parameter on `create_shipment` is checked against an admin-managed allowlist (`DataKey::AllowedTokens`). By default the list is empty, which means **open mode**: any Stellar Asset Contract (SAC) address is accepted. Once the admin adds at least one token, `create_shipment` only accepts tokens on that list — a non-listed token panics with `"token is not in the approved whitelist"`.
-Function	Who	Effect
-`add_allowed_token(token)`	Admin only	Approves a SAC address for use as `create_shipment`'s `token` parameter
-`remove_allowed_token(token)`	Admin only	Revokes approval; existing shipments that already use the token are unaffected
-`get_allowed_tokens() → Vec<Address>`	Anyone (read-only)	Returns the current allowlist (empty = open mode)
+Function Who Effect
+`add_allowed_token(token)` Admin only Approves a SAC address for use as `create_shipment`'s `token` parameter
+`remove_allowed_token(token)` Admin only Revokes approval; existing shipments that already use the token are unaffected
+`get_allowed_tokens() → Vec<Address>` Anyone (read-only) Returns the current allowlist (empty = open mode)
 The allowlist gates shipment creation only. After a shipment is created, all payouts (`confirm_milestone`, dispute resolution, cancellation refunds, etc.) always use the token address stored on that shipment — they never re-check the allowlist.
 `submit_proof(caller, shipment_id, milestone_index, proof_hash, proof_type)`
 Supplier or logistics submits proof for a milestone (`proof_hash` is the payload reference, e.g. an IPFS CID; `proof_type` is a short symbol naming the content scheme, e.g. `ipfs`, `sha256`, or `url`).
 Milestone must be in `Pending` status. Moves status to `ProofSubmitted`.
 Invoice hash
 An invoice hash is an optional, immutable `BytesN<32>` commitment (e.g. a SHA-256 digest of an off-chain invoice PDF) that the supplier can attach to a milestone for audit and reconciliation. It does not move funds; it only records a cryptographic reference next to the milestone after proof is on-chain.
-Function	Who	When
-`attach_invoice_hash(caller, shipment_id, milestone_index, invoice_hash)`	Supplier only	Shipment `Active`, milestone past `Pending` (proof already submitted), and no hash set yet
-`get_invoice_hash(shipment_id, milestone_index) → Option<BytesN<32>>`	Anyone (read-only)	Returns the stored hash, or `None` if none was attached
+Function Who When
+`attach_invoice_hash(caller, shipment_id, milestone_index, invoice_hash)` Supplier only Shipment `Active`, milestone past `Pending` (proof already submitted), and no hash set yet
+`get_invoice_hash(shipment_id, milestone_index) → Option<BytesN<32>>` Anyone (read-only) Returns the stored hash, or `None` if none was attached
 Rules:
 Only the shipment's supplier may call `attach_invoice_hash` (buyer, logistics, arbiter, and strangers are rejected).
 Proof must already be submitted for that milestone — attaching while still `Pending` panics with `"proof must be submitted before attaching invoice hash"`.
@@ -233,16 +259,18 @@ The hash is immutable: a second attach for the same milestone panics with `"invo
 Emits `invoice_hash_attached` with `(milestone_index, invoice_hash, caller)`.
 Proof content-type whitelist
 The buyer can constrain which `proof_type` values are valid for each milestone before anyone submits proof. This is enforced inside `submit_proof`: if a non-empty whitelist is stored for that milestone, the supplied `proof_type` must appear in the list or the call panics (`proof type not in whitelist`). If no whitelist was configured, or the buyer cleared it with an empty list, any `proof_type` is accepted.
-Function	Who	When
-`set_proof_whitelist(buyer, shipment_id, milestone_index, allowed_types)`	Buyer	Shipment `Active`, milestone still `Pending` (before first submission)
-`get_proof_whitelist(shipment_id, milestone_index) → Vec<Symbol>`	Anyone (read-only)	Returns allowed types; empty vector means “any type”
-`get_milestone_proof_type(shipment_id, milestone_index) → Option<Symbol>`	Anyone (read-only)	Type recorded at submission, or `None` if not submitted yet
+Function Who When
+`set_proof_whitelist(buyer, shipment_id, milestone_index, allowed_types)` Buyer Shipment `Active`, milestone still `Pending` (before first submission)
+`get_proof_whitelist(shipment_id, milestone_index) → Vec<Symbol>` Anyone (read-only) Returns allowed types; empty vector means “any type”
+`get_milestone_proof_type(shipment_id, milestone_index) → Option<Symbol>` Anyone (read-only) Type recorded at submission, or `None` if not submitted yet
 Example: the buyer allows only IPFS proofs on milestone 0:
+
 ```
 set_proof_whitelist(buyer, "SHIP-001", 0, [ipfs])
 submit_proof(supplier, "SHIP-001", 0, "<cid>", ipfs)   // ok
 submit_proof(supplier, "SHIP-001", 0, "<hash>", sha256) // fails — not whitelisted
 ```
+
 Pass an empty `allowed_types` vector to `set_proof_whitelist` to remove the restriction for that milestone.
 `confirm_milestone(buyer, shipment_id, milestone_index)`
 Buyer confirms a `ProofSubmitted` milestone. Automatically calculates
@@ -253,12 +281,14 @@ Confirms multiple milestones in a single transaction. Functionally equivalent
 to calling `confirm_milestone` once per index, but saves transaction fees and
 reduces the number of on-chain round-trips when several milestones are ready
 to approve at once.
+
 ```
 Parameters:
   buyer              Address   — must be the shipment's registered buyer
   shipment_id        String    — shipment to operate on
   milestone_indices  Vec<u32>  — ordered list of milestone indices to confirm
 ```
+
 Behavior:
 The call is atomic — if any index is invalid or any milestone is not in
 `ProofSubmitted` status, the entire transaction is reverted and no payments
@@ -273,12 +303,13 @@ without error or side-effects.
 If all milestones end up confirmed after the batch, shipment status
 automatically transitions to `Completed` (same as `confirm_milestone`).
 vs. `confirm_milestone`:
-	`confirm_milestone`	`batch_confirm_milestones`
-Milestones per call	1	Many
-Atomicity	Single milestone	All-or-nothing across the batch
-Partial failure	N/A	Reverts entire batch
-Gas / fee cost	Per milestone	One transaction for all
+`confirm_milestone` `batch_confirm_milestones`
+Milestones per call 1 Many
+Atomicity Single milestone All-or-nothing across the batch
+Partial failure N/A Reverts entire batch
+Gas / fee cost Per milestone One transaction for all
 Example — confirm all three milestones at once after all proofs are in:
+
 ```bash
 stellar contract invoke \
   --id <CONTRACT_ID> \
@@ -289,8 +320,39 @@ stellar contract invoke \
   --shipment_id "SHIP-001" \
   --milestone_indices '[0, 1, 2]'
 ```
+
 `raise_dispute(buyer, shipment_id, milestone_index)`
 Buyer disputes 100% of a `ProofSubmitted` or `ConfirmedHeld` milestone's payment. Freezes the milestone in `Disputed` state — no payment can be released until arbiter resolves.
+`withdraw_dispute(buyer, shipment_id, milestone_index)`
+Buyer-initiated withdrawal of an already-raised dispute. This is a buyer-side rollback for a milestone that was moved into `MilestoneStatus::Disputed` but should not remain disputed. It is intended for the case where the buyer reconsiders the dispute, wants to preserve the supplier's original proof, and wants to continue through the normal proof/confirmation workflow instead of waiting for arbiter resolution.
+
+Who may call it:
+
+- Only the shipment's registered buyer may invoke it.
+- Any other caller, including the supplier, logistics provider, or an unrelated address, is rejected with `unauthorized`.
+- The shipment must still be `Active`; a shipment that has already moved beyond active handling cannot be used to withdraw a dispute.
+
+What the function changes on success:
+
+- It validates the milestone index and confirms the milestone is still in `Disputed` state.
+- It reverts the milestone back to `ProofSubmitted`.
+- It clears `dispute_opened_ledger` to remove the dispute start timestamp.
+- It decreases the shipment's `open_dispute_count`.
+- It removes the dispute from the active-disputes list.
+- It does not delete the supplier's proof or change the milestone's underlying evidence; the original submitted proof remains available for ordinary buyer confirmation or for a later re-dispute.
+
+Why this matters:
+
+- The buyer is effectively abandoning the dispute without forcing a resolution outcome.
+- The milestone returns to the same state it was in before the dispute was raised, so the normal approval path can resume.
+- No funds are released by this function itself; the dispute is simply canceled and the payment remains in escrow until the buyer confirms the milestone or raises a new dispute.
+
+Important restriction:
+
+- `withdraw_dispute()` is only valid while the milestone is still `Disputed`.
+- Once the case leaves that state because an arbiter has begun or completed resolution, the function panics with `milestone is not in disputed status`.
+- In other words, it is a narrow rollback for an open dispute only; it cannot reverse a dispute that has moved into review or been resolved.
+
 `raise_partial_dispute(buyer, shipment_id, milestone_index, contested_percent: u32)`
 Buyer contests only a specified percentage (`contested_percent` from `1` to `99`) of a milestone's value. The uncontested portion `(100 - contested_percent)%` is immediately calculated and released to the supplier, while the contested portion is held in escrow in `Disputed` state pending arbiter resolution. Panics if an approved advance exists for the milestone.
 `resolve_dispute(arbiter, shipment_id, milestone_index, approve: bool)`
@@ -320,7 +382,9 @@ It transfers the additional USDC into the contract, increases the
 shipment's `total_amount`, and leaves the milestone percentages unchanged.
 That means every milestone keeps the same percentage split, but each
 milestone's absolute payout becomes larger because the escrow base grew.
+
 ---
+
 Partial Disputes & Escalation Checks
 Partial Disputes Mechanics
 In real-world supply chain transactions, delivered goods may be partially damaged, incomplete, or slightly off-specification without justifying a total transaction freeze. ChainSettle supports partial disputes via `raise_partial_dispute()`:
@@ -404,9 +468,9 @@ without halting the entire contract.
 `set_circuit_breaker(admin, limit: i128, window_ledgers: u32)`
 Admin-only. Configures the circuit breaker parameters and immediately
 resets the current window counter to zero.
-Parameter	Description
-`limit`	Maximum cumulative outflow (in token smallest units) allowed within one window. Pass `0` to disable the circuit breaker entirely.
-`window_ledgers`	Duration of the tracking window in ledger sequences. After this many ledgers have elapsed since the window start, the counter resets automatically.
+Parameter Description
+`limit` Maximum cumulative outflow (in token smallest units) allowed within one window. Pass `0` to disable the circuit breaker entirely.
+`window_ledgers` Duration of the tracking window in ledger sequences. After this many ledgers have elapsed since the window start, the counter resets automatically.
 When the breaker is active, every payment that moves tokens out of escrow
 (`confirm_milestone`, `resolve_dispute`, partial dispute uncontested
 release, advance payouts, claim payouts, and amendments that release
@@ -427,6 +491,7 @@ Returns the current circuit breaker configuration and window state:
 is `0`, the circuit breaker is disabled and the other fields are
 irrelevant.
 Example — set a 100,000 USDC per 1,000-ledger cap:
+
 ```bash
 stellar contract invoke \
   --id <CONTRACT_ID> \
@@ -445,10 +510,10 @@ fee rate and treasury address.
 `get_fee_config() → Option<FeeConfig>` (read-only) — returns the current
 configuration, or `None` if no fee has been configured (effective rate = `0` bps).
 
-| Parameter | Type | Description |
-|---|---|---|
-| `fee_bps` | `u32` | Fee rate in basis points (0–1000, where 100 = 1%). Capped at 1000 (10%). |
-| `treasury` | `Address` | Wallet address that receives the collected platform fees. |
+| Parameter  | Type      | Description                                                              |
+| ---------- | --------- | ------------------------------------------------------------------------ |
+| `fee_bps`  | `u32`     | Fee rate in basis points (0–1000, where 100 = 1%). Capped at 1000 (10%). |
+| `treasury` | `Address` | Wallet address that receives the collected platform fees.                |
 
 The fee is deducted from each milestone payout at confirmation or dispute
 resolution time. If no fee config has been set, the effective fee rate is
@@ -476,10 +541,10 @@ Volume-based fee tiers
 Buyers can receive a reduced platform fee once their lifetime shipment volume
 crosses admin-configured thresholds. Each `FeeTier` entry is a pair:
 
-| Field | Type | Meaning |
-|---|---|---|
+| Field                 | Type   | Meaning                                                                    |
+| --------------------- | ------ | -------------------------------------------------------------------------- |
 | `min_lifetime_volume` | `i128` | Minimum cumulative volume (token base units) the address must have accrued |
-| `fee_bps` | `u32` | Fee in basis points applied when that threshold is met |
+| `fee_bps`             | `u32`  | Fee in basis points applied when that threshold is met                     |
 
 `set_fee_tiers(admin, tiers: Vec<FeeTier>)` — admin-only. Stores up to 5 tier
 entries on instance storage. Prefer listing higher `min_lifetime_volume` values
@@ -487,6 +552,7 @@ first; at lookup time the contract still picks the **lowest** `fee_bps` among
 every tier whose threshold the address meets.
 `get_fee_tier(address) → u32` (read-only) — returns the effective fee bps for
 `address`:
+
 1. Load the address's `LifetimeVolume`.
 2. Among configured tiers where `volume >= min_lifetime_volume`, take the
    smallest `fee_bps`.
@@ -497,7 +563,7 @@ Per-address application: when a shipment is created, the primary buyer's
 resolved tier bps is locked onto that shipment (`ShipmentFeeBps`) so later
 volume changes do not alter fees mid-flight. Subsequent payouts for that
 shipment use the locked value; `get_fee_tier` always reflects the address's
-*current* volume against the live tier table (useful for dashboards and for
+_current_ volume against the live tier table (useful for dashboards and for
 previewing the rate the next shipment would lock).
 
 `set_max_concurrent_disputes(admin, limit: u32)`
@@ -510,7 +576,9 @@ shipment all at once. Without a cap, one shipment could rack up an
 unbounded number of simultaneous disputes, tying up several payment
 releases at once and dumping all of that resolution work on one arbiter
 at the same time.
+
 ---
+
 Advance Payment Lifecycle
 The advance payment flow lets a supplier request early access to a
 portion of a milestone's payment before submitting proof. This is useful
@@ -554,9 +622,10 @@ confirmation is therefore `milestone_payment - advance_amount` (minus
 any applicable protocol fees). If the milestone has no approved advance,
 the full milestone payment is released as normal.
 Constraints:
+
 - Buyer raises a partial dispute: If an approved advance exists for a
   milestone, `raise_partial_dispute` panics with `"partial dispute not
-  allowed when an approved advance exists for this milestone"`. The
+allowed when an approved advance exists for this milestone"`. The
   buyer must use the full `raise_dispute` flow instead.
 - Milestone status: The milestone must be `Pending` when the advance is
   requested. Once proof has been submitted (`ProofSubmitted`), the
@@ -567,7 +636,8 @@ Constraints:
   `shipment.total_advanced_amount` and is excluded from the recoverable
   escrow balance used by `emergency_recover`, `supplier_cancel`, and
   the `get_escrow_balance` view.
-Example lifecycle:
+  Example lifecycle:
+
 ```bash
 # 1. Supplier requests a 20% advance on milestone 0
 stellar contract invoke \
@@ -600,6 +670,7 @@ stellar contract invoke \
   --shipment_id "SHIP-001" \
   --milestone_index 0
 ```
+
 The supplier receives the advance amount at step 2 and only the remaining
 balance at step 3. If the milestone payment is 100 USDC with a 20 %
 advance, the supplier gets 20 USDC at step 2 and roughly 80 USDC (minus
@@ -615,10 +686,10 @@ is later added to or removed from the list.
 The whitelist is open by default. An empty list means every supplier is
 allowed; adding the first address switches the contract to restricted mode.
 Removing the last address switches it back to open mode.
-Function	Who	Behaviour
-`add_to_whitelist(admin, address)`	Admin only	Adds `address` as an approved supplier. Adding an address already on the list is a no-op.
-`remove_from_whitelist(admin, address)`	Admin only	Removes `address` from the approved suppliers. It does not blacklist the address.
-`is_whitelisted(address) → bool`	Anyone (read-only)	Returns `true` when the address is listed, or when the list is empty (open mode).
+Function Who Behaviour
+`add_to_whitelist(admin, address)` Admin only Adds `address` as an approved supplier. Adding an address already on the list is a no-op.
+`remove_from_whitelist(admin, address)` Admin only Removes `address` from the approved suppliers. It does not blacklist the address.
+`is_whitelisted(address) → bool` Anyone (read-only) Returns `true` when the address is listed, or when the list is empty (open mode).
 Interaction with address blacklisting
 Whitelisting is an allowlist for the supplier role; blacklisting is a
 denylist for every role in a new shipment (buyer, supplier, logistics, or
@@ -643,6 +714,7 @@ with context about who performed the action and when.
 `get_admin_log() → Vec<AuditEntry>` (read-only)
 Returns the complete history of admin actions performed on the contract.
 Each `AuditEntry` contains:
+
 ```rust
 pub struct AuditEntry {
     pub action: Symbol,      // Admin function called (e.g. "pause", "set_fee_config")
@@ -651,22 +723,24 @@ pub struct AuditEntry {
     pub detail: Symbol,      // Context detail (e.g. "contract_paused", "fee_config_updated")
 }
 ```
+
 Logged actions include:
-Action	Triggered by	Detail
-`pause`	`pause()`	`contract_paused`
-`unpause`	`unpause()`	`contract_unpaused`
-`set_fee_config`	`set_fee_config()`	`fee_config_updated`
-`set_max_concurrent_disputes`	`set_max_concurrent_disputes()`	`limit_updated`
-`set_min_milestone_percent`	`set_min_milestone_percent()`	`percent_updated`
-`set_max_advance_percent`	`set_max_advance_percent()`	`percent_updated`
-`set_nft_hook_enabled`	`set_nft_hook_enabled()`	`nft_hook_updated`
-`blacklist_address`	`blacklist_address()`	`address_blacklisted`
-`remove_from_blacklist`	`remove_from_blacklist()`	`address_whitelisted`
-`add_allowed_token`	`add_allowed_token()`	`allowed_token_added`
-`remove_allowed_token`	`remove_allowed_token()`	`allowed_token_removed`
-`add_arbiter_to_pool`	`add_arbiter_to_pool()`	`arbiter_added`
-`remove_arbiter_from_pool`	`remove_arbiter_from_pool()`	`arbiter_removed`
+Action Triggered by Detail
+`pause` `pause()` `contract_paused`
+`unpause` `unpause()` `contract_unpaused`
+`set_fee_config` `set_fee_config()` `fee_config_updated`
+`set_max_concurrent_disputes` `set_max_concurrent_disputes()` `limit_updated`
+`set_min_milestone_percent` `set_min_milestone_percent()` `percent_updated`
+`set_max_advance_percent` `set_max_advance_percent()` `percent_updated`
+`set_nft_hook_enabled` `set_nft_hook_enabled()` `nft_hook_updated`
+`blacklist_address` `blacklist_address()` `address_blacklisted`
+`remove_from_blacklist` `remove_from_blacklist()` `address_whitelisted`
+`add_allowed_token` `add_allowed_token()` `allowed_token_added`
+`remove_allowed_token` `remove_allowed_token()` `allowed_token_removed`
+`add_arbiter_to_pool` `add_arbiter_to_pool()` `arbiter_added`
+`remove_arbiter_from_pool` `remove_arbiter_from_pool()` `arbiter_removed`
 Usage example:
+
 ```bash
 # Query the admin audit log via CLI
 stellar contract invoke \
@@ -674,6 +748,7 @@ stellar contract invoke \
   --network testnet \
   -- get_admin_log
 ```
+
 Why this matters:
 Transparency: Anyone can verify when contract parameters were changed
 and by whom
@@ -686,7 +761,9 @@ unilateral changes visible to all participants
 The audit log uses persistent storage and is retained for the lifetime of
 the contract. Unlike events (which may be pruned by Horizon), these entries
 remain queryable indefinitely.
+
 ---
+
 Admin Succession & Emergency Recovery
 Two-step admin handover
 Admin control transfers to a new address through a nominate/accept flow
@@ -731,7 +808,9 @@ Because recovered funds go to the admin rather than back to the buyer,
 this function is meant purely as a break-glass measure for abandoned
 escrow, not as a way to resolve normal disputes — those should go through
 `raise_dispute` / `raise_partial_dispute` and `resolve_dispute` instead.
+
 ---
+
 Multisig Admin Governance
 ChainSettle supports multi-signature admin governance to prevent unilateral contract
 changes. Once enabled, sensitive admin operations require approval from multiple
@@ -741,6 +820,7 @@ trusted keys, and the legacy single-key `upgrade()` path is disabled.
 Replaces single-admin mode with a multisig scheme. Only the current single admin
 can call this. It stores the set of registered admin keys (`admins`) and the
 minimum number of distinct approvals required (`threshold`). After this call:
+
 - Any registered admin can propose or approve admin actions.
 - The single-key `upgrade()` function panics; upgrades must use
   `propose_upgrade` / `approve_upgrade` instead.
@@ -759,6 +839,7 @@ Returns the list of admin addresses that have already approved the specified
 more approvals are needed before the action executes.
 
 Workflow example — enable multisig and execute a protected action:
+
 ```bash
 # 1. Current single admin enables multisig with 2-of-3 control
 stellar contract invoke \
@@ -802,6 +883,7 @@ stellar contract invoke \
 ```
 
 Security notes:
+
 - `initialize_multisig_admin` is irreversible on-chain. To change the admin set
   or threshold, the multisig itself must propose and approve a new
   `initialize_multisig_admin` call.
@@ -811,17 +893,20 @@ Security notes:
 - `get_pending_admin_actions` is read-only and does not require authorization.
 
 ---
+
 Contract Upgrades & Migration
 ChainSettle supports in-place WebAssembly (WASM) contract upgrades on Soroban using the contract deployer's `update_current_contract_wasm` interface. In-place upgrades preserve the existing contract ID, token escrow balances, state indices, and historical shipment records.
 
 `upgrade(admin: Address, new_wasm_hash: BytesN<32>)`
 Replaces the contract's executing WASM code in-place with the compiled WebAssembly module corresponding to `new_wasm_hash`.
+
 - **Who can call:** Single contract Admin only (`admin.require_auth()` + `admin == stored_admin`).
 - **Behavior:** Updates the WASM bytecode in-place and emits a `contract_upgraded` event with `(new_wasm_hash, ledger_sequence)`.
 - **Multisig Protection:** If multi-admin governance (`DataKey::MultiAdminConfig`) has been initialized via `initialize_multisig_admin`, single-key `upgrade()` is automatically disabled and panics with `"upgrade multisig is configured; use propose_upgrade/approve_upgrade instead"`.
 
 Multisig Upgrade Governance
 When multi-admin governance is enabled, upgrades must be proposed and approved by a threshold of registered admin keys:
+
 - `propose_upgrade(admin: Address, new_wasm_hash: BytesN<32>) → u64` — Any registered multisig admin key can propose an upgrade. The proposer's approval is recorded immediately. Returns a unique `proposal_id`.
 - `approve_upgrade(admin: Address, proposal_id: u64)` — Registered admin keys approve a pending proposal. Once the approval count reaches the configured threshold (`config.threshold`), the contract automatically executes `update_current_contract_wasm` and emits `upgrade_executed`.
 - `cancel_upgrade(admin: Address, proposal_id: u64)` — Registered admin key cancels a pending proposal. Emits `upgrade_cancelled`.
@@ -829,49 +914,57 @@ When multi-admin governance is enabled, upgrades must be proposed and approved b
 
 `migrate(env: Env)`
 Post-upgrade state migration entrypoint.
+
 - **Who can call:** Public / post-upgrade execution hook.
 - **What it does post-upgrade:** Called once immediately after a WASM bytecode upgrade to execute state schema transformations, re-key storage entries (e.g. migrating `V1_*` storage keys to `V2_*` schema), or set new storage defaults.
 - **Idempotency:** Designed to be safe to invoke post-upgrade without side-effects when no data model changes are required (currently operates as an idempotent stub for the active contract version).
+
 ---
+
 Events
 The contract emits the following events (subscribe via Horizon or RPC):
-Event name	Payload	When
-`shipment_created`	`shipment_id`	New shipment created
-`proof_submitted`	`(shipment_id, milestone_index)`	Proof submitted for a milestone
-`milestone_confirmed`	`(shipment_id, milestone_index, payment_amount)`	Milestone confirmed, payment released
-`dispute_raised`	`(shipment_id, milestone_index)`	Buyer disputes a milestone
-`partial_uncontested_released`	`(shipment_id)` topic, `(milestone_index, uncontested_amount, fee_amount)` data	Uncontested portion released immediately at partial dispute time
-`dispute_resolved`	`(shipment_id, milestone_index, approved)`	Arbiter resolves dispute
-`dispute_escalated`	`(shipment_id)` topic, `(milestone_index, opened_ledger, current_ledger)` data	Dispute open duration surpassed escalation threshold
-`escalation_threshold_set`	`threshold_ledgers`	Admin configured escalation threshold
-`shipment_cancelled`	`(shipment_id, refund_amount)`	Shipment cancelled
-`milestones_rebalanced`	`(buyer, new_percents)`	Buyer rebalanced milestone percentages
-`nft_hook_config_updated`	`(admin, enabled, ledger_sequence)`	Admin toggled the NFT mint hook via `set_nft_hook_enabled`
-`circuit_breaker_set`	`(limit, window_ledgers)`	Admin configured rate-limiting circuit breaker
-`nft_mint_hook`	`(shipment_id)` topic, `(buyer, supplier, total_amount, ledger_sequence, metadata_hash)` data	Final milestone completed while the NFT mint hook is enabled
-`contract_upgraded`	`(new_wasm_hash, ledger_sequence)`	Single-key WASM upgrade executed
-`upgrade_proposed`	`(new_wasm_hash, admin, 1)`	Multisig WASM upgrade proposed
-`upgrade_approved`	`(admin, approvals_count)`	Multisig WASM upgrade approved by an admin
-`upgrade_cancelled`	`admin`	Multisig WASM upgrade proposal cancelled
-`upgrade_executed`	`new_wasm_hash`	Multisig WASM upgrade executed after threshold reached
+Event name Payload When
+`shipment_created` `shipment_id` New shipment created
+`proof_submitted` `(shipment_id, milestone_index)` Proof submitted for a milestone
+`milestone_confirmed` `(shipment_id, milestone_index, payment_amount)` Milestone confirmed, payment released
+`dispute_raised` `(shipment_id, milestone_index)` Buyer disputes a milestone
+`partial_uncontested_released` `(shipment_id)` topic, `(milestone_index, uncontested_amount, fee_amount)` data Uncontested portion released immediately at partial dispute time
+`dispute_resolved` `(shipment_id, milestone_index, approved)` Arbiter resolves dispute
+`dispute_escalated` `(shipment_id)` topic, `(milestone_index, opened_ledger, current_ledger)` data Dispute open duration surpassed escalation threshold
+`escalation_threshold_set` `threshold_ledgers` Admin configured escalation threshold
+`shipment_cancelled` `(shipment_id, refund_amount)` Shipment cancelled
+`milestones_rebalanced` `(buyer, new_percents)` Buyer rebalanced milestone percentages
+`nft_hook_config_updated` `(admin, enabled, ledger_sequence)` Admin toggled the NFT mint hook via `set_nft_hook_enabled`
+`circuit_breaker_set` `(limit, window_ledgers)` Admin configured rate-limiting circuit breaker
+`nft_mint_hook` `(shipment_id)` topic, `(buyer, supplier, total_amount, ledger_sequence, metadata_hash)` data Final milestone completed while the NFT mint hook is enabled
+`contract_upgraded` `(new_wasm_hash, ledger_sequence)` Single-key WASM upgrade executed
+`upgrade_proposed` `(new_wasm_hash, admin, 1)` Multisig WASM upgrade proposed
+`upgrade_approved` `(admin, approvals_count)` Multisig WASM upgrade approved by an admin
+`upgrade_cancelled` `admin` Multisig WASM upgrade proposal cancelled
+`upgrade_executed` `new_wasm_hash` Multisig WASM upgrade executed after threshold reached
 The backend service (`chainsetttle-backend`) listens for these events and
 sends push notifications to the relevant parties.
+
 ---
+
 Error Codes
-Code	Meaning
-1	`ShipmentAlreadyExists` — shipment ID already in use
-2	`ShipmentNotFound` — shipment ID not found
-3	`Unauthorized` — caller does not have permission
-4	`InvalidMilestoneIndex` — index out of range
-5	`InvalidMilestoneStatus` — wrong state for this action
-6	`ShipmentNotActive` — shipment is completed or cancelled
-7	`InvalidPercentages` — milestone percentages don't sum to 100
-8	`InvalidAmount` — amount must be > 0
-9	`DisputeAlreadyOpen` — dispute already exists for this milestone
-18	`MaxShipmentValueExceeded` — `total_amount` exceeds the admin-configured cap
-19	`CircuitBreakerTripped` — payment would exceed the rate-limiting outflow cap
+Code Meaning
+1 `ShipmentAlreadyExists` — shipment ID already in use
+2 `ShipmentNotFound` — shipment ID not found
+3 `Unauthorized` — caller does not have permission
+4 `InvalidMilestoneIndex` — index out of range
+5 `InvalidMilestoneStatus` — wrong state for this action
+6 `ShipmentNotActive` — shipment is completed or cancelled
+7 `InvalidPercentages` — milestone percentages don't sum to 100
+8 `InvalidAmount` — amount must be > 0
+9 `DisputeAlreadyOpen` — dispute already exists for this milestone
+18 `MaxShipmentValueExceeded` — `total_amount` exceeds the admin-configured cap
+19 `CircuitBreakerTripped` — payment would exceed the rate-limiting outflow cap
+
 ---
+
 Project Structure
+
 ```
 chainsetttle-contract/
 ├── Cargo.toml                         ← Rust workspace config
@@ -896,25 +989,31 @@ chainsetttle-contract/
             ├── benchmarks.rs          ← performance benchmarks
             └── [other test files]     ← edge cases, stress tests, advanced features
 ```
+
 Test File Organization
 Tests are split by domain for clarity and to reduce merge conflicts:
-File	Purpose	Example Tests
-`test_common.rs`	Shared setup & utilities	`setup()`, `build_milestones()`, `create_standard_shipment()`
-`test_shipment.rs`	Shipment lifecycle	`test_create_shipment_success`, `test_full_shipment_lifecycle`, `test_cancel_shipment`
-`test_dispute.rs`	Dispute resolution	`test_raise_dispute`, `test_resolve_dispute`, `test_dispute_cooldown_enforced`
-`test_admin.rs`	Admin controls	`test_pause_blocks_create_shipment`, `test_blacklist_removal_restores_participation`
-`test_query.rs`	Read-only queries	`test_get_completion_percentage_*`
+File Purpose Example Tests
+`test_common.rs` Shared setup & utilities `setup()`, `build_milestones()`, `create_standard_shipment()`
+`test_shipment.rs` Shipment lifecycle `test_create_shipment_success`, `test_full_shipment_lifecycle`, `test_cancel_shipment`
+`test_dispute.rs` Dispute resolution `test_raise_dispute`, `test_resolve_dispute`, `test_dispute_cooldown_enforced`
+`test_admin.rs` Admin controls `test_pause_blocks_create_shipment`, `test_blacklist_removal_restores_participation`
+`test_query.rs` Read-only queries `test_get_completion_percentage_*`
 All shared fixtures and helper functions are centralized in `test_common.rs` to avoid duplication.
+
 ---
+
 Prerequisites
 Install the following before you begin:
+
 1. Rust + wasm32 target
+
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup target add wasm32v1-none
 ```
-Requires Rust v1.84.0 or higher.
-2. Stellar CLI
+
+Requires Rust v1.84.0 or higher. 2. Stellar CLI
+
 ```bash
 # macOS
 brew install stellar-cli
@@ -922,17 +1021,24 @@ brew install stellar-cli
 # Linux / WSL
 cargo install --locked stellar-cli --features opt
 ```
+
 Verify installation:
+
 ```bash
 stellar --version
 ```
+
 3. A Stellar testnet account (for deployment)
+
 ```bash
 stellar keys generate --global my-account --network testnet
 stellar keys fund my-account --network testnet
 ```
+
 ---
+
 Setup & Installation
+
 ```bash
 # Clone the repo
 git clone https://github.com/your-org/chainsetttle-contract.git
@@ -941,8 +1047,11 @@ cd chainsetttle-contract
 # Check all dependencies compile
 cargo check
 ```
+
 ---
+
 Running Tests
+
 ```bash
 # Run all unit tests
 cargo test
@@ -956,7 +1065,9 @@ cargo test test_full_shipment_lifecycle
 # Run with logs enabled
 cargo test --features testutils
 ```
+
 Expected output:
+
 ```
 running 7 tests
 test test::test_cancel_shipment ... ok
@@ -967,8 +1078,11 @@ test test::test_raise_and_resolve_dispute_reject ... ok
 test test::test_unauthorized_confirm_milestone ... ok
 test test::test_create_shipment_invalid_percentages ... ok
 ```
+
 ---
+
 Building
+
 ```bash
 # Build contract to .wasm
 make build
@@ -978,10 +1092,14 @@ make build
 make optimize
 # → target/wasm32v1-none/release/chainsetttle.optimized.wasm
 ```
+
 Soroban contracts have a 64KB max size. The `optimize` step uses
 `stellar contract optimize` to strip unused symbols and shrink the binary.
+
 ---
+
 Deploying to Testnet
+
 ```bash
 # Set your account name (created in Prerequisites step)
 export STELLAR_ACCOUNT=my-account
@@ -989,13 +1107,17 @@ export STELLAR_ACCOUNT=my-account
 # Deploy (uses optimized .wasm)
 make deploy-testnet
 ```
+
 You'll get back a contract ID like:
+
 ```
 CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 ```
+
 Save this — you'll need it to initialize the contract and in your frontend/backend configs.
 Initialize after deployment
 After deploying, call `init` once to set the admin:
+
 ```bash
 stellar contract invoke \
   --id <CONTRACT_ID> \
@@ -1004,7 +1126,9 @@ stellar contract invoke \
   -- init \
   --admin <YOUR_ADDRESS>
 ```
+
 Create a test shipment via CLI
+
 ```bash
 stellar contract invoke \
   --id <CONTRACT_ID> \
@@ -1020,9 +1144,13 @@ stellar contract invoke \
   --total_amount 1000000000 \
   --milestones '[{"name":"Dispatch","payment_percent":25,"proof_hash":"","status":"Pending"},{"name":"Transit","payment_percent":50,"proof_hash":"","status":"Pending"},{"name":"Delivered","payment_percent":25,"proof_hash":"","status":"Pending"}]'
 ```
+
 ---
+
 Deploying to Mainnet
+
 > ⚠️ Only deploy to Mainnet after thorough testing and ideally a security audit.
+
 ```bash
 # Fund a mainnet account first (you need XLM for fees)
 stellar contract deploy \
@@ -1030,9 +1158,12 @@ stellar contract deploy \
   --source my-account \
   --network mainnet
 ```
+
 > **USDC SAC address on Mainnet:**
 > `CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7EJKEF`
+
 ---
+
 Security Considerations
 Authorization: Every state-changing function calls `require_auth()` on the relevant party. No one can act on behalf of another address without their signature.
 Escrow isolation: Funds are held by the contract address itself, not a separate wallet. The contract can only release funds via the explicit `transfer` calls in `confirm_milestone` and `resolve_dispute`.
@@ -1043,6 +1174,7 @@ Contract Upgrades: The contract supports in-place WASM code upgrades via Soroban
 For a detailed threat analysis and security model, see docs/SECURITY.md.
 
 ---
+
 Roadmap
 [x] Core escrow + milestone logic
 [x] Dispute resolution via arbiter
@@ -1055,7 +1187,9 @@ Roadmap
 [ ] Mainnet deployment + verification
 [ ] Integration with `chainsetttle-backend` event listener
 [ ] Integration with `chainsetttle-frontend` Freighter wallet
+
 ---
+
 Contributing
 Pull requests welcome. Please run `cargo fmt` and `cargo test` before submitting.
 License
