@@ -18,6 +18,7 @@ Contract Functions
 Allowed token list
 Invoice hash
 rebalance_milestones
+Milestone Payee Splits
 Partial Disputes & Escalation Checks
 Advance Payment Lifecycle
 Admin Succession & Emergency Recovery
@@ -288,6 +289,62 @@ stellar contract invoke \
   --buyer <BUYER_ADDRESS> \
   --shipment_id "SHIP-001" \
   --milestone_indices '[0, 1, 2]'
+```
+Milestone Payee Splits (multi-recipient payouts)
+A buyer can split a single milestone's payout across multiple addresses instead of sending the whole amount to the supplier. The split is configured per milestone with `set_milestone_payees` and read back with `get_milestone_payees`.
+`MilestonePayee` struct:
+```rust
+pub struct MilestonePayee {
+    pub payee: Address,   // recipient of this share
+    pub percent: u32,     // whole-number percentage (0–100); all payees must sum to exactly 100
+}
+```
+`set_milestone_payees(buyer, shipment_id, milestone_index, payees: Vec<MilestonePayee>)`
+Buyer-only. Configures the payee split for a milestone. Rules:
+- `payees` is a list of `(Address, percent)` entries whose percentages must sum to exactly `100`. If they don't, the call panics with `"InvalidPayeePercentages"`.
+- The milestone must still be `Pending` and the shipment must be `Active`, otherwise the call panics with `"MilestoneNotPending"` / `"shipment is not active"`. Configure the split before any proof is submitted.
+- Passing an empty `payees` vector removes any previously configured split for that milestone, reverting it to the default single-recipient (supplier) behaviour.
+- Emits `milestone_payees_set` with `(milestone_index, payee_count, buyer)`.
+`get_milestone_payees(shipment_id, milestone_index) → Vec<MilestonePayee>` (read-only)
+Returns the configured payees for a milestone. An empty vector means no split is configured and the milestone pays entirely to the supplier.
+How splits are applied at payout
+When a milestone is confirmed (`confirm_milestone` / `batch_confirm_milestones`) or a dispute is resolved in the supplier's favour, the contract splits the net payout (after any platform fee and advance deduction) across the configured payees. For each configured milestone the contract uses `pay_milestone_to_payees`:
+- Each payee except the last receives `net_amount * percent / 100` (integer floor division).
+- The last payee in the list receives the remainder `net_amount - distributed`, so the full `net_amount` is always delivered exactly.
+- If no payees are configured, the entire net amount goes to the supplier (subject to the per-supplier batched/immediate payout mode).
+Rounding remainders
+Because the per-payee amounts use integer division, a small rounding remainder (up to `payees.len() - 1` base units) is left over after the non-last shares are computed. That remainder is not lost — it is added to the **last** payee in the list. To control which recipient absorbs the rounding remainder, order the payees so the address that should receive the dust is listed last (e.g. put the supplier, who usually has the largest share, last).
+Example — split milestone 1's payout 60/40 between the supplier and a logistics partner (supplier listed last, so it absorbs any remainder):
+```bash
+# Configure the split (buyer only, while the milestone is still Pending)
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source buyer-account \
+  --network testnet \
+  -- set_milestone_payees \
+  --buyer <BUYER_ADDRESS> \
+  --shipment_id "SHIP-001" \
+  --milestone_index 1 \
+  --payees '[{"payee":"<LOGISTICS_ADDRESS>","percent":40},{"payee":"<SUPPLIER_ADDRESS>","percent":60}]'
+
+# Read the configured split back (anyone, read-only)
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  -- get_milestone_payees \
+  --shipment_id "SHIP-001" \
+  --milestone_index 1
+
+# Revert to a single supplier payout by passing an empty list
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source buyer-account \
+  --network testnet \
+  -- set_milestone_payees \
+  --buyer <BUYER_ADDRESS> \
+  --shipment_id "SHIP-001" \
+  --milestone_index 1 \
+  --payees '[]'
 ```
 `raise_dispute(buyer, shipment_id, milestone_index)`
 Buyer disputes 100% of a `ProofSubmitted` or `ConfirmedHeld` milestone's payment. Freezes the milestone in `Disputed` state — no payment can be released until arbiter resolves.
@@ -839,6 +896,7 @@ Event name	Payload	When
 `shipment_created`	`shipment_id`	New shipment created
 `proof_submitted`	`(shipment_id, milestone_index)`	Proof submitted for a milestone
 `milestone_confirmed`	`(shipment_id, milestone_index, payment_amount)`	Milestone confirmed, payment released
+`milestone_payees_set`	`(shipment_id)` topic, `(milestone_index, payee_count, buyer)` data	Buyer configured or cleared the milestone payee split
 `dispute_raised`	`(shipment_id, milestone_index)`	Buyer disputes a milestone
 `partial_uncontested_released`	`(shipment_id)` topic, `(milestone_index, uncontested_amount, fee_amount)` data	Uncontested portion released immediately at partial dispute time
 `dispute_resolved`	`(shipment_id, milestone_index, approved)`	Arbiter resolves dispute
