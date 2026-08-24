@@ -20,6 +20,7 @@ Invoice hash
 rebalance_milestones
 Partial Disputes & Escalation Checks
 Advance Payment Lifecycle
+Milestone Amendment History Tracking
 Admin Succession & Emergency Recovery
 Multisig Admin Governance
 Contract Upgrades & Migration
@@ -29,7 +30,6 @@ Project Structure
 Prerequisites
 Setup & Installation
 Running Tests
-Milestone Amendment History Tracking
 Building
 Deploying to Testnet
 Deploying to Mainnet
@@ -352,6 +352,7 @@ the supplier has no recorded activity; it does not calculate or persist a
 separate weighted rating.
 `get_escrow_balance(shipment_id) → i128` (read-only)
 Returns the amount of USDC still locked in escrow.
+
 Milestone Deadline Extensions
 Suppliers can ask for more ledger time on an active shipment milestone,
 and buyers decide whether to accept that new deadline. The flow is
@@ -376,6 +377,45 @@ unchanged, and emits `extension_denied`.
 milestone, or `0` when no deadline has been set.
 Extension request, approval, and denial calls are paused by the emergency
 circuit breaker; `get_milestone_deadline` remains available while paused.
+
+Milestone Amendment History Tracking
+Buyer and supplier can mutually agree to change a **Pending** milestone's payment percentage and/or name after a shipment is created — for example, to fix a typo in the milestone name or rebalance value between milestones before any proof is submitted. Changes only take effect once **both parties agree on the exact same terms**.
+
+**`propose_amendment(caller, shipment_id, milestone_index, new_percent, new_name)`** — buyer or supplier only.
+
+- The shipment must be `Active` and the target milestone must be `Pending` — amendments are not allowed once proof has been submitted.
+- Proposals are stored in temporary storage keyed to the milestone, tracking `new_percent`, `new_name`, and a `buyer_agreed` / `supplier_agreed` flag for each side.
+- Calling this function records the caller's agreement to the given `new_percent` / `new_name`. If a pending proposal already exists with **different** terms, it is reset and both agreement flags are cleared — meaning changing your proposed terms effectively restarts consent from scratch, even if the other party had already agreed to the old terms.
+- Emits `amendment_proposed` on every call, regardless of whether it completes the agreement.
+
+**Mutual consent — what happens when both sides agree:**
+
+Once `buyer_agreed` and `supplier_agreed` are both `true` for the same terms, the amendment executes automatically in that same call:
+
+1. Validates that the new percentage still keeps all milestones summing to 100% — panics with `"milestone percentages must sum to 100"` otherwise.
+2. Updates the milestone's `payment_percent` and `name`.
+3. Persists the updated shipment and clears the temporary proposal.
+4. Appends an entry to that milestone's amendment log (see below).
+5. Records an `amendment_accepted` entry in the contract's admin audit trail.
+
+There is no separate `approve_amendment` call — the second matching `propose_amendment` call *is* the approval.
+
+**No explicit rejection:** there is currently no `reject_amendment` or `cancel_amendment` function. A party can effectively withdraw by proposing different terms (which resets both flags), but a first mover's agreement can't be explicitly rescinded without someone proposing something new.
+
+**`get_amendment_log(shipment_id, milestone_index) → Vec<AmendmentEntry>`** — read-only, callable by anyone.
+
+Returns the append-only, chronological history of amendments **actually applied** to a milestone (not proposals — only agreements that both parties completed). Each entry:
+
+```rust
+pub struct AmendmentEntry {
+    pub proposer: Address,      // who made the triggering call that completed the amendment
+    pub old_payment_percent: u32,
+    pub new_payment_percent: u32,
+    pub ledger: u32,
+}
+```
+
+The log is capped at 20 entries per milestone; once full, the oldest entry is evicted (FIFO) to make room for the newest. Unlike the admin audit log, this is scoped per-milestone and only records completed amendments, not every proposal attempt.
 Emergency pause (circuit breaker)
 Admin-only kill switch that halts state-changing calls across every
 shipment without touching any stored data. Locked funds stay in escrow
