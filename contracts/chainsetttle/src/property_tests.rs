@@ -427,7 +427,9 @@ mod contract_prop_tests {
 
 #[cfg(test)]
 mod milestone_percent_fuzz {
+    extern crate std;
     use proptest::prelude::*;
+    use std::{vec, vec::Vec};
 
     const MIN_PERCENT: u32 = 5;
 

@@ -236,7 +236,7 @@ fn reject_create_shipment_amount_i128_max_insufficient_balance() {
 // =============================================================================
 
 #[test]
-#[should_panic(expected = "milestone percentages must sum to 100")]
+#[should_panic(expected = "InvalidPercentages")]
 fn reject_create_shipment_payment_percent_zero_sum() {
     let ctx = setup_ctx();
     let client = ChainSettleContractClient::new(&ctx.env, &ctx.contract_id);

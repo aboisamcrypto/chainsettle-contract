@@ -74,8 +74,34 @@ fn create_and_dispute(
 ) {
     let id = ship_id(env, i);
     client.create_shipment(
-        &id, buyer, supplier, logistics, arbiter, token_id,
-        &amount, &three_milestone_vec(env), &false, &0,
+        &id, &vec![env, buyer.clone()], supplier, logistics, arbiter, token_id,
+        &amount, &three_milestone_vec(env),
+        &ShipmentOptions {
+            response_deadline: 0,
+            penalty_bps: 0,
+            milestone_mode: MilestoneMode::Sequential,
+            holdback_ledgers: 0,
+            dispute_cooldown_ledgers: 0,
+            late_penalty_bps_per_ledger: 0,
+            auto_confirm_ledgers: 0,
+            dispute_bond_amount: 0,
+            arbiter_fee_bps: 0,
+            logistics_fee_bps: 0,
+            supplier_collateral: 0,
+            expires_at_ledger: None,
+            metadata_hash: None,
+            referrer: None,
+            buyer_cancel_fee_bps: 0,
+            early_bonus_pool: 0,
+            review_window_ledgers: None,
+            milestone_splits: vec![env],
+            deadlines: vec![env],
+            dispute_timeout_seconds: 0,
+            default_resolution: Resolution::Buyer,
+            backup_arbiter: None,
+            confirmation_cooldown_ledgers: None,
+            arbiter_panel: vec![env],
+        },
     );
     let proof = String::from_str(env, "ipfs://concurrent-proof");
     client.submit_proof(supplier, &id, &0, &proof, &Symbol::new(&env, "ipfs"));

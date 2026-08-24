@@ -448,7 +448,7 @@ fn test_oracle_pattern_dispute_after_rejection() {
     let shipment = client.get_shipment(&shipment_id);
     assert_eq!(
         shipment.milestones.get(0).unwrap().status,
-        MilestoneStatus::Confirmed
+        MilestoneStatus::Resolved
     );
 }
 

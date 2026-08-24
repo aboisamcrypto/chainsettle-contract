@@ -281,6 +281,9 @@ fn default_options(_env: &Env) -> ShipmentOptions {
         deadlines: vec![_env],
         dispute_timeout_seconds: 0,
         default_resolution: Resolution::Buyer,
+        backup_arbiter: None,
+        confirmation_cooldown_ledgers: None,
+        arbiter_panel: vec![_env],
     }
 }
 

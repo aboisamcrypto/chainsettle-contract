@@ -62,15 +62,39 @@ fn make_shipment(
 ) {
     client.create_shipment(
         &String::from_str(env, id),
-        buyer,
+        &vec![env, buyer.clone()],
         supplier,
         logistics,
         arbiter,
         token_id,
         &amount,
         &two_milestone_vec(env),
-        &false,
-        &0,
+        &ShipmentOptions {
+            response_deadline: 0,
+            penalty_bps: 0,
+            milestone_mode: MilestoneMode::Sequential,
+            holdback_ledgers: 0,
+            dispute_cooldown_ledgers: 0,
+            late_penalty_bps_per_ledger: 0,
+            auto_confirm_ledgers: 0,
+            dispute_bond_amount: 0,
+            arbiter_fee_bps: 0,
+            logistics_fee_bps: 0,
+            supplier_collateral: 0,
+            expires_at_ledger: None,
+            metadata_hash: None,
+            referrer: None,
+            buyer_cancel_fee_bps: 0,
+            early_bonus_pool: 0,
+            review_window_ledgers: None,
+            milestone_splits: vec![env],
+            deadlines: vec![env],
+            dispute_timeout_seconds: 0,
+            default_resolution: Resolution::Buyer,
+            backup_arbiter: None,
+            confirmation_cooldown_ledgers: None,
+            arbiter_panel: vec![env],
+        },
     );
 }
 
@@ -85,8 +109,21 @@ fn make_shipment(
 ///   S3 — milestone 0 Disputed (active dispute)
 #[test]
 fn test_wasm_upgrade_state_persists() {
-    let env = Env::default();
+    let mut env = Env::default();
+    // Writing a test snapshot at Env drop can panic when the Env held a
+    // contract deployed from real WASM bytes (as opposed to the native
+    // in-process registration other tests use) — disable it here since
+    // this test only cares about state persistence across upgrade, not
+    // snapshot output.
+    env.set_config(soroban_sdk::testutils::EnvTestConfig {
+        capture_snapshot_at_drop: false,
+    });
     env.mock_all_auths();
+    // Running the contract as real uploaded WASM (rather than the native
+    // in-process registration other tests use) costs far more budget per
+    // call; this test exercises many calls across 3 shipments plus an
+    // upgrade, so lift the budget cap.
+    env.cost_estimate().budget().reset_unlimited();
 
     let contract_id = env.register(ChainSettleContract, ());
 
@@ -130,7 +167,7 @@ fn test_wasm_upgrade_state_persists() {
     // --- Upgrade ---
     // Upload the same binary as "v2" — tests storage key compatibility, not logic change.
     let new_wasm_hash = env.deployer().upload_contract_wasm(WASM);
-    client.upgrade(&new_wasm_hash);
+    client.upgrade(&buyer, &new_wasm_hash);
 
     // ---- Post-upgrade reads must succeed with identical data ----------------
 
