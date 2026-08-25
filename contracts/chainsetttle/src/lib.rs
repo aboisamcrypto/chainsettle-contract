@@ -7372,19 +7372,115 @@ impl ChainSettleContract {
             .unwrap_or_else(|| panic!("invalid milestone index"))
     }
 
+    /// Returns how far a shipment has settled, as a whole-number percentage in `[0, 100]`.
+    ///
+    /// # How the percentage is derived from milestone payment weights
+    ///
+    /// Every milestone carries a **payment weight** — the share of the shipment's
+    /// `total_amount` that settling that milestone releases from escrow:
+    ///
+    /// * default weights: `Milestone.payment_percent`, whole percents that
+    ///   `create_shipment` requires to **sum to exactly 100**;
+    /// * optional fine-grained weights: `ShipmentOptions.milestone_splits`, basis
+    ///   points stored under `DataKeyExt::MilestoneSplits` that must **sum to exactly
+    ///   10_000**. When present they take precedence over `payment_percent`.
+    ///
+    /// `milestone_gross_payment` turns a weight into money:
+    ///
+    /// ```text
+    /// gross(i) = total_amount * splits_bps(i) / 10_000        // when milestone_splits is set
+    /// gross(i) = total_amount * payment_percent(i) / 100      // otherwise
+    /// ```
+    ///
+    /// Because the weights sum to 100% (10_000 bps), the sum of all `gross(i)` equals
+    /// `total_amount` (± integer truncation), so *settled weight* and *settled money*
+    /// are two views of the same quantity. This query reports the money view:
+    ///
+    /// ```text
+    /// settled = released_amount + total_advanced_amount
+    /// pct     = clamp(settled * 100 / total_amount, 0, 100)      // integer division
+    /// ```
+    ///
+    /// where the two accumulators are fed exclusively by milestone-weight-sized amounts:
+    ///
+    /// * `released_amount` — increased by milestone `i`'s weight amount every time that
+    ///   weight leaves escrow for good:
+    ///   * `confirm_milestone` (immediate path) and `claim_auto_confirmation` credit
+    ///     `gross(i) - late_penalty`;
+    ///   * `release_held_payment` (holdback path) and `batch_confirm_milestones` credit
+    ///     `gross(i)`;
+    ///   * `raise_partial_dispute` credits the uncontested share
+    ///     `(100 - contested_percent)%` of `gross(i)` straight away;
+    ///   * `resolve_dispute`, `resolve_dispute_timeout` and panel resolution credit the
+    ///     disputed share once the outcome moves it out of escrow — a supplier payout,
+    ///     or the buyer refund of a *partial* dispute. A **full** dispute rejected in
+    ///     the buyer's favour resets the milestone to `Pending` instead, so nothing is
+    ///     credited and that weight can still be settled later.
+    /// * `total_advanced_amount` — increased by `approve_advance`
+    ///   (`gross(i) * requested_percent / 100`, a *fraction* of one milestone's weight)
+    ///   and decreased again by `consume_advance_for_milestone` when that milestone is
+    ///   confirmed and its full `gross(i)` moves into `released_amount`. Advances are
+    ///   therefore counted exactly once, never twice.
+    ///
+    /// So a fresh shipment reads `0`, confirming a milestone whose weight is `w`
+    /// adds `w` percentage points, and a fully settled shipment reads `100`.
+    /// With the default 25 / 50 / 25 weights the query walks 0 → 25 → 75 → 100.
+    ///
+    /// # Properties and edge cases
+    ///
+    /// * **Truncation** — integer division floors the result, so fractional weights
+    ///   round down (e.g. a `3_333` bps milestone on a fully funded escrow reads `33`).
+    ///   The value is also clamped into `[0, 100]` so ledger drift (top-ups, penalties,
+    ///   rebalances) can never produce an out-of-range answer.
+    /// * **Settlement, not supplier earnings** — platform, logistics, arbiter and
+    ///   referral fees are taken out of the *payout*, not out of the weight, so they do
+    ///   not change the percentage. A partial dispute rejected in the buyer's favour
+    ///   still credits the contested weight, because that money has left escrow (as a
+    ///   refund). Read it as "how much of the escrow is settled", not "how much the
+    ///   supplier was paid".
+    /// * **Terminal states freeze the reading** — `cancel_shipment`, `supplier_cancel`
+    ///   and `claim_deadline_refund` return the *unsettled* remainder to the buyer
+    ///   without crediting `released_amount`, so a cancelled/expired shipment keeps the
+    ///   percentage it had reached (typically below `100`).
+    /// * **Held payments lag** — with `holdback_ledgers > 0` a confirmed milestone sits
+    ///   in `MilestoneStatus::ConfirmedHeld` and is *not* counted until
+    ///   `release_held_payment` actually pays it out.
+    /// * **Late penalties shrink the credited weight** — a penalised milestone credits
+    ///   `gross(i) - penalty` (the penalty is refunded to the buyer, capped at half the
+    ///   weight), so it contributes slightly less than its nominal weight and a shipment
+    ///   delivered entirely late can finish below `100`.
+    /// * **The denominator is live** — `top_up_escrow` raises `total_amount`, which
+    ///   dilutes an in-flight percentage; `rebalance_milestones` and accepted
+    ///   `propose_amendment` percentage changes keep the weight sum at 100, so the
+    ///   0 → 100 walk stays consistent.
+    /// * **Degenerate inputs** — returns `0` when `total_amount <= 0` (nothing to
+    ///   settle) or when nothing has settled yet, avoiding any division by zero.
+    /// * Exactly complements `get_escrow_balance`, which returns the unsettled
+    ///   remainder `total_amount - released_amount - total_advanced_amount`.
+    ///
+    /// Read-only: no authorization required, no state mutated. Panics with
+    /// `"shipment not found"` if `shipment_id` is unknown (or already archived).
+    ///
+    /// See `docs/completion-percentage.md` for worked examples.
     pub fn get_completion_percentage(env: Env, shipment_id: String) -> u32 {
         let shipment = Self::get_shipment_internal(&env, &shipment_id);
 
+        // Guard the denominator: an unfunded/degenerate escrow has no weight to settle.
         if shipment.total_amount <= 0 {
             return 0;
         }
+        // Nothing settled yet (no milestone weight released, no advance outstanding).
         if shipment.released_amount + shipment.total_advanced_amount <= 0 {
             return 0;
         }
 
-        // Clamp to [0, 100] to avoid any unexpected rounding / state drift.
+        // Settled weight = milestone weights already released + outstanding advances
+        // (fractions of a not-yet-confirmed milestone's weight).
+        // Multiply before dividing so the ratio keeps full i128 precision.
         let numerator: i128 = (shipment.released_amount + shipment.total_advanced_amount) * 100;
+        // Integer division floors the result: fractional weights round down.
         let mut pct: i128 = numerator / shipment.total_amount;
+        // Clamp to [0, 100] to avoid any unexpected rounding / state drift.
         if pct < 0 {
             pct = 0;
         }
@@ -7594,6 +7690,18 @@ impl ChainSettleContract {
 
     /// #160: Returns gross payment for a milestone using stored basis-point splits when available,
     /// otherwise falls back to the milestone's payment_percent field.
+    ///
+    /// This is the single place where a milestone **payment weight** becomes money:
+    ///
+    /// ```text
+    /// gross(i) = total_amount * splits_bps(i) / 10_000   // MilestoneSplits set (sum == 10_000)
+    /// gross(i) = total_amount * payment_percent(i) / 100 // fallback (percents sum == 100)
+    /// ```
+    ///
+    /// Since the weights are validated to cover the whole shipment, the `gross(i)` values
+    /// add up to `total_amount` (± integer truncation). Every accumulation into
+    /// `Shipment.released_amount` is one of these values, which is what makes
+    /// `get_completion_percentage` a faithful weight-progress reading.
     fn milestone_gross_payment(env: &Env, shipment: &Shipment, milestone_index: u32) -> i128 {
         let splits_key = DataKeyExt::MilestoneSplits(shipment.id.clone());
         if let Some(splits) = env
