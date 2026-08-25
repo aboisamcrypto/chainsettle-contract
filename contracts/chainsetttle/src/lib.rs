@@ -937,12 +937,7 @@ pub enum DataKeyExt2 {
     MilestoneTemplate(Address, String),
     /// Index of template names saved by a given creator, for listing.
     MilestoneTemplateNames(Address),
-}
 
-// `DataKeyExt` is itself at the 50-case union cap, so newer storage keys
-// (#366/#367/#368/#369) live here instead.
-#[contracttype]
-pub enum DataKeyExt2 {
     // ── #366 Escrow deadline warning ────────────────────────────────────
     /// Admin-configured lead window (in ledgers) before a milestone deadline
     /// during which `check_deadline_warning` may fire (0 = disabled).
@@ -974,6 +969,24 @@ pub enum DataKeyExt2 {
     /// Whether the dispute on (shipment_id, milestone_index) has already been appealed
     /// once — a second resolution is final, so only one appeal is ever permitted.
     DisputeAppealed(String, u32),
+
+    // ── #397 Supplier tiering ───────────────────────────────────────────
+    /// Admin-configured supplier tier thresholds and collateral multipliers.
+    SupplierTierConfig,
+
+    // ── #400 Dispute mediator ────────────────────────────────────────────
+    /// Global pool of mediators authorized for any shipment lacking a specific assignment.
+    MediatorPool,
+    /// Mediator assigned to a specific shipment (takes precedence over the pool).
+    ShipmentMediator(String),
+    /// Pending/in-progress mediation proposal for (shipment_id, milestone_index).
+    MediationProposal(String, u32),
+
+    // ── #398 Buyer spending limit ───────────────────────────────────────
+    /// Configured rolling-window spending limit for a buyer: (limit, window_ledgers).
+    BuyerSpendingLimit(Address),
+    /// Current window usage for a buyer: (window_start_ledger, used_amount).
+    BuyerSpendingUsage(Address),
 }
 
 /// Partial joint-confirmation progress for a high-value shipment's milestone (#367).
@@ -1028,29 +1041,6 @@ pub struct MediationProposal {
     pub suggested_outcome: Resolution,
     pub buyer_accepted: bool,
     pub supplier_accepted: bool,
-}
-
-// `DataKeyExt` is also approaching the 50-case Soroban union cap, so newer
-// storage keys live here.
-#[contracttype]
-pub enum DataKeyExt2 {
-    // ── #397 Supplier tiering ───────────────────────────────────────────
-    /// Admin-configured supplier tier thresholds and collateral multipliers.
-    SupplierTierConfig,
-
-    // ── #400 Dispute mediator ────────────────────────────────────────────
-    /// Global pool of mediators authorized for any shipment lacking a specific assignment.
-    MediatorPool,
-    /// Mediator assigned to a specific shipment (takes precedence over the pool).
-    ShipmentMediator(String),
-    /// Pending/in-progress mediation proposal for (shipment_id, milestone_index).
-    MediationProposal(String, u32),
-
-    // ── #398 Buyer spending limit ───────────────────────────────────────
-    /// Configured rolling-window spending limit for a buyer: (limit, window_ledgers).
-    BuyerSpendingLimit(Address),
-    /// Current window usage for a buyer: (window_start_ledger, used_amount).
-    BuyerSpendingUsage(Address),
 }
 
 // ============================================================
@@ -10975,8 +10965,13 @@ mod test_rebalance_milestones;
 mod test_shipment;
 mod test_top_up_escrow;
 mod test_upgrade;
-mod test_concurrent_disputes;
-mod test_boundaries;
-mod test_chaos;
-mod test_features;
 mod test_configurable_limits;
+mod test_buyer_spending_limit;
+mod test_dispute_mediator;
+mod test_event_schema;
+mod test_fee_tier_recalc;
+mod test_multi_token;
+mod test_partial_cancellation;
+mod test_supplier_collateral;
+mod test_supplier_tiering;
+mod test_upgrade_multisig;
