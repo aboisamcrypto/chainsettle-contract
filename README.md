@@ -950,6 +950,21 @@ and blacklisted cannot be used to create a shipment. Conversely, removing an
 address from the blacklist only removes that denial; the supplier must still
 be on a non-empty whitelist to be eligible. Neither control changes an
 already-created shipment.
+
+### Reputation-Triggered Auto-Blacklisting
+
+In addition to manual blacklisting (`blacklist_address()`), the contract supports automatic blacklisting based on a supplier's reputation counters. 
+
+The admin can configure thresholds for cancelled and disputed shipments. When a supplier's reputation counters exceed these thresholds, they are automatically treated as blacklisted and cannot act as a supplier in new shipments.
+
+Function | Who | Behaviour
+--- | --- | ---
+`set_auto_blacklist_rule(admin, max_cancelled, max_disputed)` | Admin only | Sets the auto-blacklist thresholds. If a supplier's cancelled count exceeds `max_cancelled` or their disputed count exceeds `max_disputed`, they are automatically blacklisted. Setting a threshold to `0` disables that specific check. Setting both to `0` disables auto-blacklisting entirely (default).
+`get_auto_blacklist_rule() → AutoBlacklistRule` | Anyone (read-only) | Returns the current `max_cancelled` and `max_disputed` thresholds.
+
+**Interaction with manual blacklisting:**
+Auto-blacklisting operates in addition to the manual blacklist. If a supplier triggers the auto-blacklist rule, they are blocked from being assigned to new shipments just as if they had been manually blacklisted. A manual blacklist entry (`blacklist_address()`) takes precedence and will permanently block an address regardless of its reputation counters. Since reputation counters are monotonically increasing, once a supplier hits the auto-blacklist threshold, they remain blocked unless the admin increases the threshold or disables the rule.
+
 This supplier whitelist is separate from the approved-token whitelist and the
 per-milestone proof content-type whitelist.
 Arbiter Pool & Assignment
