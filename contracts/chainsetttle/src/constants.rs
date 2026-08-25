@@ -29,3 +29,8 @@ pub const LIST_SHIPMENTS_MAX_PAGE: u32 = 50;
 /// count exercised by existing tests/benchmarks so default behaviour is
 /// unchanged until an admin opts in to a different cap.
 pub const DEFAULT_MAX_MILESTONE_COUNT: u32 = 50;
+
+/// Default supermajority (basis points) of registered multisig admins
+/// required to activate/lift an emergency global freeze (#402) when the
+/// admin has not configured an override. 8000 = 80%.
+pub const DEFAULT_EMERGENCY_FREEZE_SUPERMAJORITY_BPS: u32 = 8_000;
