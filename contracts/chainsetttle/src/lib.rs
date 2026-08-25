@@ -288,6 +288,24 @@ pub struct FeeConfig {
     pub treasury: Address,
 }
 
+/// Fee recipient entry: address + basis-point share of protocol fee.
+#[contracttype]
+#[derive(Clone)]
+pub struct FeeRecipient {
+    pub recipient: Address,
+    pub share_bps: u32,
+}
+
+/// Buyer reliability tracking for supplier decision-making.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct BuyerReliability {
+    pub total_confirmations: u32,
+    pub total_confirmation_latency: u64,
+    pub disputes_lost: u32,
+    pub disputes_total: u32,
+}
+
 /// Extra shipment options passed to create_shipment to stay within the 10-parameter limit.
 #[contracttype]
 #[derive(Clone)]
@@ -883,6 +901,18 @@ pub enum DataKeyExt {
     // ── #286 Dispute evidence versioning ──────────────────────────────────
     /// Ordered list of evidence entries for a disputed milestone.
     DisputeEvidence(String, u32),
+
+    // ── Treasury revenue tracking ──────────────────────────────────────────
+    /// Cumulative fee revenue collected per token.
+    TreasuryRevenue(Address),
+
+    // ── Multi-recipient fee distribution ───────────────────────────────────
+    /// Fee recipients configuration: Vec<(Address, u32)> where u32 is basis-point share.
+    FeeRecipients,
+
+    // ── Buyer reliability tracking ─────────────────────────────────────────
+    /// Buyer reliability score and history.
+    BuyerReliability(Address),
 }
 
 // ============================================================
@@ -1415,6 +1445,96 @@ impl ChainSettleContract {
             .instance()
             .set(&DataKey::FeeConfig, &FeeConfig { fee_bps, treasury });
     }
+
+    /// Set multiple fee recipients with basis-point shares. Admin only.
+    /// Shares must sum to exactly 10000 (100%).
+    pub fn set_fee_recipients(env: Env, admin: Address, recipients: Vec<FeeRecipient>) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+
+        if recipients.is_empty() {
+            panic!("recipients cannot be empty");
+        }
+
+        // Validate shares sum to 10000
+        let mut total_share: u32 = 0;
+        for i in 0..recipients.len() {
+            let recipient = recipients.get(i).unwrap();
+            total_share = total_share.checked_add(recipient.share_bps).unwrap();
+        }
+        if total_share != 10_000 {
+            panic!("fee shares must sum to exactly 10000");
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKeyExt::FeeRecipients, &recipients);
+
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "set_fee_recipients"),
+            Symbol::new(&env, "fee_recipients_updated"),
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "fee_recipients_set"),),
+            (recipients.len(), env.ledger().sequence()),
+        );
+    }
+
+    /// Get treasury revenue collected for a specific token. Read-only.
+    pub fn get_treasury_revenue(env: Env, token: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt::TreasuryRevenue(token))
+            .unwrap_or(0)
+    }
+
+    /// Withdraw dust from contract balance that isn't allocated to active escrows. Admin only.
+    /// Amount withdrawn is bounded by: contract_balance - sum(all_active_escrow_balances).
+    pub fn withdraw_treasury_dust(
+        env: Env,
+        admin: Address,
+        token: Address,
+        to: Address,
+    ) -> i128 {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+
+        let token_client = token::Client::new(&env, &token);
+        let contract_balance = token_client.balance(&env.current_contract_address());
+
+        // Get total escrowed amount across all active shipments
+        let total_escrowed: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalEscrowed(token.clone()))
+            .unwrap_or(0);
+
+        if contract_balance <= total_escrowed {
+            panic!("no dust available");
+        }
+
+        let dust_amount = contract_balance - total_escrowed;
+
+        token_client.transfer(&env.current_contract_address(), &to, &dust_amount);
+
+        env.events().publish(
+            (Symbol::new(&env, "treasury_withdrawal"), token),
+            (to, dust_amount, env.ledger().sequence()),
+        );
+
+        dust_amount
+    }
+
+    /// Get buyer reliability score. Read-only.
+    pub fn get_buyer_reliability(env: Env, buyer: Address) -> BuyerReliability {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt::BuyerReliability(buyer))
+            .unwrap_or_default()
+    }
+
 
     pub fn set_max_concurrent_disputes(env: Env, admin: Address, limit: u32) {
         admin.require_auth();
@@ -3438,6 +3558,7 @@ impl ChainSettleContract {
             Self::check_address_outflow(&env, &shipment.supplier, payment);
 
             let milestone_deadline = milestone.deadline_ledger;
+            let proof_submitted_ledger = milestone.proof_submitted_ledger.unwrap_or(0);
             milestone.status = MilestoneStatus::Confirmed;
 
             Self::append_audit_entry(
@@ -3447,6 +3568,11 @@ impl ChainSettleContract {
                 Symbol::new(&env, "milestone_confirmed"),
                 Symbol::new(&env, "confirm_milestone"),
             );
+
+            // Update buyer reliability tracking
+            if caller_is_buyer && proof_submitted_ledger > 0 {
+                Self::update_buyer_reliability_on_confirmation(&env, &buyer, proof_submitted_ledger);
+            }
 
             shipment.milestones.set(milestone_index, milestone);
             shipment.released_amount += payment;
@@ -4627,6 +4753,11 @@ impl ChainSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
+
+        // Update buyer reliability tracking on dispute resolution
+        let primary_buyer = shipment.buyers.get(0).unwrap();
+        let buyer_won = !approve; // buyer wins if arbiter rejects supplier's proof
+        Self::update_buyer_reliability_on_dispute(&env, &primary_buyer, buyer_won);
 
         let released_amount = shipment.released_amount;
         let remaining_amount = shipment.total_amount - released_amount;
@@ -7941,6 +8072,54 @@ impl ChainSettleContract {
         }
     }
 
+    /// Update buyer reliability score on milestone confirmation.
+    fn update_buyer_reliability_on_confirmation(
+        env: &Env,
+        buyer: &Address,
+        proof_submitted_ledger: u32,
+    ) {
+        let current_ledger = env.ledger().sequence();
+        let confirmation_latency = current_ledger.saturating_sub(proof_submitted_ledger) as u64;
+
+        let key = DataKeyExt::BuyerReliability(buyer.clone());
+        let mut reliability: BuyerReliability = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_default();
+
+        reliability.total_confirmations = reliability.total_confirmations.saturating_add(1);
+        reliability.total_confirmation_latency = reliability
+            .total_confirmation_latency
+            .saturating_add(confirmation_latency);
+
+        env.storage().persistent().set(&key, &reliability);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+    }
+
+    /// Update buyer reliability score on dispute resolution.
+    fn update_buyer_reliability_on_dispute(env: &Env, buyer: &Address, buyer_won: bool) {
+        let key = DataKeyExt::BuyerReliability(buyer.clone());
+        let mut reliability: BuyerReliability = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_default();
+
+        reliability.disputes_total = reliability.disputes_total.saturating_add(1);
+        if !buyer_won {
+            reliability.disputes_lost = reliability.disputes_lost.saturating_add(1);
+        }
+
+        env.storage().persistent().set(&key, &reliability);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+    }
+
+
     // ============================================================
     // FEATURE HELPERS
     // ============================================================
@@ -8621,13 +8800,68 @@ impl ChainSettleContract {
         {
             let fee = (gross * config.fee_bps as i128) / 10_000;
             if fee > 0 {
+                // Check if multi-recipient configuration exists
+                let recipients: Option<Vec<FeeRecipient>> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKeyExt::FeeRecipients);
+
                 let token_client = token::Client::new(env, token);
-                token_client.transfer(&env.current_contract_address(), &config.treasury, &fee);
+
+                if let Some(recips) = recipients {
+                    if recips.len() == 1 {
+                        // Single recipient: use simple transfer
+                        let recipient = recips.get(0).unwrap();
+                        token_client.transfer(&env.current_contract_address(), &recipient.recipient, &fee);
+                        Self::track_treasury_revenue(env, token, fee);
+                    } else {
+                        // Multi-recipient: split pro-rata
+                        let mut distributed: i128 = 0;
+                        for i in 0..recips.len() {
+                            let recipient = recips.get(i).unwrap();
+                            let share = if i == 0 {
+                                // First recipient gets remainder from rounding
+                                fee - distributed
+                            } else {
+                                (fee * recipient.share_bps as i128) / 10_000
+                            };
+                            if share > 0 {
+                                token_client.transfer(
+                                    &env.current_contract_address(),
+                                    &recipient.recipient,
+                                    &share,
+                                );
+                                distributed += share;
+                            }
+                        }
+                        Self::track_treasury_revenue(env, token, fee);
+                    }
+                } else {
+                    // Fallback to single treasury from FeeConfig
+                    token_client.transfer(&env.current_contract_address(), &config.treasury, &fee);
+                    Self::track_treasury_revenue(env, token, fee);
+                }
+
                 *fee_out = fee;
                 return gross - fee;
             }
         }
         gross
+    }
+
+    /// Helper to track cumulative treasury revenue per token.
+    fn track_treasury_revenue(env: &Env, token: &Address, amount: i128) {
+        let key = DataKeyExt::TreasuryRevenue(token.clone());
+        let current: i128 = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(0);
+        let new_total = current + amount;
+        env.storage().persistent().set(&key, &new_total);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
     }
 
     /// #299: Deducts fee using per-shipment override first, then locked tier bps, then FeeConfig.
@@ -8654,8 +8888,48 @@ impl ChainSettleContract {
             let bps = override_bps.unwrap_or_else(|| locked_bps.unwrap_or(config.fee_bps));
             let fee = (gross * bps as i128) / 10_000;
             if fee > 0 {
+                // Check if multi-recipient configuration exists
+                let recipients: Option<Vec<FeeRecipient>> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKeyExt::FeeRecipients);
+
                 let token_client = token::Client::new(env, token);
-                token_client.transfer(&env.current_contract_address(), &config.treasury, &fee);
+
+                if let Some(recips) = recipients {
+                    if recips.len() == 1 {
+                        // Single recipient: use simple transfer
+                        let recipient = recips.get(0).unwrap();
+                        token_client.transfer(&env.current_contract_address(), &recipient.recipient, &fee);
+                        Self::track_treasury_revenue(env, token, fee);
+                    } else {
+                        // Multi-recipient: split pro-rata
+                        let mut distributed: i128 = 0;
+                        for i in 0..recips.len() {
+                            let recipient = recips.get(i).unwrap();
+                            let share = if i == 0 {
+                                // First recipient gets remainder from rounding
+                                fee - distributed
+                            } else {
+                                (fee * recipient.share_bps as i128) / 10_000
+                            };
+                            if share > 0 {
+                                token_client.transfer(
+                                    &env.current_contract_address(),
+                                    &recipient.recipient,
+                                    &share,
+                                );
+                                distributed += share;
+                            }
+                        }
+                        Self::track_treasury_revenue(env, token, fee);
+                    }
+                } else {
+                    // Fallback to single treasury from FeeConfig
+                    token_client.transfer(&env.current_contract_address(), &config.treasury, &fee);
+                    Self::track_treasury_revenue(env, token, fee);
+                }
+
                 *fee_out = fee;
                 return gross - fee;
             }
