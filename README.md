@@ -1178,3 +1178,15 @@ Contributing
 Pull requests welcome. Please run `cargo fmt` and `cargo test` before submitting.
 License
 MIT
+
+## Proof Correction (`correct_proof`)
+
+* **Authorized Callers:** Only the original submitter (or an authorized submitter role) may correct a proof.
+* **Submission Window:** Corrections are only permitted prior to block or settlement confirmation.
+* **Comparison to `submit_proof()`:** While `submit_proof()` initializes a new pending submission, `correct_proof()` updates an existing, unconfirmed proof in-place without generating a duplicate transaction record.
+
+## Proof Correction (`correct_proof`)
+
+* **Authorized Callers:** Only the original submitter (or an authorized submitter role) may correct a proof.
+* **Submission Window:** Corrections are only permitted prior to block or settlement confirmation.
+* **Comparison to `submit_proof()`:** While `submit_proof()` initializes a new pending submission, `correct_proof()` updates an existing, unconfirmed proof in-place without generating a duplicate transaction record.
