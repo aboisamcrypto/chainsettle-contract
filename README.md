@@ -106,6 +106,8 @@ pub struct Shipment {
     pub milestones: Vec<Milestone>,
     pub status: ShipmentStatus,  // Active | Completed | Cancelled
     pub created_at: u32,         // ledger sequence number
+    pub dispute_timeout_seconds: u64,   // auto-resolution deadline in seconds (0 = disabled)
+    pub default_resolution: Resolution, // Supplier or Buyer outcome on timeout
 }
 ```
 `ReputationScore`
@@ -185,10 +187,12 @@ Pending
        ├─ confirm_milestone() ──→ Confirmed  (payment released)
        ├─ raise_dispute()     ──→ Disputed (full 100%)
        │       ├─ resolve_dispute(approve=true)  ──→ Resolved (payment released)
-       │       └─ resolve_dispute(approve=false) ──→ Pending  (supplier resubmits)
+       │       ├─ resolve_dispute(approve=false) ──→ Pending  (supplier resubmits)
+       │       └─ resolve_dispute_timeout()      ──→ Resolved (default_resolution)
        └─ raise_partial_dispute() ──→ Disputed (uncontested released)
                ├─ resolve_dispute(approve=true)  ──→ Resolved (contested paid to supplier)
-               └─ resolve_dispute(approve=false) ──→ Resolved (contested refunded to buyer)
+               ├─ resolve_dispute(approve=false) ──→ Resolved (contested refunded to buyer)
+               └─ resolve_dispute_timeout()      ──→ Resolved (default_resolution)
 ```
 ---
 Contract Functions
@@ -301,6 +305,8 @@ For full disputes:
 For partial disputes:
 `approve = true` → releases contested portion to supplier (minus arbiter fee), status → `Resolved`
 `approve = false` → refunds contested portion to buyer (minus arbiter fee), status → `Resolved`
+`resolve_dispute_timeout(shipment_id, milestone_index)`
+Anyone may call this once the shipment's `dispute_timeout_seconds` has elapsed since the dispute opened without arbiter resolution. Applies the shipment's `default_resolution`: `Supplier` releases the contested amount to the supplier (minus arbiter fee); `Buyer` refunds it to the buyer. See [Dispute Auto-Resolution Timeout](#dispute-auto-resolution-timeout) below for full details.
 `check_escalation(shipment_id, milestone_index)`
 Checks whether an open dispute on a milestone has exceeded the admin-configured escalation threshold without arbiter resolution. Emits `dispute_escalated` event if the threshold is met or exceeded. Callable by anyone.
 `set_escalation_threshold(admin, threshold_ledgers: u32)`
@@ -341,6 +347,57 @@ Verifies the milestone is in `MilestoneStatus::Disputed`.
 Compares the current ledger sequence (`env.ledger().sequence()`) against `opened_ledger + threshold` (where `opened_ledger` is recorded in `dispute_opened_ledger` when the dispute was raised).
 If `current_ledger >= opened_ledger + threshold`, the contract emits a `dispute_escalated` event containing `(milestone_index, opened_ledger, current_ledger)`.
 Off-Chain Handling: The backend service (`chainsetttle-backend`) monitors `dispute_escalated` events to alert platform administrators, notify the assigned arbiter, or trigger automated resolution escalation workflows.
+Dispute Auto-Resolution Timeout
+If an arbiter fails to act on an open dispute, the dispute can stall a milestone indefinitely and freeze its payment. Each shipment configures a time-based auto-resolution fallback that lets *anyone* finalize the dispute once a deadline passes, so the buyer is never permanently blocked by an unresponsive arbiter.
+
+Configuring the timeout
+The two relevant fields are set at `create_shipment` time on the `Shipment` record (see `Shipment` struct above) and are immutable afterwards — there is no admin setter to change them:
+`dispute_timeout_seconds: u64` — the deadline, in **seconds**, measured from the ledger timestamp recorded when the dispute was raised. `0` (the default) disables auto-resolution, meaning the dispute stays frozen until the arbiter resolves it.
+`default_resolution: Resolution` — the outcome applied on timeout: `Supplier` releases the disputed funds to the supplier, `Buyer` refunds them to the buyer.
+When a buyer calls `raise_dispute` or `raise_partial_dispute`, the contract records the open time in the `DisputeOpenedAt` storage entry (this is a wall-clock timestamp in seconds — separate from the escalation threshold, which works in ledgers).
+
+Who can call it
+`resolve_dispute_timeout(shipment_id, milestone_index)` is **permissionless** — any account (buyer, supplier, arbiter, bot, or backend service) may invoke it once the window has elapsed. The caller does not need to authenticate as the arbiter. It is gated by the emergency pause circuit breaker like the rest of the shipment lifecycle.
+
+When it fires
+The call validates several preconditions and panics if any fail:
+- the shipment must be `Active`,
+- the milestone index must exist and the milestone must be in `Disputed` status,
+- `dispute_timeout_seconds` must be non-zero (otherwise `"dispute timeout not configured for this shipment"`),
+- the current ledger timestamp must be at least `opened_at + dispute_timeout_seconds` (otherwise `"DisputeTimeoutNotReached"`),
+- the opened-at timestamp must have been recorded (otherwise `"dispute opened timestamp not recorded"`).
+If the arbiter resolves the dispute first, the milestone leaves `Disputed` status and `resolve_dispute_timeout` is no longer callable for it — arbiter action always takes priority.
+
+Default outcome
+The function resolves only the **contested** portion of the milestone payment:
+- Full disputes (`raise_dispute`): the entire milestone gross payment is contested.
+- Partial disputes (`raise_partial_dispute`): only `contested_percent%` is contested (the uncontested share was already released to the supplier at dispute time), so the payout/refund is based on that slice.
+`Resolution::Supplier`:
+- The arbiter (platform) fee is deducted from the contested amount via the standard fee logic,
+- the rate-limiting circuit breaker and per-address outflow checks run before any transfer,
+- the net amount is transferred to the supplier, and the **gross** contested amount is added to `shipment.released_amount`.
+`Resolution::Buyer`:
+- The full contested amount is transferred to the primary buyer (`buyers[0]`) — no fee is deducted,
+- `released_amount` is not incremented, since nothing reaches the supplier.
+Either way, the contract's `TotalEscrowed` balance for the shipment's token is decremented by the contested amount.
+
+Side effects
+After applying the outcome:
+- the milestone status moves to `Resolved`,
+- `open_dispute_count` is decremented and `last_dispute_resolved_ledger` is recorded,
+- the entry is removed from the `ActiveDisputes` list and the temporary `DisputeOpenedAt` and `DisputeContestedPercent` storage entries are cleared,
+- two events are emitted: `dispute_auto_resolved` (`(milestone_index, resolution)` where `resolution` is `supplier` or `buyer`) and `dispute_resolved`,
+- if this was the last outstanding milestone, the shipment transitions to `Completed`, a `shipment_completed` event fires, and the supplier's `ReputationScore.completed` counter is incremented.
+
+Example — auto-resolve a stalled dispute after the timeout:
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  -- resolve_dispute_timeout \
+  --shipment_id "SHIP-001" \
+  --milestone_index 1
+```
 `get_shipment(shipment_id) → Shipment` (read-only)
 Returns the full shipment record.
 `get_milestone(shipment_id, milestone_index) → Milestone` (read-only)
@@ -387,7 +444,7 @@ or seizes funds itself.
 While paused, every function that guards on `assert_not_paused` panics
 with `"contract is paused"`. That covers the full shipment lifecycle:
 `create_shipment`, `submit_proof`, `confirm_milestone`,
-`raise_dispute`/`raise_partial_dispute`, `resolve_dispute`,
+`raise_dispute`/`raise_partial_dispute`, `resolve_dispute`, `resolve_dispute_timeout`,
 `cancel_shipment`/`supplier_cancel`, escrow top-ups, advances,
 extensions, amendments, transfers, and claims. Read-only getters,
 admin configuration setters (fees, thresholds, whitelists, etc.), and
@@ -408,7 +465,7 @@ Parameter	Description
 `limit`	Maximum cumulative outflow (in token smallest units) allowed within one window. Pass `0` to disable the circuit breaker entirely.
 `window_ledgers`	Duration of the tracking window in ledger sequences. After this many ledgers have elapsed since the window start, the counter resets automatically.
 When the breaker is active, every payment that moves tokens out of escrow
-(`confirm_milestone`, `resolve_dispute`, partial dispute uncontested
+(`confirm_milestone`, `resolve_dispute`, `resolve_dispute_timeout`, partial dispute uncontested
 release, advance payouts, claim payouts, and amendments that release
 funds) is checked against the window:
 If the current ledger has moved past `window_start + window_ledgers`,
@@ -842,6 +899,7 @@ Event name	Payload	When
 `dispute_raised`	`(shipment_id, milestone_index)`	Buyer disputes a milestone
 `partial_uncontested_released`	`(shipment_id)` topic, `(milestone_index, uncontested_amount, fee_amount)` data	Uncontested portion released immediately at partial dispute time
 `dispute_resolved`	`(shipment_id, milestone_index, approved)`	Arbiter resolves dispute
+`dispute_auto_resolved`	`(shipment_id)` topic, `(milestone_index, resolution)` data	Automatic dispute resolution triggered by `resolve_dispute_timeout` (`resolution` is `supplier` or `buyer`)
 `dispute_escalated`	`(shipment_id)` topic, `(milestone_index, opened_ledger, current_ledger)` data	Dispute open duration surpassed escalation threshold
 `escalation_threshold_set`	`threshold_ledgers`	Admin configured escalation threshold
 `shipment_cancelled`	`(shipment_id, refund_amount)`	Shipment cancelled
