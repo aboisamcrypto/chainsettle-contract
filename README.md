@@ -19,6 +19,7 @@ Allowed token list
 Invoice hash
 rebalance_milestones
 Partial Disputes & Escalation Checks
+Dispute Evidence Submission
 Advance Payment Lifecycle
 Milestone Amendment History Tracking
 Supplier Payout Batching
@@ -342,6 +343,70 @@ Verifies the milestone is in `MilestoneStatus::Disputed`.
 Compares the current ledger sequence (`env.ledger().sequence()`) against `opened_ledger + threshold` (where `opened_ledger` is recorded in `dispute_opened_ledger` when the dispute was raised).
 If `current_ledger >= opened_ledger + threshold`, the contract emits a `dispute_escalated` event containing `(milestone_index, opened_ledger, current_ledger)`.
 Off-Chain Handling: The backend service (`chainsetttle-backend`) monitors `dispute_escalated` events to alert platform administrators, notify the assigned arbiter, or trigger automated resolution escalation workflows.
+Dispute Evidence Submission
+While a milestone is in `Disputed` state, the supplier, logistics provider, and buyer can each submit supporting evidence on-chain. Evidence entries are append-only — once submitted, they cannot be overwritten or removed. The arbiter can then query all submitted evidence when resolving the dispute.
+`submit_dispute_evidence(caller, shipment_id, milestone_index, evidence_hash, evidence_type)`
+Submits a versioned evidence entry for a disputed milestone.
+```
+Parameters:
+  caller           Address   — supplier, logistics, or buyer
+  shipment_id      String    — shipment to operate on
+  milestone_index  u32       — index of the disputed milestone
+  evidence_hash    String    — IPFS CID or other off-chain evidence pointer
+  evidence_type    Symbol    — category tag (e.g. "invoice", "photo", "affidavit")
+```
+Rules:
+Only the shipment's supplier, logistics provider, or buyer may submit evidence — the arbiter and any other address are rejected with `"unauthorized"`.
+The target milestone must be in `Disputed` status. Calling while the milestone is `Pending`, `ProofSubmitted`, `Confirmed`, or `Resolved` panics with `"evidence can only be submitted while milestone is Disputed"`.
+Evidence entries are append-only. Each call adds a new entry with the caller's address, the provided hash and type, and the current ledger sequence number. There is no mechanism to edit or delete previously submitted evidence.
+There is no per-milestone cap on dispute evidence submissions. (The `MaxEvidencePerMilestone` admin setting only limits `submit_proof` resubmissions on non-disputed milestones, not dispute evidence.)
+Evidence persists on-chain after the dispute is resolved and remains queryable via `get_dispute_evidence`.
+Emits `dispute_evidence_submitted` with `(milestone_index, caller, evidence_hash, evidence_type)`.
+`get_dispute_evidence(shipment_id, milestone_index) → Vec<DisputeEvidence>` (read-only)
+Returns all evidence entries for a disputed milestone in submission order. Returns an empty vector if no evidence has been submitted. Callable by anyone.
+`DisputeEvidence` struct:
+```rust
+pub struct DisputeEvidence {
+    pub submitter: Address,       // who submitted this entry
+    pub evidence_hash: String,    // IPFS CID or off-chain pointer
+    pub evidence_type: Symbol,    // category tag (e.g. "invoice", "photo")
+    pub submitted_ledger: u32,    // ledger sequence at submission time
+}
+```
+Example — both sides submit evidence during a dispute:
+```bash
+# Supplier submits an invoice as evidence
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source supplier-account \
+  --network testnet \
+  -- submit_dispute_evidence \
+  --caller <SUPPLIER_ADDRESS> \
+  --shipment_id "SHIP-001" \
+  --milestone_index 0 \
+  --evidence_hash "ipfs://QmSupplierInvoice123" \
+  --evidence_type invoice
+
+# Buyer submits a photo as counter-evidence
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source buyer-account \
+  --network testnet \
+  -- submit_dispute_evidence \
+  --caller <BUYER_ADDRESS> \
+  --shipment_id "SHIP-001" \
+  --milestone_index 0 \
+  --evidence_hash "ipfs://QmBuyerPhoto456" \
+  --evidence_type photo
+
+# Query all evidence for this milestone
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  -- get_dispute_evidence \
+  --shipment_id "SHIP-001" \
+  --milestone_index 0
+```
 `get_shipment(shipment_id) → Shipment` (read-only)
 Returns the full shipment record.
 `get_milestone(shipment_id, milestone_index) → Milestone` (read-only)
@@ -961,6 +1026,7 @@ Event name	Payload	When
 `partial_uncontested_released`	`(shipment_id)` topic, `(milestone_index, uncontested_amount, fee_amount)` data	Uncontested portion released immediately at partial dispute time
 `dispute_resolved`	`(shipment_id, milestone_index, approved)`	Arbiter resolves dispute
 `dispute_escalated`	`(shipment_id)` topic, `(milestone_index, opened_ledger, current_ledger)` data	Dispute open duration surpassed escalation threshold
+`dispute_evidence_submitted`	`(shipment_id)` topic, `(milestone_index, caller, evidence_hash, evidence_type)` data	Evidence submitted for a disputed milestone
 `escalation_threshold_set`	`threshold_ledgers`	Admin configured escalation threshold
 `shipment_cancelled`	`(shipment_id, refund_amount)`	Shipment cancelled
 `milestones_rebalanced`	`(buyer, new_percents)`	Buyer rebalanced milestone percentages
