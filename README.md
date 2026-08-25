@@ -302,6 +302,10 @@ For full disputes:
 For partial disputes:
 `approve = true` → releases contested portion to supplier (minus arbiter fee), status → `Resolved`
 `approve = false` → refunds contested portion to buyer (minus arbiter fee), status → `Resolved`
+
+`batch_resolve_disputes(arbiter, resolutions: Vec<(String, u32, bool)>)`
+Resolves multiple disputes across one or more shipments in a single transaction. The `resolutions` list contains tuples of `(shipment_id, milestone_index, approve)`. Functionally equivalent to calling `resolve_dispute` for each entry, but saves transaction fees and network round-trips. 
+**Partial-Failure Behaviour:** This operation is atomic. All entries in the batch are validated before any state is mutated. If any single entry is invalid (e.g., the shipment is not active, the milestone is not in `Disputed` status, the caller is not the assigned arbiter, or the index is out of bounds), the entire transaction reverts and no disputes are resolved.
 `check_escalation(shipment_id, milestone_index)`
 Checks whether an open dispute on a milestone has exceeded the admin-configured escalation threshold without arbiter resolution. Emits `dispute_escalated` event if the threshold is met or exceeded. Callable by anyone.
 `set_escalation_threshold(admin, threshold_ledgers: u32)`
