@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 299160ec7a6904d9f83ad5835eb4ee35eb6a681d12f6db358c61a5d93d3257eb # shrinks to coll_units = 1937274867370, debt_units = 1484758647637, price_coll = 305187948, price_debt = 362802973, thr = 4556, (base, max, cap) = (699, 942, 1000), mode = Specified(2)
+cc caad942bd6a7b0f00c6928f9ab4e3e226018bf74d79951d081a5ba04c70b7fa9 # shrinks to coll_units = 0, debt_units = 1, price_coll = 1, price_debt = 100000000, thr = 1000, (base, max, cap) = (562, 2001, 2001), mode = PartialToTarget

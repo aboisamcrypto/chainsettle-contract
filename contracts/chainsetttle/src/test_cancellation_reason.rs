@@ -165,7 +165,8 @@ fn test_deadline_refund_reason() {
     t.env.ledger().with_mut(|li| li.timestamp = 2_000);
     client.claim_deadline_refund(&t.buyer, &shipment_id, &0);
 
-    let data = find_cancelled_event(&t.env).expect("shipment_cancelled must fire on deadline refund");
+    let data =
+        find_cancelled_event(&t.env).expect("shipment_cancelled must fire on deadline refund");
     assert_eq!(
         event_reason(&t.env, &data),
         Symbol::new(&t.env, "DeadlineRefund")

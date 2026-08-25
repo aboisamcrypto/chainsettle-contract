@@ -21,7 +21,13 @@ fn proof_type(env: &soroban_sdk::Env) -> Symbol {
 /// Drives all three milestones of a standard shipment to Confirmed, completing it.
 fn complete_shipment(t: &TestSetup, client: &ChainSettleContractClient, ship_id: &String) {
     for i in 0..3u32 {
-        client.submit_proof(&t.supplier, ship_id, &i, &proof_hash(&t.env), &proof_type(&t.env));
+        client.submit_proof(
+            &t.supplier,
+            ship_id,
+            &i,
+            &proof_hash(&t.env),
+            &proof_type(&t.env),
+        );
         client.confirm_milestone(&t.buyer, ship_id, &i);
     }
 }
@@ -36,8 +42,15 @@ fn test_buyer_tops_up_active_shipment_increases_total_amount() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let ship_id = sid(&t.env, "ship1");
     create_standard_shipment(
-        &client, &t.env, &ship_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, 1_000_000,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        1_000_000,
     );
 
     client.top_up_escrow(&t.buyer, &ship_id, &500_000);
@@ -53,8 +66,15 @@ fn test_top_up_total_amount_increases_correctly_across_multiple_calls() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let ship_id = sid(&t.env, "ship1");
     create_standard_shipment(
-        &client, &t.env, &ship_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, 1_000_000,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        1_000_000,
     );
 
     client.top_up_escrow(&t.buyer, &ship_id, &200_000);
@@ -71,8 +91,15 @@ fn test_top_up_rejected_for_non_buyer_caller() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let ship_id = sid(&t.env, "ship1");
     create_standard_shipment(
-        &client, &t.env, &ship_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, 1_000_000,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        1_000_000,
     );
 
     client.top_up_escrow(&t.supplier, &ship_id, &500_000);
@@ -85,8 +112,15 @@ fn test_top_up_rejected_on_cancelled_shipment() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let ship_id = sid(&t.env, "ship1");
     create_standard_shipment(
-        &client, &t.env, &ship_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, 1_000_000,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        1_000_000,
     );
 
     client.cancel_shipment(&t.buyer, &ship_id);
@@ -100,12 +134,22 @@ fn test_top_up_rejected_on_completed_shipment() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let ship_id = sid(&t.env, "ship1");
     create_standard_shipment(
-        &client, &t.env, &ship_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, 1_000_000,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        1_000_000,
     );
 
     complete_shipment(&t, &client, &ship_id);
-    assert_eq!(client.get_shipment(&ship_id).status, ShipmentStatus::Completed);
+    assert_eq!(
+        client.get_shipment(&ship_id).status,
+        ShipmentStatus::Completed
+    );
 
     client.top_up_escrow(&t.buyer, &ship_id, &500_000);
 }
@@ -117,8 +161,15 @@ fn test_top_up_rejects_non_positive_amount() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let ship_id = sid(&t.env, "ship1");
     create_standard_shipment(
-        &client, &t.env, &ship_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, 1_000_000,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        1_000_000,
     );
 
     client.top_up_escrow(&t.buyer, &ship_id, &0);

@@ -284,8 +284,8 @@ mod contract_prop_tests {
                 release_after_ledger: 0,
                 proof_submitted_ledger: None,
                 dispute_opened_ledger: None,
-            deadline_ledger: 0,
-            penalty_bps_per_ledger: 0,
+                deadline_ledger: 0,
+                penalty_bps_per_ledger: 0,
             },
             Milestone {
                 name: String::from_str(env, "M1"),
@@ -295,8 +295,8 @@ mod contract_prop_tests {
                 release_after_ledger: 0,
                 proof_submitted_ledger: None,
                 dispute_opened_ledger: None,
-            deadline_ledger: 0,
-            penalty_bps_per_ledger: 0,
+                deadline_ledger: 0,
+                penalty_bps_per_ledger: 0,
             },
         ];
         client.create_shipment(
@@ -599,10 +599,17 @@ mod milestone_percent_fuzz {
             let supplier = Address::generate(&env);
             let logistics = Address::generate(&env);
             let arbiter = Address::generate(&env);
-            token::StellarAssetClient::new(&env, &token_id)
-                .mint(&buyer, &100_000_000_000i128);
+            token::StellarAssetClient::new(&env, &token_id).mint(&buyer, &100_000_000_000i128);
             ChainSettleContractClient::new(&env, &contract_id).init(&buyer);
-            (env, contract_id, token_id, buyer, supplier, logistics, arbiter)
+            (
+                env,
+                contract_id,
+                token_id,
+                buyer,
+                supplier,
+                logistics,
+                arbiter,
+            )
         }
 
         fn default_options(env: &Env) -> ShipmentOptions {
@@ -643,8 +650,8 @@ mod milestone_percent_fuzz {
                 release_after_ledger: 0,
                 proof_submitted_ledger: None,
                 dispute_opened_ledger: None,
-            deadline_ledger: 0,
-            penalty_bps_per_ledger: 0,
+                deadline_ledger: 0,
+                penalty_bps_per_ledger: 0,
             }
         }
 

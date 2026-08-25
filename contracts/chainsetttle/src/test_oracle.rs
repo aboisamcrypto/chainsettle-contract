@@ -495,7 +495,10 @@ fn test_oracle_pattern_shipment_lifecycle_oracle_verified() {
     client.batch_confirm_milestones(&setup.buyer, &shipment_id, &idx);
 
     let balance = token_client.balance(&setup.supplier);
-    assert!(balance > 0, "Supplier should receive payment for milestone 0");
+    assert!(
+        balance > 0,
+        "Supplier should receive payment for milestone 0"
+    );
 
     // Milestone 1: Transit
     client.submit_proof(
