@@ -1178,3 +1178,14 @@ Contributing
 Pull requests welcome. Please run `cargo fmt` and `cargo test` before submitting.
 License
 MIT
+
+
+### Shipment Party Reassignment
+
+The contract allows updating the active buyer or supplier on a shipment using `transfer_buyer()` and `transfer_supplier()`.
+
+- **Authorization**: Only the current role holder (or authorized contract admin/super-arbiter, depending on configuration) can initiate the transfer to a new address.
+- **In-flight Milestones & Disputes**: Active milestones and ongoing disputes remain tied to the shipment state, but authorization for approving deliverables, withdrawing payouts, or voting on dispute resolutions transfers immediately to the new account.
+- **Events Emitted**:
+  - `BuyerTransferred(shipment_id, old_buyer, new_buyer)`
+  - `SupplierTransferred(shipment_id, old_supplier, new_supplier)`
