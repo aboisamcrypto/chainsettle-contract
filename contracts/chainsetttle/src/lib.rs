@@ -288,6 +288,24 @@ pub struct FeeConfig {
     pub treasury: Address,
 }
 
+/// Fee recipient entry: address + basis-point share of protocol fee.
+#[contracttype]
+#[derive(Clone)]
+pub struct FeeRecipient {
+    pub recipient: Address,
+    pub share_bps: u32,
+}
+
+/// Buyer reliability tracking for supplier decision-making.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct BuyerReliability {
+    pub total_confirmations: u32,
+    pub total_confirmation_latency: u64,
+    pub disputes_lost: u32,
+    pub disputes_total: u32,
+}
+
 /// Extra shipment options passed to create_shipment to stay within the 10-parameter limit.
 #[contracttype]
 #[derive(Clone)]
@@ -883,6 +901,42 @@ pub enum DataKeyExt {
     // ── #286 Dispute evidence versioning ──────────────────────────────────
     /// Ordered list of evidence entries for a disputed milestone.
     DisputeEvidence(String, u32),
+
+    // ── Treasury revenue tracking ──────────────────────────────────────────
+    /// Cumulative fee revenue collected per token.
+    TreasuryRevenue(Address),
+
+    // ── Multi-recipient fee distribution ───────────────────────────────────
+    /// Fee recipients configuration: Vec<(Address, u32)> where u32 is basis-point share.
+    FeeRecipients,
+
+    // ── Buyer reliability tracking ─────────────────────────────────────────
+    /// Buyer reliability score and history.
+    BuyerReliability(Address),
+}
+
+// `DataKeyExt` is itself now at the 50-case XDR cap, so newer storage keys
+// live here.
+#[contracttype]
+pub enum DataKeyExt2 {
+    // ── #364 Configurable max milestone count ───────────────────────────
+    /// Admin-configured cap on milestones per shipment (0/unset = use
+    /// constants::DEFAULT_MAX_MILESTONE_COUNT).
+    MaxMilestoneCount,
+
+    // ── #362 Per-token min/max shipment value ───────────────────────────
+    /// Per-token minimum shipment value override; absent = fall back to
+    /// the global DataKey::MinShipmentValue.
+    TokenMinShipmentValue(Address),
+    /// Per-token maximum shipment value override; absent = fall back to
+    /// the global DataKey::MaxShipmentValue.
+    TokenMaxShipmentValue(Address),
+
+    // ── #365 Named milestone template library ───────────────────────────
+    /// Saved milestone template: (creator, name) -> Vec<Milestone>.
+    MilestoneTemplate(Address, String),
+    /// Index of template names saved by a given creator, for listing.
+    MilestoneTemplateNames(Address),
 }
 
 // ============================================================
@@ -1415,6 +1469,96 @@ impl ChainSettleContract {
             .instance()
             .set(&DataKey::FeeConfig, &FeeConfig { fee_bps, treasury });
     }
+
+    /// Set multiple fee recipients with basis-point shares. Admin only.
+    /// Shares must sum to exactly 10000 (100%).
+    pub fn set_fee_recipients(env: Env, admin: Address, recipients: Vec<FeeRecipient>) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+
+        if recipients.is_empty() {
+            panic!("recipients cannot be empty");
+        }
+
+        // Validate shares sum to 10000
+        let mut total_share: u32 = 0;
+        for i in 0..recipients.len() {
+            let recipient = recipients.get(i).unwrap();
+            total_share = total_share.checked_add(recipient.share_bps).unwrap();
+        }
+        if total_share != 10_000 {
+            panic!("fee shares must sum to exactly 10000");
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKeyExt::FeeRecipients, &recipients);
+
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "set_fee_recipients"),
+            Symbol::new(&env, "fee_recipients_updated"),
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "fee_recipients_set"),),
+            (recipients.len(), env.ledger().sequence()),
+        );
+    }
+
+    /// Get treasury revenue collected for a specific token. Read-only.
+    pub fn get_treasury_revenue(env: Env, token: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt::TreasuryRevenue(token))
+            .unwrap_or(0)
+    }
+
+    /// Withdraw dust from contract balance that isn't allocated to active escrows. Admin only.
+    /// Amount withdrawn is bounded by: contract_balance - sum(all_active_escrow_balances).
+    pub fn withdraw_treasury_dust(
+        env: Env,
+        admin: Address,
+        token: Address,
+        to: Address,
+    ) -> i128 {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+
+        let token_client = token::Client::new(&env, &token);
+        let contract_balance = token_client.balance(&env.current_contract_address());
+
+        // Get total escrowed amount across all active shipments
+        let total_escrowed: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalEscrowed(token.clone()))
+            .unwrap_or(0);
+
+        if contract_balance <= total_escrowed {
+            panic!("no dust available");
+        }
+
+        let dust_amount = contract_balance - total_escrowed;
+
+        token_client.transfer(&env.current_contract_address(), &to, &dust_amount);
+
+        env.events().publish(
+            (Symbol::new(&env, "treasury_withdrawal"), token),
+            (to, dust_amount, env.ledger().sequence()),
+        );
+
+        dust_amount
+    }
+
+    /// Get buyer reliability score. Read-only.
+    pub fn get_buyer_reliability(env: Env, buyer: Address) -> BuyerReliability {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt::BuyerReliability(buyer))
+            .unwrap_or_default()
+    }
+
 
     pub fn set_max_concurrent_disputes(env: Env, admin: Address, limit: u32) {
         admin.require_auth();
@@ -2241,13 +2385,36 @@ impl ChainSettleContract {
         // Batch read all validation config and stats in a single context fetch.
         let ctx = Self::fetch_create_shipment_ctx(&env);
 
-        if ctx.max_value > 0 && total_amount > ctx.max_value {
+        // #362: Per-token bounds override the global bound when configured;
+        // tokens without an override fall back to the existing global bound.
+        let effective_max_value: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::TokenMaxShipmentValue(token.clone()))
+            .unwrap_or(ctx.max_value);
+        if effective_max_value > 0 && total_amount > effective_max_value {
             panic!("total amount exceeds maximum shipment value");
         }
 
-        // #42: Enforce minimum shipment value floor (0 = disabled).
-        if ctx.min_value > 0 && total_amount < ctx.min_value {
+        // #42 / #362: Enforce minimum shipment value floor (0 = disabled),
+        // using the per-token override when one is configured.
+        let effective_min_value: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::TokenMinShipmentValue(token.clone()))
+            .unwrap_or(ctx.min_value);
+        if effective_min_value > 0 && total_amount < effective_min_value {
             panic!("MinShipmentValueNotMet");
+        }
+
+        // #364: Enforce the configured maximum milestone count per shipment.
+        let max_milestone_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::MaxMilestoneCount)
+            .unwrap_or(constants::DEFAULT_MAX_MILESTONE_COUNT);
+        if milestones.len() > max_milestone_count {
+            panic!("TooManyMilestones");
         }
 
         // Enforce token whitelist when non-empty (#161: multi-token support — XLM, EURC,
@@ -3438,6 +3605,7 @@ impl ChainSettleContract {
             Self::check_address_outflow(&env, &shipment.supplier, payment);
 
             let milestone_deadline = milestone.deadline_ledger;
+            let proof_submitted_ledger = milestone.proof_submitted_ledger.unwrap_or(0);
             milestone.status = MilestoneStatus::Confirmed;
 
             Self::append_audit_entry(
@@ -3447,6 +3615,11 @@ impl ChainSettleContract {
                 Symbol::new(&env, "milestone_confirmed"),
                 Symbol::new(&env, "confirm_milestone"),
             );
+
+            // Update buyer reliability tracking
+            if caller_is_buyer && proof_submitted_ledger > 0 {
+                Self::update_buyer_reliability_on_confirmation(&env, &buyer, proof_submitted_ledger);
+            }
 
             shipment.milestones.set(milestone_index, milestone);
             shipment.released_amount += payment;
@@ -4627,6 +4800,11 @@ impl ChainSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
+
+        // Update buyer reliability tracking on dispute resolution
+        let primary_buyer = shipment.buyers.get(0).unwrap();
+        let buyer_won = !approve; // buyer wins if arbiter rejects supplier's proof
+        Self::update_buyer_reliability_on_dispute(&env, &primary_buyer, buyer_won);
 
         let released_amount = shipment.released_amount;
         let remaining_amount = shipment.total_amount - released_amount;
@@ -6259,6 +6437,37 @@ impl ChainSettleContract {
     // ADMIN: LONG-HOLD ESCROW REBATE (#300)
     // ----------------------------------------------------------
 
+    /// Configure the long-hold escrow rebate (admin-only).
+    ///
+    /// Stores a `(threshold_ledgers, rebate_bps)` tuple on instance storage and
+    /// emits a `long_hold_rebate_set` event.
+    ///
+    /// * `threshold_ledgers` — the minimum age, measured in ledger sequences
+    ///   since the shipment was created (`current_ledger - Shipment.created_at`),
+    ///   that a shipment must reach before the rebate can apply. `0` disables the
+    ///   threshold and therefore the rebate.
+    /// * `rebate_bps` — the share of the platform fee that is given back to the
+    ///   supplier, expressed in basis points (`1 bps = 0.01%`, `10_000 bps = 100%`).
+    ///   `0` disables the rebate.
+    ///
+    /// The rebate is applied inside `confirm_milestone` on the immediate-release
+    /// path (no holdback): if the shipment's ledger age is at least
+    /// `threshold_ledgers` AND a platform fee was actually charged, then
+    /// `rebate = fee_amount * rebate_bps / 10_000` is added back to the supplier's
+    /// net payment and removed from the fee reported for the milestone.
+    ///
+    /// Both values must be non-zero for the rebate to take effect.
+    ///
+    /// ```text
+    /// Worked example: set_long_hold_rebate(admin, 1000, 1000)
+    ///   fee_bps       = 100  (1% platform fee)
+    ///   payout        = 1_000_000
+    ///   fee_amount    = 1_000_000 * 100 / 10_000   = 10_000
+    ///   shipment age  = 3200 - 2000                = 1200   (>= 1000, threshold met)
+    ///   rebate        = 10_000 * 1000 / 10_000     = 1_000
+    ///   supplier net  = 990_000 + 1_000            = 991_000
+    ///   effective fee = 10_000 - 1_000             = 9_000  (0.9% instead of 1%)
+    /// ```
     pub fn set_long_hold_rebate(env: Env, admin: Address, threshold_ledgers: u32, rebate_bps: u32) {
         admin.require_auth();
         Self::assert_admin(&env, &admin);
@@ -6272,6 +6481,11 @@ impl ChainSettleContract {
         );
     }
 
+    /// Read the current long-hold escrow rebate configuration (read-only).
+    ///
+    /// Returns the `(threshold_ledgers, rebate_bps)` tuple stored by
+    /// `set_long_hold_rebate`, or `(0, 0)` if the rebate has never been
+    /// configured (i.e. the rebate is disabled by default).
     pub fn get_long_hold_rebate(env: Env) -> (u32, u32) {
         env.storage()
             .instance()
@@ -6392,9 +6606,14 @@ impl ChainSettleContract {
     // ----------------------------------------------------------
 
     /// Cast a vote on an open panel dispute. Only callable by a member of the shipment's
-    /// arbiter panel. Each panel member may vote exactly once per dispute.
-    /// When a simple majority (`> panel.len() / 2`) agree, the dispute resolves automatically
-    /// using the same payout logic as `resolve_dispute`.
+    /// arbiter panel. Each panel member may vote exactly once for the milestone dispute.
+    /// A panel contains the addresses supplied in `ShipmentOptions::arbiter_panel` when the
+    /// shipment is created; panel mode requires at least three members.
+    /// A quorum is a simple majority: `panel.len() / 2 + 1` votes in the same direction.
+    /// When that threshold is reached, the dispute resolves automatically using the same
+    /// payout logic as `resolve_dispute`: `approve = true` resolves for the supplier and
+    /// `approve = false` resolves for the buyer. Until a majority is reached, including a
+    /// tie or an incomplete vote, the dispute remains open.
     pub fn cast_dispute_vote(
         env: Env,
         arbiter: Address,
@@ -6729,7 +6948,10 @@ impl ChainSettleContract {
         Self::emit_dispute_resolved(env, &shipment_id, milestone_index, resolution, &resolver);
     }
 
-    /// Returns the current votes for a panel dispute.
+    /// Returns the current votes for a panel dispute identified by shipment and milestone.
+    /// Each entry contains the panel member and their direction (`approve = true` for the
+    /// supplier, `approve = false` for the buyer). The vector is empty before any votes are
+    /// cast and after a majority automatically resolves the dispute.
     pub fn get_dispute_votes(env: Env, shipment_id: String, milestone_index: u32) -> Vec<DisputeVote> {
         env.storage()
             .persistent()
@@ -6737,7 +6959,9 @@ impl ChainSettleContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
-    /// Returns the arbiter panel for a shipment (empty vec = single-arbiter mode).
+    /// Returns the arbiter panel for a shipment, in the order supplied at creation.
+    /// Panel members are the addresses that may vote; panel mode requires at least three
+    /// non-blacklisted members. An empty vector means the shipment uses a single arbiter.
     pub fn get_arbiter_panel(env: Env, shipment_id: String) -> Vec<Address> {
         env.storage()
             .persistent()
@@ -7905,6 +8129,54 @@ impl ChainSettleContract {
         }
     }
 
+    /// Update buyer reliability score on milestone confirmation.
+    fn update_buyer_reliability_on_confirmation(
+        env: &Env,
+        buyer: &Address,
+        proof_submitted_ledger: u32,
+    ) {
+        let current_ledger = env.ledger().sequence();
+        let confirmation_latency = current_ledger.saturating_sub(proof_submitted_ledger) as u64;
+
+        let key = DataKeyExt::BuyerReliability(buyer.clone());
+        let mut reliability: BuyerReliability = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_default();
+
+        reliability.total_confirmations = reliability.total_confirmations.saturating_add(1);
+        reliability.total_confirmation_latency = reliability
+            .total_confirmation_latency
+            .saturating_add(confirmation_latency);
+
+        env.storage().persistent().set(&key, &reliability);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+    }
+
+    /// Update buyer reliability score on dispute resolution.
+    fn update_buyer_reliability_on_dispute(env: &Env, buyer: &Address, buyer_won: bool) {
+        let key = DataKeyExt::BuyerReliability(buyer.clone());
+        let mut reliability: BuyerReliability = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_default();
+
+        reliability.disputes_total = reliability.disputes_total.saturating_add(1);
+        if !buyer_won {
+            reliability.disputes_lost = reliability.disputes_lost.saturating_add(1);
+        }
+
+        env.storage().persistent().set(&key, &reliability);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+    }
+
+
     // ============================================================
     // FEATURE HELPERS
     // ============================================================
@@ -8585,13 +8857,68 @@ impl ChainSettleContract {
         {
             let fee = (gross * config.fee_bps as i128) / 10_000;
             if fee > 0 {
+                // Check if multi-recipient configuration exists
+                let recipients: Option<Vec<FeeRecipient>> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKeyExt::FeeRecipients);
+
                 let token_client = token::Client::new(env, token);
-                token_client.transfer(&env.current_contract_address(), &config.treasury, &fee);
+
+                if let Some(recips) = recipients {
+                    if recips.len() == 1 {
+                        // Single recipient: use simple transfer
+                        let recipient = recips.get(0).unwrap();
+                        token_client.transfer(&env.current_contract_address(), &recipient.recipient, &fee);
+                        Self::track_treasury_revenue(env, token, fee);
+                    } else {
+                        // Multi-recipient: split pro-rata
+                        let mut distributed: i128 = 0;
+                        for i in 0..recips.len() {
+                            let recipient = recips.get(i).unwrap();
+                            let share = if i == 0 {
+                                // First recipient gets remainder from rounding
+                                fee - distributed
+                            } else {
+                                (fee * recipient.share_bps as i128) / 10_000
+                            };
+                            if share > 0 {
+                                token_client.transfer(
+                                    &env.current_contract_address(),
+                                    &recipient.recipient,
+                                    &share,
+                                );
+                                distributed += share;
+                            }
+                        }
+                        Self::track_treasury_revenue(env, token, fee);
+                    }
+                } else {
+                    // Fallback to single treasury from FeeConfig
+                    token_client.transfer(&env.current_contract_address(), &config.treasury, &fee);
+                    Self::track_treasury_revenue(env, token, fee);
+                }
+
                 *fee_out = fee;
                 return gross - fee;
             }
         }
         gross
+    }
+
+    /// Helper to track cumulative treasury revenue per token.
+    fn track_treasury_revenue(env: &Env, token: &Address, amount: i128) {
+        let key = DataKeyExt::TreasuryRevenue(token.clone());
+        let current: i128 = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(0);
+        let new_total = current + amount;
+        env.storage().persistent().set(&key, &new_total);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
     }
 
     /// #299: Deducts fee using per-shipment override first, then locked tier bps, then FeeConfig.
@@ -8618,8 +8945,48 @@ impl ChainSettleContract {
             let bps = override_bps.unwrap_or_else(|| locked_bps.unwrap_or(config.fee_bps));
             let fee = (gross * bps as i128) / 10_000;
             if fee > 0 {
+                // Check if multi-recipient configuration exists
+                let recipients: Option<Vec<FeeRecipient>> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKeyExt::FeeRecipients);
+
                 let token_client = token::Client::new(env, token);
-                token_client.transfer(&env.current_contract_address(), &config.treasury, &fee);
+
+                if let Some(recips) = recipients {
+                    if recips.len() == 1 {
+                        // Single recipient: use simple transfer
+                        let recipient = recips.get(0).unwrap();
+                        token_client.transfer(&env.current_contract_address(), &recipient.recipient, &fee);
+                        Self::track_treasury_revenue(env, token, fee);
+                    } else {
+                        // Multi-recipient: split pro-rata
+                        let mut distributed: i128 = 0;
+                        for i in 0..recips.len() {
+                            let recipient = recips.get(i).unwrap();
+                            let share = if i == 0 {
+                                // First recipient gets remainder from rounding
+                                fee - distributed
+                            } else {
+                                (fee * recipient.share_bps as i128) / 10_000
+                            };
+                            if share > 0 {
+                                token_client.transfer(
+                                    &env.current_contract_address(),
+                                    &recipient.recipient,
+                                    &share,
+                                );
+                                distributed += share;
+                            }
+                        }
+                        Self::track_treasury_revenue(env, token, fee);
+                    }
+                } else {
+                    // Fallback to single treasury from FeeConfig
+                    token_client.transfer(&env.current_contract_address(), &config.treasury, &fee);
+                    Self::track_treasury_revenue(env, token, fee);
+                }
+
                 *fee_out = fee;
                 return gross - fee;
             }
@@ -8877,6 +9244,249 @@ impl ChainSettleContract {
             data,
         );
     }
+
+    // ----------------------------------------------------------
+    // #364: ADMIN — CONFIGURABLE MAX MILESTONE COUNT
+    // ----------------------------------------------------------
+
+    /// Set the maximum number of milestones allowed per shipment. Existing
+    /// shipments created under a previous cap remain valid — the cap is only
+    /// enforced at `create_shipment` time.
+    pub fn set_max_milestone_count(env: Env, admin: Address, count: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        if count == 0 {
+            panic!("InvalidMilestoneCount");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::MaxMilestoneCount, &count);
+        env.events()
+            .publish((Symbol::new(&env, "max_milestone_count_set"),), count);
+    }
+
+    /// Read the currently configured max milestone count (falls back to
+    /// `constants::DEFAULT_MAX_MILESTONE_COUNT` when unset).
+    pub fn get_max_milestone_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt2::MaxMilestoneCount)
+            .unwrap_or(constants::DEFAULT_MAX_MILESTONE_COUNT)
+    }
+
+    // ----------------------------------------------------------
+    // #362: ADMIN — PER-TOKEN MIN/MAX SHIPMENT VALUE
+    // ----------------------------------------------------------
+
+    pub fn set_token_min_shipment_value(env: Env, admin: Address, token: Address, min_amount: i128) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        if min_amount < 0 {
+            panic!("InvalidAmount");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::TokenMinShipmentValue(token.clone()), &min_amount);
+        env.events().publish(
+            (Symbol::new(&env, "token_min_shipment_value_set"), token),
+            min_amount,
+        );
+    }
+
+    /// Clear a per-token minimum override so the token falls back to the
+    /// global `min_shipment_value` bound.
+    pub fn clear_token_min_shipment_value(env: Env, admin: Address, token: Address) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .remove(&DataKeyExt2::TokenMinShipmentValue(token.clone()));
+        env.events()
+            .publish((Symbol::new(&env, "token_min_shipment_value_cleared"),), token);
+    }
+
+    /// Returns the per-token minimum override, or `None` if the token falls
+    /// back to the global bound.
+    pub fn get_token_min_shipment_value(env: Env, token: Address) -> Option<i128> {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt2::TokenMinShipmentValue(token))
+    }
+
+    pub fn set_token_max_shipment_value(env: Env, admin: Address, token: Address, max_value: i128) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        if max_value < 0 {
+            panic!("InvalidAmount");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::TokenMaxShipmentValue(token.clone()), &max_value);
+        env.events().publish(
+            (Symbol::new(&env, "token_max_shipment_value_set"), token),
+            max_value,
+        );
+    }
+
+    /// Clear a per-token maximum override so the token falls back to the
+    /// global `max_shipment_value` bound.
+    pub fn clear_token_max_shipment_value(env: Env, admin: Address, token: Address) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .remove(&DataKeyExt2::TokenMaxShipmentValue(token.clone()));
+        env.events()
+            .publish((Symbol::new(&env, "token_max_shipment_value_cleared"),), token);
+    }
+
+    /// Returns the per-token maximum override, or `None` if the token falls
+    /// back to the global bound.
+    pub fn get_token_max_shipment_value(env: Env, token: Address) -> Option<i128> {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt2::TokenMaxShipmentValue(token))
+    }
+
+    // ----------------------------------------------------------
+    // #365: NAMED MILESTONE TEMPLATE LIBRARY
+    // ----------------------------------------------------------
+
+    /// Save a reusable, named milestone set for `creator`. Templates are
+    /// namespaced per creator address, so two creators may reuse the same
+    /// template name independently without colliding.
+    pub fn save_milestone_template(env: Env, creator: Address, name: String, milestones: Vec<Milestone>) {
+        creator.require_auth();
+        Self::assert_not_paused(&env);
+
+        if milestones.is_empty() {
+            panic!("EmptyMilestoneTemplate");
+        }
+
+        let max_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::MaxMilestoneCount)
+            .unwrap_or(constants::DEFAULT_MAX_MILESTONE_COUNT);
+        if milestones.len() > max_count {
+            panic!("TooManyMilestones");
+        }
+
+        let min_pct: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinMilestonePercent)
+            .unwrap_or(5u32);
+        let mut total_percent: u32 = 0;
+        for i in 0..milestones.len() {
+            let percent = milestones.get(i).unwrap().payment_percent;
+            if percent < min_pct {
+                panic!("InvalidPercentages");
+            }
+            total_percent += percent;
+        }
+        if total_percent != 100 {
+            panic!("milestone percentages must sum to 100");
+        }
+
+        // Normalise: strip any caller-supplied runtime state so every shipment
+        // created from this template starts from a clean Pending milestone.
+        let mut clean_milestones: Vec<Milestone> = Vec::new(&env);
+        for i in 0..milestones.len() {
+            let mut m = milestones.get(i).unwrap();
+            m.status = MilestoneStatus::Pending;
+            m.proof_hash = String::from_str(&env, "");
+            m.release_after_ledger = 0;
+            m.proof_submitted_ledger = None;
+            m.dispute_opened_ledger = None;
+            clean_milestones.push_back(m);
+        }
+
+        let template_key = DataKeyExt2::MilestoneTemplate(creator.clone(), name.clone());
+        let is_new = !env.storage().persistent().has(&template_key);
+        env.storage().persistent().set(&template_key, &clean_milestones);
+        env.storage().persistent().extend_ttl(
+            &template_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+
+        if is_new {
+            let names_key = DataKeyExt2::MilestoneTemplateNames(creator.clone());
+            let mut names: Vec<String> = env
+                .storage()
+                .persistent()
+                .get(&names_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            names.push_back(name.clone());
+            env.storage().persistent().set(&names_key, &names);
+            env.storage().persistent().extend_ttl(
+                &names_key,
+                constants::TTL_INITIAL_LEDGERS,
+                constants::TTL_MAX_LEDGERS,
+            );
+        }
+
+        env.events()
+            .publish((Symbol::new(&env, "milestone_template_saved"), creator), name);
+    }
+
+    /// List the names of all milestone templates saved by `creator`.
+    pub fn list_milestone_templates(env: Env, creator: Address) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::MilestoneTemplateNames(creator))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Fetch a saved milestone template by (creator, name). Panics with
+    /// "TemplateNotFound" if no such template exists.
+    pub fn get_milestone_template(env: Env, creator: Address, name: String) -> Vec<Milestone> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::MilestoneTemplate(creator, name))
+            .unwrap_or_else(|| panic!("TemplateNotFound"))
+    }
+
+    /// Create a shipment using the milestone structure saved under
+    /// `template_name` for the primary buyer (buyers[0]). All other
+    /// create_shipment validation (value bounds, milestone count cap,
+    /// whitelists, etc.) applies identically.
+    pub fn create_shipment_from_template(
+        env: Env,
+        shipment_id: String,
+        buyers: Vec<Address>,
+        supplier: Address,
+        logistics: Address,
+        arbiter: Address,
+        token: Address,
+        total_amount: i128,
+        template_name: String,
+        options: ShipmentOptions,
+    ) -> String {
+        if buyers.is_empty() {
+            panic!("at least one buyer is required");
+        }
+        let creator = buyers.get(0).unwrap();
+        let milestones: Vec<Milestone> = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt2::MilestoneTemplate(creator, template_name))
+            .unwrap_or_else(|| panic!("TemplateNotFound"));
+
+        Self::create_shipment(
+            env,
+            shipment_id,
+            buyers,
+            supplier,
+            logistics,
+            arbiter,
+            token,
+            total_amount,
+            milestones,
+            options,
+        )
+    }
 }
 
 pub mod constants;
@@ -8913,3 +9523,4 @@ mod test_concurrent_disputes;
 mod test_boundaries;
 mod test_chaos;
 mod test_features;
+mod test_configurable_limits;
