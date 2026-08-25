@@ -21,7 +21,11 @@ Invoice hash
 rebalance_milestones
 Milestone Payee Splits
 Partial Disputes & Escalation Checks
+
 Milestone Completion Percentage
+
+Dispute Evidence Submission
+
 Advance Payment Lifecycle
 Milestone Amendment History Tracking
 Supplier Payout Batching
@@ -1327,6 +1331,7 @@ Event name	Payload	When
 `partial_uncontested_released`	`(shipment_id)` topic, `(milestone_index, uncontested_amount, fee_amount)` data	Uncontested portion released immediately at partial dispute time
 `dispute_resolved`	`(shipment_id, milestone_index, approved)`	Arbiter resolves dispute
 `dispute_escalated`	`(shipment_id)` topic, `(milestone_index, opened_ledger, current_ledger)` data	Dispute open duration surpassed escalation threshold
+`dispute_evidence_submitted`	`(shipment_id)` topic, `(milestone_index, caller, evidence_hash, evidence_type)` data	Evidence submitted for a disputed milestone
 `escalation_threshold_set`	`threshold_ledgers`	Admin configured escalation threshold
 `shipment_cancelled`	`(shipment_id, refund_amount)`	Shipment cancelled
 `milestones_rebalanced`	`(buyer, new_percents)`	Buyer rebalanced milestone percentages
@@ -1621,3 +1626,14 @@ Contributing
 Pull requests welcome. Please run `cargo fmt` and `cargo test` before submitting.
 License
 MIT
+
+
+### Shipment Party Reassignment
+
+The contract allows updating the active buyer or supplier on a shipment using `transfer_buyer()` and `transfer_supplier()`.
+
+- **Authorization**: Only the current role holder (or authorized contract admin/super-arbiter, depending on configuration) can initiate the transfer to a new address.
+- **In-flight Milestones & Disputes**: Active milestones and ongoing disputes remain tied to the shipment state, but authorization for approving deliverables, withdrawing payouts, or voting on dispute resolutions transfers immediately to the new account.
+- **Events Emitted**:
+  - `BuyerTransferred(shipment_id, old_buyer, new_buyer)`
+  - `SupplierTransferred(shipment_id, old_supplier, new_supplier)`
