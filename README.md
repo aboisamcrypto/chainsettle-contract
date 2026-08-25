@@ -24,6 +24,7 @@ Advance Payment Lifecycle
 Milestone Amendment History Tracking
 Supplier Payout Batching
 Admin Succession & Emergency Recovery
+Governance Timelock
 Multisig Admin Governance
 Contract Upgrades & Migration
 Events
@@ -953,7 +954,45 @@ escrow, not as a way to resolve normal disputes — those should go through
 `raise_dispute` / `raise_partial_dispute` and `resolve_dispute` instead.
 
 ---
+Governance Timelock
+The governance timelock makes selected high-impact parameter changes visible
+on-chain before they take effect. It is controlled by the current contract
+admin and measures its delay in ledger sequences.
 
+`set_timelock_duration(admin, ledgers: u32)` — Admin-only. Sets the delay
+applied to newly proposed parameter changes. The default is `0`, which allows
+a proposal to be executed in the same ledger. Changing the duration does not
+alter the effective ledger of an already pending proposal.
+
+The timelock proposal flow supports these parameter symbols:
+
+| Parameter symbol | Change applied at execution |
+| --- | --- |
+| `fee_config` | Updates the configured platform fee rate (`fee_bps`) only; it does not change the treasury address. |
+| `max_shipment_value` | Updates the global maximum shipment value. |
+| `circuit_breaker_limit` | Updates the circuit breaker's token-outflow limit. |
+
+All three functions below are admin-only and require the admin address to
+authorize the transaction:
+
+1. **Propose:** Call `propose_param_change(admin, param, new_value)`. The
+   contract records the proposed value and sets its effective ledger to the
+   current ledger plus the configured timelock duration. A new proposal for
+   the same `param` replaces its existing pending proposal.
+2. **Wait:** Monitor the `param_change_proposed` event and wait until the
+   current ledger sequence is at least the recorded effective ledger. Calling
+   `execute_param_change` before then fails with `TimelockNotExpired`.
+3. **Execute:** Call `execute_param_change(admin, param)` once the delay has
+   elapsed. The contract applies the proposed value, removes the pending
+   proposal, and emits `param_change_executed`.
+4. **Cancel (optional):** Call `cancel_param_change(admin, param)` before
+   execution to remove the pending proposal. It emits `param_change_cancelled`;
+   a later execution attempt fails with `NoPendingParamChange`.
+
+`propose_param_change` accepts only the listed parameter symbols at execution
+time. The direct admin setters remain separate contract entry points; use the
+proposal workflow when a change must be subject to the configured timelock.
+---
 Multisig Admin Governance
 ChainSettle supports multi-signature admin governance to prevent unilateral contract
 changes. Once enabled, sensitive admin operations require approval from multiple
