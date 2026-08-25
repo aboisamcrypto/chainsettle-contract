@@ -1,0 +1,21 @@
+[package]
+name = "loan_manager"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Loan Manager - Soroban lending pool with a robust liquidation engine (oracle failover, bad-debt socialization, dynamic liquidator incentives, partial liquidation, penalty caps)"
+authors = ["ChainSettle Team"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[features]
+testutils = []
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+proptest = "1"
