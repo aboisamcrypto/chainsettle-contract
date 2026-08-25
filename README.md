@@ -20,6 +20,7 @@ Invoice hash
 rebalance_milestones
 Partial Disputes & Escalation Checks
 Advance Payment Lifecycle
+Supplier Payout Batching
 Admin Succession & Emergency Recovery
 Multisig Admin Governance
 Contract Upgrades & Migration
@@ -662,6 +663,57 @@ ChainSettle supports an active pool of trusted arbiters, allowing for automatic 
 `remove_arbiter_from_pool(admin, arbiter: Address)`: Admin-only. Removes an arbiter from the active pool.
 `get_arbiter_pool() → Vec<Address>` (read-only): Returns the current list of active arbiters in the pool.
 When creating a shipment, a buyer must specify an arbiter. By querying `get_arbiter_pool()`, a frontend or backend service can automatically select an arbiter using a round-robin assignment strategy. This ensures that disputes are evenly distributed among all trusted arbiters in the pool rather than overloading a single resolver.
+Supplier Payout Batching
+By default, every milestone payment (confirmation, dispute resolution,
+advance approval) transfers tokens to the supplier immediately in the same
+transaction that releases them. A supplier can instead opt into batched
+mode, where payments accumulate in a per-supplier on-chain balance and are
+withdrawn later in a single transaction.
+`set_payout_mode(supplier, batched: bool)`
+Supplier-only. `batched = true` switches the supplier to batched mode;
+`batched = false` (the default) switches back to immediate mode. Emits
+`payout_mode_set`. Only affects payments made after the switch — it does
+not retroactively move an already-transferred payment into the pending
+balance, and it does not by itself move an already-accumulated pending
+balance back to immediate transfers.
+`claim_payout(supplier, token)`
+Supplier-only. Transfers the supplier's entire accumulated pending balance
+for `token` in one call and resets it to zero. Panics with `"no pending
+payout"` if the balance is zero. The balance is zeroed before the token
+transfer (checks-effects-interactions), so a failed or reentrant transfer
+cannot double-spend the same balance. Blocked while the contract is
+paused. Emits `payout_claimed`.
+`get_pending_payout(supplier) → i128` (read-only)
+Returns the supplier's current accumulated, unclaimed payout balance.
+Returns `0` if the supplier is in immediate mode or has no pending funds.
+How it works:
+When a milestone payment is released to a supplier (`confirm_milestone`,
+`batch_confirm_milestones`, dispute resolution payouts, and approved
+advances), the contract checks that supplier's payout mode:
+in **immediate mode** (default), the net payment is transferred to the
+supplier's wallet right away, exactly as before this feature existed.
+in **batched mode**, the net payment is added to the supplier's pending
+balance instead of being transferred, and the supplier must call
+`claim_payout` later to receive the funds.
+Payout batching only applies to the default single-supplier payout path.
+If a milestone has per-payee splits configured (`MilestonePayees`), each
+payee is always paid immediately regardless of the primary supplier's
+payout mode.
+Example — a supplier opts into batching, accrues two milestone payments,
+then claims them together:
+```bash
+stellar contract invoke --id <CONTRACT_ID> --source supplier-account \
+  --network testnet -- set_payout_mode --supplier <SUPPLIER_ADDRESS> --batched true
+
+# ... buyer confirms milestone 0 and milestone 1; funds accumulate on-chain ...
+
+stellar contract invoke --id <CONTRACT_ID> --source supplier-account \
+  --network testnet -- get_pending_payout --supplier <SUPPLIER_ADDRESS>
+
+stellar contract invoke --id <CONTRACT_ID> --source supplier-account \
+  --network testnet -- claim_payout --supplier <SUPPLIER_ADDRESS> --token <TOKEN_ADDRESS>
+```
+---
 Admin Action Audit Trail
 The contract maintains an immutable audit log of all administrative actions
 for transparency and governance accountability. Every admin function call
