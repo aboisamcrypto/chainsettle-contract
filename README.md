@@ -349,6 +349,36 @@ stellar contract invoke \
 
 `raise_dispute(buyer, shipment_id, milestone_index)`
 Buyer disputes 100% of a `ProofSubmitted` or `ConfirmedHeld` milestone's payment. Freezes the milestone in `Disputed` state — no payment can be released until arbiter resolves.
+`withdraw_dispute(buyer, shipment_id, milestone_index)`
+Buyer-initiated withdrawal of an already-raised dispute. This is a buyer-side rollback for a milestone that was moved into `MilestoneStatus::Disputed` but should not remain disputed. It is intended for the case where the buyer reconsiders the dispute, wants to preserve the supplier's original proof, and wants to continue through the normal proof/confirmation workflow instead of waiting for arbiter resolution.
+
+Who may call it:
+
+- Only the shipment's registered buyer may invoke it.
+- Any other caller, including the supplier, logistics provider, or an unrelated address, is rejected with `unauthorized`.
+- The shipment must still be `Active`; a shipment that has already moved beyond active handling cannot be used to withdraw a dispute.
+
+What the function changes on success:
+
+- It validates the milestone index and confirms the milestone is still in `Disputed` state.
+- It reverts the milestone back to `ProofSubmitted`.
+- It clears `dispute_opened_ledger` to remove the dispute start timestamp.
+- It decreases the shipment's `open_dispute_count`.
+- It removes the dispute from the active-disputes list.
+- It does not delete the supplier's proof or change the milestone's underlying evidence; the original submitted proof remains available for ordinary buyer confirmation or for a later re-dispute.
+
+Why this matters:
+
+- The buyer is effectively abandoning the dispute without forcing a resolution outcome.
+- The milestone returns to the same state it was in before the dispute was raised, so the normal approval path can resume.
+- No funds are released by this function itself; the dispute is simply canceled and the payment remains in escrow until the buyer confirms the milestone or raises a new dispute.
+
+Important restriction:
+
+- `withdraw_dispute()` is only valid while the milestone is still `Disputed`.
+- Once the case leaves that state because an arbiter has begun or completed resolution, the function panics with `milestone is not in disputed status`.
+- In other words, it is a narrow rollback for an open dispute only; it cannot reverse a dispute that has moved into review or been resolved.
+
 `raise_partial_dispute(buyer, shipment_id, milestone_index, contested_percent: u32)`
 Buyer contests only a specified percentage (`contested_percent` from `1` to `99`) of a milestone's value. The uncontested portion `(100 - contested_percent)%` is immediately calculated and released to the supplier, while the contested portion is held in escrow in `Disputed` state pending arbiter resolution. Panics if an approved advance exists for the milestone.
 `resolve_dispute(arbiter, shipment_id, milestone_index, approve: bool)`
