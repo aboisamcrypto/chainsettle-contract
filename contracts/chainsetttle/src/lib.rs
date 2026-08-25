@@ -6392,9 +6392,14 @@ impl ChainSettleContract {
     // ----------------------------------------------------------
 
     /// Cast a vote on an open panel dispute. Only callable by a member of the shipment's
-    /// arbiter panel. Each panel member may vote exactly once per dispute.
-    /// When a simple majority (`> panel.len() / 2`) agree, the dispute resolves automatically
-    /// using the same payout logic as `resolve_dispute`.
+    /// arbiter panel. Each panel member may vote exactly once for the milestone dispute.
+    /// A panel contains the addresses supplied in `ShipmentOptions::arbiter_panel` when the
+    /// shipment is created; panel mode requires at least three members.
+    /// A quorum is a simple majority: `panel.len() / 2 + 1` votes in the same direction.
+    /// When that threshold is reached, the dispute resolves automatically using the same
+    /// payout logic as `resolve_dispute`: `approve = true` resolves for the supplier and
+    /// `approve = false` resolves for the buyer. Until a majority is reached, including a
+    /// tie or an incomplete vote, the dispute remains open.
     pub fn cast_dispute_vote(
         env: Env,
         arbiter: Address,
@@ -6729,7 +6734,10 @@ impl ChainSettleContract {
         Self::emit_dispute_resolved(env, &shipment_id, milestone_index, resolution, &resolver);
     }
 
-    /// Returns the current votes for a panel dispute.
+    /// Returns the current votes for a panel dispute identified by shipment and milestone.
+    /// Each entry contains the panel member and their direction (`approve = true` for the
+    /// supplier, `approve = false` for the buyer). The vector is empty before any votes are
+    /// cast and after a majority automatically resolves the dispute.
     pub fn get_dispute_votes(env: Env, shipment_id: String, milestone_index: u32) -> Vec<DisputeVote> {
         env.storage()
             .persistent()
@@ -6737,7 +6745,9 @@ impl ChainSettleContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
-    /// Returns the arbiter panel for a shipment (empty vec = single-arbiter mode).
+    /// Returns the arbiter panel for a shipment, in the order supplied at creation.
+    /// Panel members are the addresses that may vote; panel mode requires at least three
+    /// non-blacklisted members. An empty vector means the shipment uses a single arbiter.
     pub fn get_arbiter_panel(env: Env, shipment_id: String) -> Vec<Address> {
         env.storage()
             .persistent()
