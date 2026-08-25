@@ -352,6 +352,33 @@ the supplier has no recorded activity; it does not calculate or persist a
 separate weighted rating.
 `get_escrow_balance(shipment_id) → i128` (read-only)
 Returns the amount of USDC still locked in escrow.
+`get_total_escrowed_value(token) → i128` (read-only)
+Returns the aggregate amount of a given token currently locked in escrow across
+all shipments on the contract. The value is scoped per-token: `token` is the
+Stellar Asset Contract address used at shipment creation, and the contract keeps
+one independent counter per token (`DataKey::TotalEscrowed(token)`), so a
+multi-token deployment (e.g. USDC and EURC) never mixes balances. Returns `0`
+when no shipment has ever been created with that token (no record exists) or
+when every shipment using it has fully paid out.
+
+The counter is incremented by `total_amount` on `create_shipment` and decremented
+whenever funds leave escrow — milestone confirmations (`confirm_milestone`,
+`batch_confirm_milestones`, `release_held_payment`, `claim_auto_confirmation`),
+advance approvals (`approve_advance`), partial-dispute uncontested payouts,
+cancellations (`cancel_shipment`, `supplier_cancel`), deadline refund claims,
+dispute timeouts (`resolve_dispute_timeout`), and emergency recovery.
+
+Relation to `get_escrow_balance()`: `get_escrow_balance(shipment_id)` is scoped
+per-shipment — it returns the unlocked balance of one shipment, denominated in
+that shipment's own token (`total_amount - released_amount -
+total_advanced_amount`). `get_total_escrowed_value(token)` is scoped per-token —
+it aggregates locked funds across every shipment created with that token.
+Summing `get_escrow_balance()` over all shipments sharing a token approximates
+the aggregate, with two known divergences: `top_up_escrow` raises a shipment's
+per-shipment balance without updating the aggregate counter, and
+dispute-resolution payouts (`resolve_dispute`) move funds without decrementing
+it. Indexers should treat the aggregate as an approximation of locked supply and
+reconcile against per-shipment balances when exact accounting is required.
 Milestone Deadline Extensions
 Suppliers can ask for more ledger time on an active shipment milestone,
 and buyers decide whether to accept that new deadline. The flow is
