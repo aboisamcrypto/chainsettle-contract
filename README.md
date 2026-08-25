@@ -670,6 +670,46 @@ The fee is deducted from each milestone payout at confirmation or dispute
 resolution time. If no fee config has been set, the effective fee rate is
 `0` bps and no platform fees are charged.
 
+Per-shipment fee override
+An admin can override the fee rate for a single shipment without changing
+the global `FeeConfig` or the buyer's volume-based tier. This is useful for
+negotiated rates, promotional pricing, or correcting fee tiers on a
+case-by-case basis.
+
+`set_shipment_fee_override(admin, shipment_id, fee_bps)`
+Admin-only. Sets a per-shipment fee override. The shipment must be `Active`
+or the call panics with `"shipment is not active"`. The override persists
+until explicitly cleared or the shipment leaves the `Active` state.
+
+`clear_shipment_fee_override(admin, shipment_id)`
+Admin-only. Removes the per-shipment override. After clearing, the shipment
+reverts to the normal fee resolution path.
+
+`get_shipment_fee_override(shipment_id) → Option<u32>` (read-only)
+Returns the current override in basis points, or `None` when no override
+has been set.
+
+Fee precedence
+When the contract calculates the fee for a milestone payout, it resolves the
+effective `fee_bps` in this order:
+
+1. **Shipment-level override** — if `set_shipment_fee_override` was called
+   for this shipment, that value is used.
+2. **Locked tier bps** — when the shipment was created, the buyer's lifetime
+   volume was evaluated against the configured fee tiers and the best matching
+   `fee_bps` was locked onto the shipment (`ShipmentFeeBps`). This locked
+   value is used if no override exists.
+3. **Global FeeConfig** — if neither an override nor a locked tier exists,
+   the contract falls back to `FeeConfig.fee_bps`.
+4. **Zero** — if no `FeeConfig` has ever been set, the effective rate is
+   `0` bps.
+
+The locked tier value is immutable for the lifetime of the shipment: later
+volume changes do not alter fees mid-flight. `get_fee_tier(address)` always
+reflects the address's *current* volume against the live tier table, which
+is useful for dashboards and for previewing the rate the next shipment
+would lock, but it does not change fees on existing shipments.
+
 ---
 
 Long-hold escrow rebate (#300)
