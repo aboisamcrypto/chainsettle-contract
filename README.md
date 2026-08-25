@@ -21,7 +21,11 @@ Invoice hash
 rebalance_milestones
 Milestone Payee Splits
 Partial Disputes & Escalation Checks
+
+Milestone Completion Percentage
+
 Dispute Evidence Submission
+
 Advance Payment Lifecycle
 Milestone Amendment History Tracking
 Supplier Payout Batching
@@ -502,6 +506,59 @@ the supplier has no recorded activity; it does not calculate or persist a
 separate weighted rating.
 `get_escrow_balance(shipment_id) → i128` (read-only)
 Returns the amount of USDC still locked in escrow.
+
+Milestone Completion Percentage
+`get_completion_percentage(shipment_id) → u32` (read-only)
+Returns how far the shipment has settled, as a whole number in `0..=100`, derived
+from the milestone payment weights. Full reference with worked examples:
+docs/completion-percentage.md.
+Milestone payment weights are the share of `total_amount` that settling a
+milestone releases from escrow. They come from `Milestone.payment_percent`
+(whole percents that `create_shipment` requires to sum to exactly `100`), or from
+`ShipmentOptions.milestone_splits` when supplied (basis points that must sum to
+exactly `10_000`, taking precedence over `payment_percent`).
+`milestone_gross_payment()` converts a weight into money, and this is the only
+formula used to move escrow out for a milestone:
+
+| Weight source | Gross payment for milestone `i` |
+|---|---|
+| `milestone_splits` (bps) | `total_amount * splits_bps(i) / 10_000` |
+| `payment_percent` (fallback) | `total_amount * payment_percent(i) / 100` |
+
+Because the weights always cover the whole shipment, `Σ gross(i) = total_amount`,
+so the settled money ratio *is* the settled weight ratio:
+
+```text
+settled = released_amount + total_advanced_amount
+pct     = clamp(settled * 100 / total_amount, 0, 100)     // integer division
+```
+
+`released_amount` grows by one milestone weight (minus any late-delivery penalty)
+each time that weight leaves escrow — `confirm_milestone`,
+`batch_confirm_milestones`, `release_held_payment`, `claim_auto_confirmation`, the
+uncontested share of `raise_partial_dispute`, and dispute resolutions that pay the
+supplier or refund a contested partial share. `total_advanced_amount` holds
+approved advances (a fraction of a single milestone weight) and is cleared as that
+milestone is confirmed, so an advance is never counted twice.
+With the standard 25 / 50 / 25 weights the query therefore walks
+`0 → 25 → 75 → 100`. Notable properties:
+
+| Rule | Effect on the reading |
+|---|---|
+| Integer division | fractional weights floor (a `3_333` bps milestone reads `33`) |
+| Clamped to `[0, 100]` | top-ups, penalties or rebalances can never return out-of-range |
+| Fees (platform, logistics, arbiter, referral) | no effect — deducted from the payout, not from the weight |
+| `holdback_ledgers > 0` | a `ConfirmedHeld` milestone counts only after `release_held_payment` |
+| Late-delivery penalty | credits `gross(i) - penalty`, so a late shipment can end below `100` |
+| Partial dispute refunded to buyer | still counted — the query measures escrow settled, not supplier earnings |
+| Full dispute rejected (milestone back to `Pending`) | not counted; that weight can still settle later |
+| `top_up_escrow` | raises the denominator, diluting an in-flight percentage |
+| `cancel_shipment` / `supplier_cancel` / `claim_deadline_refund` | freeze the reading at the settled share |
+| Unknown/archived `shipment_id` | panics with `"shipment not found"` |
+
+It is the exact complement of `get_escrow_balance`, which returns the unsettled
+remainder `total_amount - released_amount - total_advanced_amount`.
+
 `get_total_escrowed_value(token) → i128` (read-only)
 Returns the aggregate amount of a given token currently locked in escrow across
 all shipments on the contract. The value is scoped per-token: `token` is the
@@ -529,6 +586,7 @@ per-shipment balance without updating the aggregate counter, and
 dispute-resolution payouts (`resolve_dispute`) move funds without decrementing
 it. Indexers should treat the aggregate as an approximation of locked supply and
 reconcile against per-shipment balances when exact accounting is required.
+
 Milestone Deadline Extensions
 Suppliers can ask for more ledger time on an active shipment milestone,
 and buyers decide whether to accept that new deadline. The flow is
@@ -1372,12 +1430,21 @@ chainsetttle-contract/
 
 Test File Organization
 Tests are split by domain for clarity and to reduce merge conflicts:
+
+File	Purpose	Example Tests
+`test_common.rs`	Shared setup & utilities	`setup()`, `build_milestones()`, `create_standard_shipment()`
+`test_shipment.rs`	Shipment lifecycle	`test_create_shipment_success`, `test_full_shipment_lifecycle`, `test_cancel_shipment`
+`test_dispute.rs`	Dispute resolution	`test_raise_dispute`, `test_resolve_dispute`, `test_dispute_cooldown_enforced`
+`test_admin.rs`	Admin controls	`test_pause_blocks_create_shipment`, `test_blacklist_removal_restores_participation`
+`test_query.rs`	Read-only queries	`test_get_completion_percentage_*` (weight derivation, bps splits, advances, holdback, refunds, top-ups, fees)
+
 File Purpose Example Tests
 `test_common.rs` Shared setup & utilities `setup()`, `build_milestones()`, `create_standard_shipment()`
 `test_shipment.rs` Shipment lifecycle `test_create_shipment_success`, `test_full_shipment_lifecycle`, `test_cancel_shipment`
 `test_dispute.rs` Dispute resolution `test_raise_dispute`, `test_resolve_dispute`, `test_dispute_cooldown_enforced`
 `test_admin.rs` Admin controls `test_pause_blocks_create_shipment`, `test_blacklist_removal_restores_participation`
 `test_query.rs` Read-only queries `test_get_completion_percentage_*`
+
 All shared fixtures and helper functions are centralized in `test_common.rs` to avoid duplication.
 
 ---
