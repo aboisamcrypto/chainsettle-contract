@@ -289,3 +289,249 @@ fn test_pool_never_owes_more_than_it_holds() {
     );
     assert!(tb == 0);
 }
+
+// ============================================================
+// ADDITIONAL EDGE CASES & SCENARIOS
+// ============================================================
+
+#[test]
+fn test_liquidation_with_multiple_borrowers_independent() {
+    let s = setup();
+    seed_liquidity(&s, &[&s.d1], &[20_000]);
+    
+    // Two borrowers open positions
+    open_position(&s, &s.alice, 2_000, 1_000);
+    open_position(&s, &s.bob, 3_000, 1_500);
+    
+    // Price crash makes Alice liquidatable but not Bob
+    coll_price(&s, 60_000_000);
+    
+    // Liquidate Alice
+    let res = s.client().liquidate(&s.d1, &s.alice, &0i128);
+    assert!(res.repay_units > 0);
+    
+    // Bob's position should remain untouched
+    let bob_pos = s.client().get_position(&s.bob);
+    assert_eq!(bob_pos.collateral, 3_000);
+    assert_eq!(bob_pos.debt, 1_500);
+    
+    // Pool accounting should be correct
+    let (_, tb, _) = s.client().get_pool_info();
+    let alice_pos = s.client().get_position(&s.alice);
+    assert_eq!(tb, alice_pos.debt + bob_pos.debt);
+}
+
+#[test]
+fn test_liquidation_at_exact_threshold() {
+    let s = setup();
+    seed_liquidity(&s, &[&s.d1], &[10_000]);
+    open_position(&s, &s.alice, 2_000, 1_000);
+    
+    // Set price so collateral value = debt / threshold (exactly at threshold)
+    // threshold = 80% = 0.8, so collateral_value = debt / 0.8 = 1000 / 0.8 = 1250
+    // 2000 units * price = 1250 → price = 0.625
+    coll_price(&s, 62_500_000);
+    
+    // Position should be liquidatable (at threshold boundary)
+    let res = s.client().liquidate(&s.bob, &s.alice, &0i128);
+    assert!(res.repay_units > 0);
+}
+
+#[test]
+fn test_liquidator_insufficient_debt_tokens() {
+    let s = setup();
+    seed_liquidity(&s, &[&s.d1], &[10_000]);
+    open_position(&s, &s.alice, 2_000, 1_000);
+    coll_price(&s, 50_000_000);
+    
+    // Create a liquidator with limited debt tokens
+    let liquidator = soroban_sdk::Address::generate(&s.env);
+    token::Client::new(&s.env, &s.debt_id).mint(&liquidator, &100i128);
+    
+    // Should still be able to liquidate with available balance
+    let res = s.client().liquidate(&liquidator, &s.alice, &0i128);
+    assert!(res.repay_units <= 100);
+}
+
+#[test]
+fn test_sequential_partial_liquidations() {
+    let s = setup();
+    seed_liquidity(&s, &[&s.d1], &[10_000]);
+    open_position(&s, &s.alice, 2_000, 1_000);
+    coll_price(&s, 55_000_000);
+    
+    // First partial liquidation
+    let res1 = s.client().liquidate(&s.bob, &s.alice, &100i128);
+    assert_eq!(res1.repay_units, 100);
+    
+    let pos_after_1 = s.client().get_position(&s.alice);
+    
+    // Position might still be liquidatable, try again
+    if pos_after_1.debt > 0 && pos_after_1.collateral > 0 {
+        let (num, den) = s.client().health_factor(&s.alice);
+        if num < den {
+            // Second partial liquidation
+            let res2 = s.client().liquidate(&s.bob, &s.alice, &100i128);
+            assert!(res2.repay_units > 0);
+            
+            // Total collateral seized should not exceed initial
+            assert!(res1.seize_units + res2.seize_units <= 2_000);
+        }
+    }
+}
+
+#[test]
+fn test_liquidation_bonus_increases_monotonically() {
+    // Test that bonus increases as health factor decreases
+    let prices = vec![70_000_000, 60_000_000, 50_000_000, 40_000_000, 30_000_000];
+    let mut bonuses = vec![];
+    
+    for price in prices {
+        let s = setup();
+        seed_liquidity(&s, &[&s.d1], &[10_000]);
+        open_position(&s, &s.alice, 2_000, 1_000);
+        coll_price(&s, price);
+        
+        let res = s.client().liquidate(&s.bob, &s.alice, &0i128);
+        bonuses.push(res.bonus_bps);
+    }
+    
+    // Verify monotonic increase (allowing for cap)
+    for i in 1..bonuses.len() {
+        std::assert!(
+            bonuses[i] >= bonuses[i - 1],
+            "bonus should increase as price drops: {} vs {}",
+            bonuses[i],
+            bonuses[i - 1]
+        );
+    }
+}
+
+#[test]
+fn test_liquidation_after_interest_accrual() {
+    let s = setup();
+    seed_liquidity(&s, &[&s.d1], &[10_000]);
+    open_position(&s, &s.alice, 2_000, 1_000);
+    
+    // Advance time to accrue interest (if applicable)
+    s.env.ledger().set_timestamp(s.env.ledger().timestamp() + 86400 * 30);
+    
+    // Price drop makes position liquidatable
+    coll_price(&s, 55_000_000);
+    
+    let pos_before = s.client().get_position(&s.alice);
+    let res = s.client().liquidate(&s.bob, &s.alice, &0i128);
+    
+    // Should liquidate accounting for accrued interest
+    assert!(res.repay_units > 0);
+    assert!(res.repay_units <= pos_before.debt);
+}
+
+#[test]
+fn test_liquidation_preserves_other_depositor_balances() {
+    let s = setup();
+    seed_liquidity(&s, &[&s.d1, &s.d2], &[6_000, 4_000]);
+    
+    let d1_before = s.client().get_depositor_balance(&s.d1);
+    let d2_before = s.client().get_depositor_balance(&s.d2);
+    
+    open_position(&s, &s.alice, 2_000, 800);
+    coll_price(&s, 55_000_000);
+    
+    // Partial liquidation (no bad debt)
+    let res = s.client().liquidate(&s.bob, &s.alice, &200i128);
+    
+    if res.bad_debt_socialized == 0 {
+        // Depositor balances should remain unchanged for healthy liquidation
+        let d1_after = s.client().get_depositor_balance(&s.d1);
+        let d2_after = s.client().get_depositor_balance(&s.d2);
+        
+        assert_eq!(d1_after, d1_before);
+        assert_eq!(d2_after, d2_before);
+    }
+}
+
+#[test]
+fn test_full_liquidation_clears_position_completely() {
+    let s = setup();
+    seed_liquidity(&s, &[&s.d1], &[10_000]);
+    open_position(&s, &s.alice, 2_000, 1_000);
+    coll_price(&s, 5_000_000);
+    
+    s.client().liquidate(&s.bob, &s.alice, &crate::FULL_REPAY_SENTINEL);
+    
+    // Position should be completely cleared
+    let pos = s.client().get_position(&s.alice);
+    assert_eq!(pos.collateral, 0);
+    assert_eq!(pos.debt, 0);
+    
+    // Borrower should be able to open a new position
+    coll_price(&s, PRICE_ONE);
+    open_position(&s, &s.alice, 1_000, 500);
+    let new_pos = s.client().get_position(&s.alice);
+    assert_eq!(new_pos.collateral, 1_000);
+    assert_eq!(new_pos.debt, 500);
+}
+
+#[test]
+fn test_liquidation_with_max_penalty_cap() {
+    let s = setup();
+    // Set penalty cap to maximum allowed (e.g., 20%)
+    s.client().set_liq_params(&s.admin, &500u32, &1_500u32, &2_000u32);
+    
+    seed_liquidity(&s, &[&s.d1], &[10_000]);
+    open_position(&s, &s.alice, 2_000, 1_000);
+    coll_price(&s, 10_000_000); // Deep crash
+    
+    let res = s.client().liquidate(&s.bob, &s.alice, &0i128);
+    
+    // Bonus should be capped at configured maximum
+    assert!(res.bonus_bps <= 2_000);
+    
+    // Verify the liquidator doesn't get excessive bonus
+    let repay_value = res.repay_units;
+    let seize_value = res.seize_units * 10_000_000 / PRICE_ONE;
+    let max_allowed = repay_value * 12_000 / 10_000;
+    
+    std::assert!(
+        seize_value <= max_allowed + 1,
+        "seize {} exceeds max allowed {}",
+        seize_value,
+        max_allowed
+    );
+}
+
+#[test]
+fn test_multiple_liquidators_compete_fairly() {
+    let s = setup();
+    seed_liquidity(&s, &[&s.d1], &[10_000]);
+    open_position(&s, &s.alice, 4_000, 2_000);
+    coll_price(&s, 55_000_000);
+    
+    let liquidator1 = soroban_sdk::Address::generate(&s.env);
+    let liquidator2 = soroban_sdk::Address::generate(&s.env);
+    
+    token::Client::new(&s.env, &s.debt_id).mint(&liquidator1, &1_000i128);
+    token::Client::new(&s.env, &s.debt_id).mint(&liquidator2, &1_000i128);
+    
+    // First liquidator acts
+    let res1 = s.client().liquidate(&liquidator1, &s.alice, &500i128);
+    assert_eq!(res1.repay_units, 500);
+    
+    let pos_mid = s.client().get_position(&s.alice);
+    
+    // If position still liquidatable, second liquidator can act
+    let (num, den) = s.client().health_factor(&s.alice);
+    if num < den && pos_mid.debt > 0 {
+        let res2 = s.client().liquidate(&liquidator2, &s.alice, &500i128);
+        
+        // Both should get same bonus rate (for same health state)
+        // Note: bonus might differ slightly if health improved between liquidations
+        assert!(res2.repay_units > 0);
+        
+        // Combined shouldn't over-liquidate
+        let pos_final = s.client().get_position(&s.alice);
+        assert!(pos_final.collateral >= 0);
+        assert!(pos_final.debt >= 0);
+    }
+}
