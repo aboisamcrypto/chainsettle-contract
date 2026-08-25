@@ -985,6 +985,75 @@ pub struct JointConfirmationStatus {
 }
 
 // ============================================================
+// #397 – SUPPLIER TIERING
+// ============================================================
+
+/// Supplier tier derived from reputation score thresholds. Determines the
+/// collateral discount applied at shipment creation.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SupplierTier {
+    Bronze,
+    Silver,
+    Gold,
+}
+
+/// Admin-configured thresholds and collateral multipliers per tier.
+/// A supplier reaches Gold before Silver is checked (Gold takes priority).
+/// Multipliers are basis points of the base (Bronze) collateral requirement
+/// (10 000 = no discount; lower = cheaper collateral for that tier).
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SupplierTierConfig {
+    pub silver_min_completed: u32,
+    /// Max (disputed / completed) ratio in basis points to qualify for Silver.
+    pub silver_max_disputed_ratio_bps: u32,
+    pub silver_multiplier_bps: u32,
+    pub gold_min_completed: u32,
+    /// Max (disputed / completed) ratio in basis points to qualify for Gold.
+    pub gold_max_disputed_ratio_bps: u32,
+    pub gold_multiplier_bps: u32,
+}
+
+// ============================================================
+// #400 – DISPUTE MEDIATOR
+// ============================================================
+
+/// Non-binding mediation suggestion for a disputed milestone. Applied directly
+/// (bypassing arbiter resolution) once both buyer and supplier accept it.
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub struct MediationProposal {
+    pub mediator: Address,
+    pub suggested_outcome: Resolution,
+    pub buyer_accepted: bool,
+    pub supplier_accepted: bool,
+}
+
+// `DataKeyExt` is also approaching the 50-case Soroban union cap, so newer
+// storage keys live here.
+#[contracttype]
+pub enum DataKeyExt2 {
+    // ── #397 Supplier tiering ───────────────────────────────────────────
+    /// Admin-configured supplier tier thresholds and collateral multipliers.
+    SupplierTierConfig,
+
+    // ── #400 Dispute mediator ────────────────────────────────────────────
+    /// Global pool of mediators authorized for any shipment lacking a specific assignment.
+    MediatorPool,
+    /// Mediator assigned to a specific shipment (takes precedence over the pool).
+    ShipmentMediator(String),
+    /// Pending/in-progress mediation proposal for (shipment_id, milestone_index).
+    MediationProposal(String, u32),
+
+    // ── #398 Buyer spending limit ───────────────────────────────────────
+    /// Configured rolling-window spending limit for a buyer: (limit, window_ledgers).
+    BuyerSpendingLimit(Address),
+    /// Current window usage for a buyer: (window_start_ledger, used_amount).
+    BuyerSpendingUsage(Address),
+}
+
+// ============================================================
 // ERRORS
 // ============================================================
 
@@ -1432,6 +1501,81 @@ impl ChainSettleContract {
             .persistent()
             .get(&DataKey::SupplierRep(supplier.clone()))
             .unwrap_or_default()
+    }
+
+    // ----------------------------------------------------------
+    // #397 – SUPPLIER TIERING
+    // ----------------------------------------------------------
+
+    /// Admin configures the reputation thresholds and collateral multipliers for
+    /// Silver/Gold tiers. Multipliers are basis points of the base collateral
+    /// requirement (must be <= 10 000, i.e. tiers can only discount, never inflate).
+    pub fn set_supplier_tier_config(env: Env, admin: Address, config: SupplierTierConfig) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        if config.silver_multiplier_bps > 10_000 || config.gold_multiplier_bps > 10_000 {
+            panic!("tier multiplier cannot exceed 10000 bps");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::SupplierTierConfig, &config);
+        env.events()
+            .publish((Symbol::new(&env, "supplier_tier_config_set"),), ());
+    }
+
+    pub fn get_supplier_tier_config(env: Env) -> Option<SupplierTierConfig> {
+        env.storage().instance().get(&DataKeyExt2::SupplierTierConfig)
+    }
+
+    /// Derives a supplier's current tier from their reputation score against the
+    /// admin-configured thresholds. Suppliers with no completed shipments — and any
+    /// supplier while no tier config is set — default to Bronze.
+    pub fn get_supplier_tier(env: Env, supplier: Address) -> SupplierTier {
+        Self::get_supplier_tier_internal(&env, &supplier)
+    }
+
+    fn get_supplier_tier_internal(env: &Env, supplier: &Address) -> SupplierTier {
+        let config: Option<SupplierTierConfig> =
+            env.storage().instance().get(&DataKeyExt2::SupplierTierConfig);
+        let Some(config) = config else {
+            return SupplierTier::Bronze;
+        };
+        let score = Self::get_reputation_internal(env, supplier);
+        if score.completed == 0 {
+            return SupplierTier::Bronze;
+        }
+        let ratio_bps = (score.disputed as u64).saturating_mul(10_000) / (score.completed as u64);
+        if score.completed >= config.gold_min_completed
+            && ratio_bps <= config.gold_max_disputed_ratio_bps as u64
+        {
+            SupplierTier::Gold
+        } else if score.completed >= config.silver_min_completed
+            && ratio_bps <= config.silver_max_disputed_ratio_bps as u64
+        {
+            SupplierTier::Silver
+        } else {
+            SupplierTier::Bronze
+        }
+    }
+
+    /// Scales `base_collateral` down according to the supplier's current tier.
+    /// New/Bronze suppliers (or when no tier config is set) pay the unmodified base amount.
+    fn apply_tier_collateral_discount(env: &Env, supplier: &Address, base_collateral: i128) -> i128 {
+        if base_collateral == 0 {
+            return 0;
+        }
+        let config: Option<SupplierTierConfig> =
+            env.storage().instance().get(&DataKeyExt2::SupplierTierConfig);
+        let Some(config) = config else {
+            return base_collateral;
+        };
+        let tier = Self::get_supplier_tier_internal(env, supplier);
+        let multiplier_bps = match tier {
+            SupplierTier::Bronze => 10_000,
+            SupplierTier::Silver => config.silver_multiplier_bps,
+            SupplierTier::Gold => config.gold_multiplier_bps,
+        };
+        (base_collateral * multiplier_bps as i128) / 10_000
     }
 
     // ----------------------------------------------------------
@@ -2686,6 +2830,10 @@ impl ChainSettleContract {
 
         // Transfer total_amount from the primary buyer (index 0).
         let primary_buyer = buyers.get(0).unwrap();
+
+        // #398: Enforce the buyer's rolling-window spending limit, if configured.
+        Self::check_and_record_buyer_spending(&env, &primary_buyer, total_amount);
+
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(
             &primary_buyer,
@@ -2709,15 +2857,21 @@ impl ChainSettleContract {
         }
 
         // Lock supplier collateral: transfer from supplier and store separately.
+        // #397: Scale the requirement down per the supplier's reputation-derived tier.
+        // New suppliers (no history) or Bronze suppliers pay the unmodified base amount.
         if supplier_collateral > 0 {
-            token_client.transfer(
-                &supplier,
-                &env.current_contract_address(),
-                &supplier_collateral,
-            );
+            let effective_collateral =
+                Self::apply_tier_collateral_discount(&env, &supplier, supplier_collateral);
+            if effective_collateral > 0 {
+                token_client.transfer(
+                    &supplier,
+                    &env.current_contract_address(),
+                    &effective_collateral,
+                );
+            }
             env.storage().persistent().set(
                 &DataKey::SupplierCollateral(shipment_id.clone()),
-                &supplier_collateral,
+                &effective_collateral,
             );
         }
 
@@ -3012,6 +3166,9 @@ impl ChainSettleContract {
             }
         }
 
+        // #398: Enforce the buyer's rolling-window spending limit, if configured.
+        Self::check_and_record_buyer_spending(&env, &buyer, additional_amount);
+
         let token_client = token::Client::new(&env, &shipment.token);
         token_client.transfer(&buyer, &env.current_contract_address(), &additional_amount);
 
@@ -3025,6 +3182,116 @@ impl ChainSettleContract {
         env.events().publish(
             (Symbol::new(&env, "escrow_topped_up"), shipment_id.clone()),
             (additional_amount, new_total),
+        );
+    }
+
+    // ----------------------------------------------------------
+    // #398 – BUYER SPENDING LIMIT
+    // ----------------------------------------------------------
+
+    /// Admin (or a buyer's own delegated risk policy) caps how much total escrow
+    /// value `buyer` may commit within a rolling window of `window_ledgers`.
+    /// `limit == 0` disables/clears the cap for this buyer.
+    pub fn set_buyer_spending_limit(
+        env: Env,
+        admin: Address,
+        buyer: Address,
+        limit: i128,
+        window_ledgers: u32,
+    ) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        if limit < 0 {
+            panic!("limit must be non-negative");
+        }
+        let key = DataKeyExt2::BuyerSpendingLimit(buyer.clone());
+        env.storage().persistent().set(&key, &(limit, window_ledgers));
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+        env.events().publish(
+            (Symbol::new(&env, "buyer_spending_limit_set"), buyer),
+            (limit, window_ledgers),
+        );
+    }
+
+    /// Returns the buyer's configured (limit, window_ledgers), if any.
+    pub fn get_buyer_spending_limit(env: Env, buyer: Address) -> Option<(i128, u32)> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::BuyerSpendingLimit(buyer))
+    }
+
+    /// Returns the buyer's committed amount in the current (unexpired) rolling window.
+    /// Always 0 for a buyer with no configured limit or once the window has elapsed.
+    pub fn get_buyer_spending_window_usage(env: Env, buyer: Address) -> i128 {
+        Self::current_buyer_spending_usage(&env, &buyer)
+    }
+
+    fn current_buyer_spending_usage(env: &Env, buyer: &Address) -> i128 {
+        let limit_cfg: Option<(i128, u32)> = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt2::BuyerSpendingLimit(buyer.clone()));
+        let Some((_, window)) = limit_cfg else {
+            return 0;
+        };
+        let (window_start, used): (u32, i128) = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt2::BuyerSpendingUsage(buyer.clone()))
+            .unwrap_or((0, 0));
+        let current_ledger = env.ledger().sequence();
+        if window == 0 || current_ledger >= window_start + window {
+            0
+        } else {
+            used
+        }
+    }
+
+    /// Checks the configured rolling-window spending limit for `buyer` and, if the
+    /// commitment stays within bounds, records `amount` against the window.
+    /// No-op if the buyer has no configured limit (or it is set to 0).
+    fn check_and_record_buyer_spending(env: &Env, buyer: &Address, amount: i128) {
+        let limit_cfg: Option<(i128, u32)> = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt2::BuyerSpendingLimit(buyer.clone()));
+        let Some((limit, window)) = limit_cfg else {
+            return;
+        };
+        if limit == 0 {
+            return;
+        }
+
+        let (window_start, mut used): (u32, i128) = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt2::BuyerSpendingUsage(buyer.clone()))
+            .unwrap_or((0, 0));
+        let current_ledger = env.ledger().sequence();
+
+        let mut effective_start = window_start;
+        if window == 0 || current_ledger >= window_start + window {
+            used = 0;
+            effective_start = current_ledger;
+        }
+
+        if used + amount > limit {
+            panic!("buyer spending limit exceeded");
+        }
+
+        used += amount;
+        let usage_key = DataKeyExt2::BuyerSpendingUsage(buyer.clone());
+        env.storage()
+            .persistent()
+            .set(&usage_key, &(effective_start, used));
+        env.storage().persistent().extend_ttl(
+            &usage_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
         );
     }
 
@@ -3879,12 +4146,20 @@ impl ChainSettleContract {
                 ),
             );
         } else {
+            // #399: Determine whether this milestone completes the shipment *before*
+            // mutating any milestone status, so the fee-tier recalculation applies
+            // only to the final milestone (earlier milestones keep their as-paid fee).
+            let is_final_milestone = Self::is_final_milestone(&shipment, milestone_index);
+            let primary_buyer_for_fee = shipment.buyers.get(0).unwrap();
+
             let mut fee_amount: i128 = 0;
-            let mut net_payment = Self::deduct_fee_for_shipment(
+            let (mut net_payment, applied_fee_bps) = Self::deduct_fee_for_shipment_at_completion(
                 &env,
                 payment,
                 &shipment.token,
                 &shipment_id,
+                &primary_buyer_for_fee,
+                is_final_milestone,
                 &mut fee_amount,
             );
 
@@ -4132,6 +4407,11 @@ impl ChainSettleContract {
                     env.ledger().sequence(),
                     shipment.released_amount,
                     remaining_amount,
+                    // #399: Additive field — the fee bps actually applied to this payment
+                    // (recalculated at completion for the final milestone, locked-tier
+                    // or override bps otherwise). Existing consumers reading the first
+                    // 8 fields keep working.
+                    applied_fee_bps,
                 ),
             );
             Self::emit_milestone_confirmed(&env, &shipment_id, milestone_index, payment);
@@ -6658,6 +6938,376 @@ impl ChainSettleContract {
             resolution_sym,
             &shipment.arbiter,
         );
+    }
+
+    // ----------------------------------------------------------
+    // #400 – DISPUTE MEDIATOR
+    // ----------------------------------------------------------
+
+    /// Admin assigns a mediator to a specific shipment. Takes precedence over the
+    /// global mediator pool for that shipment.
+    pub fn assign_mediator(env: Env, admin: Address, shipment_id: String, mediator: Address) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        // Ensure the shipment exists.
+        let _ = Self::get_shipment_internal(&env, &shipment_id);
+        let key = DataKeyExt2::ShipmentMediator(shipment_id.clone());
+        env.storage().persistent().set(&key, &mediator);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+        env.events().publish(
+            (Symbol::new(&env, "mediator_assigned"), shipment_id),
+            mediator,
+        );
+    }
+
+    /// Admin configures a global pool of mediators. Any address in the pool may mediate
+    /// any shipment that has no shipment-specific mediator assigned.
+    pub fn set_mediator_pool(env: Env, admin: Address, mediators: Vec<Address>) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::MediatorPool, &mediators);
+        env.events()
+            .publish((Symbol::new(&env, "mediator_pool_set"),), mediators.len() as u32);
+    }
+
+    pub fn get_mediator_pool(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt2::MediatorPool)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    pub fn get_shipment_mediator(env: Env, shipment_id: String) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::ShipmentMediator(shipment_id))
+    }
+
+    pub fn get_mediation_proposal(
+        env: Env,
+        shipment_id: String,
+        milestone_index: u32,
+    ) -> Option<MediationProposal> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::MediationProposal(shipment_id, milestone_index))
+    }
+
+    fn is_authorized_mediator(env: &Env, shipment_id: &String, mediator: &Address) -> bool {
+        if let Some(assigned) = env
+            .storage()
+            .persistent()
+            .get::<DataKeyExt2, Address>(&DataKeyExt2::ShipmentMediator(shipment_id.clone()))
+        {
+            if assigned == *mediator {
+                return true;
+            }
+        }
+        let pool: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::MediatorPool)
+            .unwrap_or_else(|| Vec::new(env));
+        for i in 0..pool.len() {
+            if pool.get(i).unwrap() == *mediator {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// An assigned mediator proposes a non-binding suggested outcome for a disputed
+    /// milestone. Visible to both parties via `get_mediation_proposal`; has no effect
+    /// on funds until both buyer and supplier accept it via `accept_mediation`.
+    pub fn propose_mediation(
+        env: Env,
+        mediator: Address,
+        shipment_id: String,
+        milestone_index: u32,
+        suggested_outcome: Resolution,
+    ) {
+        Self::assert_not_paused(&env);
+        mediator.require_auth();
+
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+        if shipment.status != ShipmentStatus::Active {
+            panic!("shipment is not active");
+        }
+        if !Self::is_authorized_mediator(&env, &shipment_id, &mediator) {
+            panic!("unauthorized mediator");
+        }
+
+        if milestone_index as usize >= shipment.milestones.len() as usize {
+            panic!("invalid milestone index");
+        }
+        let milestone = shipment.milestones.get(milestone_index).unwrap();
+        if milestone.status != MilestoneStatus::Disputed {
+            panic!("milestone is not in disputed status");
+        }
+
+        let proposal = MediationProposal {
+            mediator: mediator.clone(),
+            suggested_outcome: suggested_outcome.clone(),
+            buyer_accepted: false,
+            supplier_accepted: false,
+        };
+        let key = DataKeyExt2::MediationProposal(shipment_id.clone(), milestone_index);
+        env.storage().persistent().set(&key, &proposal);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+
+        let outcome_sym = match suggested_outcome {
+            Resolution::Buyer => Symbol::new(&env, "buyer"),
+            Resolution::Supplier => Symbol::new(&env, "supplier"),
+        };
+        env.events().publish(
+            (Symbol::new(&env, "mediation_proposed"), shipment_id),
+            (milestone_index, mediator, outcome_sym),
+        );
+    }
+
+    /// Buyer or supplier accepts the pending mediation proposal for a milestone.
+    /// Once both parties have accepted, the suggested outcome is applied directly —
+    /// bypassing binding arbiter resolution entirely (no arbiter fee is charged).
+    /// Either party may instead decline (`decline_mediation`) and fall through to the
+    /// standard `raise_dispute` / `resolve_dispute` flow, which is unaffected by this.
+    pub fn accept_mediation(env: Env, caller: Address, shipment_id: String, milestone_index: u32) {
+        Self::assert_not_paused(&env);
+        caller.require_auth();
+
+        let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
+        if shipment.status != ShipmentStatus::Active {
+            panic!("shipment is not active");
+        }
+        Self::assert_buyer_or_supplier(&shipment, &caller);
+
+        let key = DataKeyExt2::MediationProposal(shipment_id.clone(), milestone_index);
+        let mut proposal: MediationProposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("no pending mediation proposal"));
+
+        let milestone = shipment.milestones.get(milestone_index).unwrap();
+        if milestone.status != MilestoneStatus::Disputed {
+            panic!("milestone is not in disputed status");
+        }
+
+        if Self::is_buyer(&shipment, &caller) {
+            proposal.buyer_accepted = true;
+        } else {
+            proposal.supplier_accepted = true;
+        }
+
+        if proposal.buyer_accepted && proposal.supplier_accepted {
+            env.storage().persistent().remove(&key);
+            let mediator = proposal.mediator.clone();
+            Self::apply_mediation_outcome(
+                &env,
+                &mut shipment,
+                &shipment_id,
+                milestone_index,
+                proposal.suggested_outcome.clone(),
+                &mediator,
+            );
+        } else {
+            env.storage().persistent().set(&key, &proposal);
+        }
+    }
+
+    /// Buyer or supplier declines the pending mediation proposal for a milestone,
+    /// clearing it so the dispute proceeds through standard arbiter resolution.
+    pub fn decline_mediation(env: Env, caller: Address, shipment_id: String, milestone_index: u32) {
+        Self::assert_not_paused(&env);
+        caller.require_auth();
+
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+        Self::assert_buyer_or_supplier(&shipment, &caller);
+
+        let key = DataKeyExt2::MediationProposal(shipment_id.clone(), milestone_index);
+        env.storage().persistent().remove(&key);
+
+        env.events().publish(
+            (Symbol::new(&env, "mediation_declined"), shipment_id),
+            (milestone_index, caller),
+        );
+    }
+
+    /// Applies an accepted mediation's suggested outcome directly, mirroring the
+    /// non-arbiter-fee branches of `resolve_dispute_timeout`: no arbiter fee is charged
+    /// since no binding arbiter resolution occurred.
+    fn apply_mediation_outcome(
+        env: &Env,
+        shipment: &mut Shipment,
+        shipment_id: &String,
+        milestone_index: u32,
+        outcome: Resolution,
+        mediator: &Address,
+    ) {
+        let mut milestone = shipment.milestones.get(milestone_index).unwrap();
+
+        let partial_cp: Option<u32> = env.storage().persistent().get(&DataKey::DisputeContestedPercent(
+            shipment_id.clone(),
+            milestone_index,
+        ));
+        let full_payment = Self::milestone_gross_payment(env, shipment, milestone_index);
+        let payment = if let Some(cp) = partial_cp {
+            (full_payment * cp as i128) / 100
+        } else {
+            full_payment
+        };
+
+        let token_client = token::Client::new(env, &shipment.token);
+        let is_supplier = outcome == Resolution::Supplier;
+
+        if is_supplier {
+            let mut fee_amount: i128 = 0;
+            let net_payment =
+                Self::deduct_fee_for_shipment(env, payment, &shipment.token, shipment_id, &mut fee_amount);
+            Self::check_circuit_breaker(env, payment);
+            Self::check_address_outflow(env, &shipment.supplier, payment);
+            if net_payment > 0 {
+                Self::pay_milestone_to_payees(
+                    env,
+                    shipment_id,
+                    milestone_index,
+                    net_payment,
+                    &shipment.supplier,
+                    &token_client,
+                );
+            }
+            shipment.released_amount += payment;
+            if shipment.dispute_bond_amount > 0 {
+                let primary_buyer = shipment.buyers.get(0).unwrap();
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &primary_buyer,
+                    &shipment.dispute_bond_amount,
+                );
+            }
+        } else {
+            let primary_buyer = shipment.buyers.get(0).unwrap();
+            if payment > 0 {
+                token_client.transfer(&env.current_contract_address(), &primary_buyer, &payment);
+            }
+            shipment.released_amount += payment;
+            if shipment.dispute_bond_amount > 0 {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &shipment.supplier,
+                    &shipment.dispute_bond_amount,
+                );
+            }
+        }
+
+        let current_escrowed: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalEscrowed(shipment.token.clone()))
+            .unwrap_or(0);
+        env.storage().persistent().set(
+            &DataKey::TotalEscrowed(shipment.token.clone()),
+            &(current_escrowed - payment).max(0),
+        );
+
+        if partial_cp.is_some() {
+            env.storage().persistent().remove(&DataKey::DisputeContestedPercent(
+                shipment_id.clone(),
+                milestone_index,
+            ));
+        }
+        env.storage()
+            .persistent()
+            .remove(&DataKeyExt::DisputeOpenedAt(shipment_id.clone(), milestone_index));
+
+        milestone.status = MilestoneStatus::Resolved;
+        // Write the updated status back before checking completion, so a single-
+        // milestone shipment (or the last remaining one) is correctly detected as done.
+        shipment.milestones.set(milestone_index, milestone);
+
+        Self::append_audit_entry(
+            env,
+            shipment,
+            mediator.clone(),
+            Symbol::new(env, "mediation_accepted"),
+            Symbol::new(env, "accept_mediation"),
+        );
+
+        if Self::all_milestones_done(shipment) {
+            shipment.status = ShipmentStatus::Completed;
+
+            Self::append_audit_entry(
+                env,
+                shipment,
+                mediator.clone(),
+                Symbol::new(env, "shipment_completed"),
+                Symbol::new(env, "accept_mediation"),
+            );
+
+            let mut stats: ContractStats = env
+                .storage()
+                .instance()
+                .get(&DataKey::ContractStats)
+                .unwrap_or(ContractStats {
+                    total_shipments: 0,
+                    total_volume: 0,
+                    total_disputes: 0,
+                    completed_shipments: 0,
+                });
+            stats.completed_shipments += 1;
+            env.storage().instance().set(&DataKey::ContractStats, &stats);
+            Self::increment_reputation_internal(env, &shipment.supplier, 1, 0, 0);
+            Self::move_shipment_status_index(
+                env,
+                ShipmentStatus::Active,
+                ShipmentStatus::Completed,
+                shipment_id,
+            );
+            Self::emit_shipment_completed(env, shipment_id, shipment.released_amount);
+        }
+
+        shipment.open_dispute_count = shipment.open_dispute_count.saturating_sub(1);
+        shipment.last_dispute_resolved_ledger = Some(env.ledger().sequence());
+
+        let disputes: Vec<DisputeEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ActiveDisputes)
+            .unwrap_or_else(|| Vec::new(env));
+        let mut new_disputes: Vec<DisputeEntry> = Vec::new(env);
+        for i in 0..disputes.len() {
+            let d = disputes.get(i).unwrap();
+            if !(d.shipment_id == *shipment_id && d.milestone_index == milestone_index) {
+                new_disputes.push_back(d);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::ActiveDisputes, &new_disputes);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Shipment(shipment_id.clone()), shipment);
+
+        let resolution_sym = if is_supplier {
+            Symbol::new(env, "supplier")
+        } else {
+            Symbol::new(env, "buyer")
+        };
+        env.events().publish(
+            (Symbol::new(env, "mediation_accepted"), shipment_id.clone()),
+            (milestone_index, resolution_sym.clone(), mediator.clone()),
+        );
+        Self::emit_dispute_resolved(env, shipment_id, milestone_index, resolution_sym, mediator);
     }
 
     // ----------------------------------------------------------
@@ -9733,7 +10383,69 @@ impl ChainSettleContract {
         gross
     }
 
-    /// #113: Deducts the fee using the shipment's locked tier bps (falls back to FeeConfig).
+    /// #399: True when every milestone other than `milestone_index` is already
+    /// Confirmed or Resolved — i.e. confirming `milestone_index` completes the shipment.
+    /// Must be called before the milestone being confirmed has its status updated.
+    fn is_final_milestone(shipment: &Shipment, milestone_index: u32) -> bool {
+        for i in 0..shipment.milestones.len() {
+            if i == milestone_index {
+                continue;
+            }
+            let s = shipment.milestones.get(i).unwrap().status;
+            if s != MilestoneStatus::Confirmed && s != MilestoneStatus::Resolved {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// #399: Deducts fee using per-shipment override first; otherwise, for the milestone
+    /// that completes the shipment, recomputes the buyer's fee tier as of *now* (instead
+    /// of the tier locked in at creation) so late-shipment tier upgrades/downgrades are
+    /// reflected on the final payment. Non-final milestones keep using the locked-in tier,
+    /// so already-paid earlier milestones are never retroactively affected.
+    /// Returns (net_amount, applied_fee_bps).
+    fn deduct_fee_for_shipment_at_completion(
+        env: &Env,
+        gross: i128,
+        token: &Address,
+        shipment_id: &String,
+        buyer: &Address,
+        is_final: bool,
+        fee_out: &mut i128,
+    ) -> (i128, u32) {
+        let override_bps: Option<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt::ShipmentFeeOverride(shipment_id.clone()));
+        let locked_bps: Option<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt::ShipmentFeeBps(shipment_id.clone()));
+        if let Some(config) = env
+            .storage()
+            .instance()
+            .get::<DataKey, FeeConfig>(&DataKey::FeeConfig)
+        {
+            let bps = if let Some(o) = override_bps {
+                o
+            } else if is_final {
+                Self::resolve_fee_bps_for(env, buyer)
+            } else {
+                locked_bps.unwrap_or(config.fee_bps)
+            };
+            let fee = (gross * bps as i128) / 10_000;
+            if fee > 0 {
+                let token_client = token::Client::new(env, token);
+                token_client.transfer(&env.current_contract_address(), &config.treasury, &fee);
+                *fee_out = fee;
+                return (gross - fee, bps);
+            }
+            return (gross, bps);
+        }
+        let fallback_bps = override_bps.unwrap_or_else(|| locked_bps.unwrap_or(0));
+        (gross, fallback_bps)
+    }
 
     /// #113: Resolves the effective fee bps for `address` based on accumulated lifetime volume.
     fn resolve_fee_bps_for(env: &Env, address: &Address) -> u32 {
