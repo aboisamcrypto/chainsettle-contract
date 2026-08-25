@@ -13,15 +13,12 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::{
-    testutils::Address as _,
-    token, vec, Address, Env, String, Symbol};
 use proptest::prelude::*;
+use soroban_sdk::{testutils::Address as _, token, vec, Address, Env, String, Symbol};
 
 // Fixed slot IDs so we can reference shipments without heap allocation gymnastics
 const SLOT_IDS: [&str; 10] = [
-    "CHX-0", "CHX-1", "CHX-2", "CHX-3", "CHX-4",
-    "CHX-5", "CHX-6", "CHX-7", "CHX-8", "CHX-9",
+    "CHX-0", "CHX-1", "CHX-2", "CHX-3", "CHX-4", "CHX-5", "CHX-6", "CHX-7", "CHX-8", "CHX-9",
 ];
 
 // ---- operation model --------------------------------------------------------
@@ -30,7 +27,12 @@ const SLOT_IDS: [&str; 10] = [
 enum Op {
     /// Create shipment in slot `slot` with the given amount.
     /// Skipped if that slot is already created.
-    CreateShipment { slot: usize, amount: i128, sequential: bool, holdback: u32 },
+    CreateShipment {
+        slot: usize,
+        amount: i128,
+        sequential: bool,
+        holdback: u32,
+    },
     /// Submit proof on milestone `m` of shipment in `slot`.
     SubmitProof { slot: usize, m: u32 },
     /// Buyer confirms milestone `m` of shipment in `slot`.
@@ -46,20 +48,23 @@ enum Op {
 fn op_strategy() -> impl Strategy<Value = Op> {
     prop_oneof![
         // CreateShipment: amounts between 1_000 and 10_000_000 to stay within minted balance
-        (0usize..10, 1_000i128..1_000_000i128, any::<bool>(), 0u32..5u32).prop_map(
-            |(slot, amount, sequential, holdback)| Op::CreateShipment {
+        (
+            0usize..10,
+            1_000i128..1_000_000i128,
+            any::<bool>(),
+            0u32..5u32
+        )
+            .prop_map(|(slot, amount, sequential, holdback)| Op::CreateShipment {
                 slot,
                 amount: amount * 100, // keep 8 significant digits
                 sequential,
                 holdback,
-            }
-        ),
+            }),
         (0usize..10, 0u32..2u32).prop_map(|(slot, m)| Op::SubmitProof { slot, m }),
         (0usize..10, 0u32..2u32).prop_map(|(slot, m)| Op::ConfirmMilestone { slot, m }),
         (0usize..10, 0u32..2u32).prop_map(|(slot, m)| Op::RaiseDispute { slot, m }),
-        (0usize..10, 0u32..2u32, any::<bool>()).prop_map(|(slot, m, approve)| {
-            Op::ResolveDispute { slot, m, approve }
-        }),
+        (0usize..10, 0u32..2u32, any::<bool>())
+            .prop_map(|(slot, m, approve)| { Op::ResolveDispute { slot, m, approve } }),
         (0usize..10).prop_map(|slot| Op::CancelShipment { slot }),
     ]
 }
@@ -110,7 +115,12 @@ fn exec(
     let client = ChainSettleContractClient::new(env, contract_id);
 
     match op {
-        Op::CreateShipment { slot, amount, sequential, holdback } => {
+        Op::CreateShipment {
+            slot,
+            amount,
+            sequential,
+            holdback,
+        } => {
             if created[*slot] {
                 return;
             }
@@ -150,8 +160,15 @@ fn exec(
             };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 client.create_shipment(
-                    &id, &buyers, supplier, logistics, arbiter, token_id,
-                    amount, &milestones, &options,
+                    &id,
+                    &buyers,
+                    supplier,
+                    logistics,
+                    arbiter,
+                    token_id,
+                    amount,
+                    &milestones,
+                    &options,
                 );
             }));
             if result.is_ok() {
@@ -305,7 +322,9 @@ fn chaos_create_only_scenario() {
     env.mock_all_auths();
     let contract_id = env.register(ChainSettleContract, ());
     let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
     let buyer = Address::generate(&env);
     let supplier = Address::generate(&env);
     let logistics = Address::generate(&env);
@@ -316,8 +335,23 @@ fn chaos_create_only_scenario() {
 
     let mut created = [false; 10];
     for i in 0..10 {
-        let op = Op::CreateShipment { slot: i, amount: 50_000 * 100, sequential: false, holdback: 0 };
-        exec(&op, &env, &contract_id, &token_id, &buyer, &supplier, &logistics, &arbiter, &mut created);
+        let op = Op::CreateShipment {
+            slot: i,
+            amount: 50_000 * 100,
+            sequential: false,
+            holdback: 0,
+        };
+        exec(
+            &op,
+            &env,
+            &contract_id,
+            &token_id,
+            &buyer,
+            &supplier,
+            &logistics,
+            &arbiter,
+            &mut created,
+        );
     }
     assert_escrow_invariant(&env, &contract_id, &token_id, &created);
 }
@@ -329,7 +363,9 @@ fn chaos_partial_confirm_scenario() {
     env.mock_all_auths();
     let contract_id = env.register(ChainSettleContract, ());
     let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
     let buyer = Address::generate(&env);
     let supplier = Address::generate(&env);
     let logistics = Address::generate(&env);
@@ -341,12 +377,47 @@ fn chaos_partial_confirm_scenario() {
     let mut created = [false; 10];
     for i in 0..10 {
         let amount = 100_000i128;
-        let create = Op::CreateShipment { slot: i, amount, sequential: false, holdback: 0 };
-        exec(&create, &env, &contract_id, &token_id, &buyer, &supplier, &logistics, &arbiter, &mut created);
+        let create = Op::CreateShipment {
+            slot: i,
+            amount,
+            sequential: false,
+            holdback: 0,
+        };
+        exec(
+            &create,
+            &env,
+            &contract_id,
+            &token_id,
+            &buyer,
+            &supplier,
+            &logistics,
+            &arbiter,
+            &mut created,
+        );
         let proof = Op::SubmitProof { slot: i, m: 0 };
-        exec(&proof, &env, &contract_id, &token_id, &buyer, &supplier, &logistics, &arbiter, &mut created);
+        exec(
+            &proof,
+            &env,
+            &contract_id,
+            &token_id,
+            &buyer,
+            &supplier,
+            &logistics,
+            &arbiter,
+            &mut created,
+        );
         let confirm = Op::ConfirmMilestone { slot: i, m: 0 };
-        exec(&confirm, &env, &contract_id, &token_id, &buyer, &supplier, &logistics, &arbiter, &mut created);
+        exec(
+            &confirm,
+            &env,
+            &contract_id,
+            &token_id,
+            &buyer,
+            &supplier,
+            &logistics,
+            &arbiter,
+            &mut created,
+        );
     }
     assert_escrow_invariant(&env, &contract_id, &token_id, &created);
 }
@@ -358,7 +429,9 @@ fn chaos_dispute_only_scenario() {
     env.mock_all_auths();
     let contract_id = env.register(ChainSettleContract, ());
     let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
     let buyer = Address::generate(&env);
     let supplier = Address::generate(&env);
     let logistics = Address::generate(&env);
@@ -369,12 +442,47 @@ fn chaos_dispute_only_scenario() {
 
     let mut created = [false; 10];
     for i in 0..10 {
-        let create = Op::CreateShipment { slot: i, amount: 200_000, sequential: false, holdback: 0 };
-        exec(&create, &env, &contract_id, &token_id, &buyer, &supplier, &logistics, &arbiter, &mut created);
+        let create = Op::CreateShipment {
+            slot: i,
+            amount: 200_000,
+            sequential: false,
+            holdback: 0,
+        };
+        exec(
+            &create,
+            &env,
+            &contract_id,
+            &token_id,
+            &buyer,
+            &supplier,
+            &logistics,
+            &arbiter,
+            &mut created,
+        );
         let proof = Op::SubmitProof { slot: i, m: 0 };
-        exec(&proof, &env, &contract_id, &token_id, &buyer, &supplier, &logistics, &arbiter, &mut created);
+        exec(
+            &proof,
+            &env,
+            &contract_id,
+            &token_id,
+            &buyer,
+            &supplier,
+            &logistics,
+            &arbiter,
+            &mut created,
+        );
         let dispute = Op::RaiseDispute { slot: i, m: 0 };
-        exec(&dispute, &env, &contract_id, &token_id, &buyer, &supplier, &logistics, &arbiter, &mut created);
+        exec(
+            &dispute,
+            &env,
+            &contract_id,
+            &token_id,
+            &buyer,
+            &supplier,
+            &logistics,
+            &arbiter,
+            &mut created,
+        );
     }
     assert_escrow_invariant(&env, &contract_id, &token_id, &created);
 }
@@ -386,7 +494,9 @@ fn chaos_abandon_scenario() {
     env.mock_all_auths();
     let contract_id = env.register(ChainSettleContract, ());
     let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
     let buyer = Address::generate(&env);
     let supplier = Address::generate(&env);
     let logistics = Address::generate(&env);
@@ -397,14 +507,43 @@ fn chaos_abandon_scenario() {
 
     let mut created = [false; 10];
     for i in 0..10 {
-        let create = Op::CreateShipment { slot: i, amount: 300_000, sequential: false, holdback: 0 };
-        exec(&create, &env, &contract_id, &token_id, &buyer, &supplier, &logistics, &arbiter, &mut created);
+        let create = Op::CreateShipment {
+            slot: i,
+            amount: 300_000,
+            sequential: false,
+            holdback: 0,
+        };
+        exec(
+            &create,
+            &env,
+            &contract_id,
+            &token_id,
+            &buyer,
+            &supplier,
+            &logistics,
+            &arbiter,
+            &mut created,
+        );
         let cancel = Op::CancelShipment { slot: i };
-        exec(&cancel, &env, &contract_id, &token_id, &buyer, &supplier, &logistics, &arbiter, &mut created);
+        exec(
+            &cancel,
+            &env,
+            &contract_id,
+            &token_id,
+            &buyer,
+            &supplier,
+            &logistics,
+            &arbiter,
+            &mut created,
+        );
     }
     assert_escrow_invariant(&env, &contract_id, &token_id, &created);
 
     // All cancelled — contract holds nothing
     let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&contract_id), 0, "contract should hold nothing after all cancellations");
+    assert_eq!(
+        token_client.balance(&contract_id),
+        0,
+        "contract should hold nothing after all cancellations"
+    );
 }

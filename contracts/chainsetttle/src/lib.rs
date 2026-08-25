@@ -939,6 +939,51 @@ pub enum DataKeyExt2 {
     MilestoneTemplateNames(Address),
 }
 
+// `DataKeyExt` is itself at the 50-case union cap, so newer storage keys
+// (#366/#367/#368/#369) live here instead.
+#[contracttype]
+pub enum DataKeyExt2 {
+    // ── #366 Escrow deadline warning ────────────────────────────────────
+    /// Admin-configured lead window (in ledgers) before a milestone deadline
+    /// during which `check_deadline_warning` may fire (0 = disabled).
+    WarningLeadLedgers,
+    /// Whether the deadline-approaching warning has already fired for
+    /// (shipment_id, milestone_index) — enforces "fires only once".
+    DeadlineWarningFired(String, u32),
+
+    // ── #367 Co-buyer joint confirmation ────────────────────────────────
+    /// Admin-configured shipment value above which joint (buyer + co-buyer)
+    /// confirmation is required (0 = disabled).
+    JointConfirmationThreshold,
+    /// Designated co-buyer address for a shipment, set once near creation.
+    CoBuyer(String),
+    /// Partial joint-confirmation progress for (shipment_id, milestone_index).
+    JointConfirmation(String, u32),
+
+    // ── #368 Compliance hold ────────────────────────────────────────────
+    /// Off-chain compliance/legal review reason hash for a held shipment.
+    /// Presence of this key means the shipment is on hold.
+    ComplianceHold(String),
+
+    // ── #369 Dispute appeal ──────────────────────────────────────────────
+    /// Admin-configured window (in ledgers) after a dispute resolution during
+    /// which either party may call `appeal_dispute` (0 = disabled).
+    AppealWindowLedgers,
+    /// Ledger at which a dispute on (shipment_id, milestone_index) was last resolved.
+    DisputeResolvedAtLedger(String, u32),
+    /// Whether the dispute on (shipment_id, milestone_index) has already been appealed
+    /// once — a second resolution is final, so only one appeal is ever permitted.
+    DisputeAppealed(String, u32),
+}
+
+/// Partial joint-confirmation progress for a high-value shipment's milestone (#367).
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct JointConfirmationStatus {
+    pub buyer_confirmed: bool,
+    pub co_buyer_confirmed: bool,
+}
+
 // ============================================================
 // ERRORS
 // ============================================================
@@ -1124,9 +1169,11 @@ impl ChainSettleContract {
         };
         let key = DataKeyExt::UpgradeProposal(proposal_id);
         env.storage().persistent().set(&key, &proposal);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "upgrade_proposed"), proposal_id),
@@ -1285,6 +1332,77 @@ impl ChainSettleContract {
         env.storage()
             .instance()
             .get(&DataKey::EscalationThreshold)
+            .unwrap_or(0)
+    }
+
+    // ----------------------------------------------------------
+    // ADMIN: DEADLINE WARNING LEAD WINDOW (#366)
+    // ----------------------------------------------------------
+
+    /// Set the ledger lead window before a milestone deadline during which
+    /// `check_deadline_warning` may fire a `deadline_approaching` event (0 = disabled).
+    pub fn set_warning_lead_ledgers(env: Env, admin: Address, ledgers: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::WarningLeadLedgers, &ledgers);
+        env.events()
+            .publish((Symbol::new(&env, "warning_lead_ledgers_set"),), ledgers);
+    }
+
+    pub fn get_warning_lead_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt2::WarningLeadLedgers)
+            .unwrap_or(0)
+    }
+
+    // ----------------------------------------------------------
+    // ADMIN: JOINT CONFIRMATION THRESHOLD (#367)
+    // ----------------------------------------------------------
+
+    /// Set the shipment value above which joint (buyer + co-buyer) confirmation
+    /// is required before a milestone payout releases (0 = disabled).
+    pub fn set_joint_confirmation_threshold(env: Env, admin: Address, threshold: i128) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::JointConfirmationThreshold, &threshold);
+        env.events().publish(
+            (Symbol::new(&env, "joint_confirmation_threshold_set"),),
+            threshold,
+        );
+    }
+
+    pub fn get_joint_confirmation_threshold(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt2::JointConfirmationThreshold)
+            .unwrap_or(0)
+    }
+
+    // ----------------------------------------------------------
+    // ADMIN: APPEAL WINDOW (#369)
+    // ----------------------------------------------------------
+
+    /// Set the ledger window after a dispute resolution during which either
+    /// party may call `appeal_dispute` (0 = disabled).
+    pub fn set_appeal_window_ledgers(env: Env, admin: Address, ledgers: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::AppealWindowLedgers, &ledgers);
+        env.events()
+            .publish((Symbol::new(&env, "appeal_window_ledgers_set"),), ledgers);
+    }
+
+    pub fn get_appeal_window_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt2::AppealWindowLedgers)
             .unwrap_or(0)
     }
 
@@ -1753,11 +1871,16 @@ impl ChainSettleContract {
         };
         let key = DataKey::ConfirmationDelegate(shipment_id.clone());
         env.storage().persistent().set(&key, &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
         env.events().publish(
-            (Symbol::new(&env, "delegate_authorized"), shipment_id.clone()),
+            (
+                Symbol::new(&env, "delegate_authorized"),
+                shipment_id.clone(),
+            ),
             (buyer, delegate, per_tx_cap),
         );
     }
@@ -2038,9 +2161,11 @@ impl ChainSettleContract {
             panic!("proof must be submitted before attaching invoice hash");
         }
         env.storage().persistent().set(&key, &invoice_hash);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
         env.events().publish(
             (Symbol::new(&env, "invoice_hash_attached"), shipment_id),
             (milestone_index, invoice_hash, caller),
@@ -2106,9 +2231,11 @@ impl ChainSettleContract {
         env.storage()
             .persistent()
             .set(&key, &ExtensionReq { extra_ledgers });
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
         env.events().publish(
             (Symbol::new(&env, "extension_requested"), shipment_id),
             (milestone_index, extra_ledgers, caller),
@@ -2138,9 +2265,11 @@ impl ChainSettleContract {
             .unwrap_or_else(|| env.ledger().sequence());
         let new_deadline = current_deadline + req.extra_ledgers;
         env.storage().persistent().set(&deadline_key, &new_deadline);
-        env.storage()
-            .persistent()
-            .extend_ttl(&deadline_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &deadline_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
         env.events().publish(
             (Symbol::new(&env, "extension_approved"), shipment_id),
             (milestone_index, new_deadline, buyer),
@@ -2333,7 +2462,9 @@ impl ChainSettleContract {
         milestones: Vec<Milestone>,
         options: ShipmentOptions,
     ) -> String {
-        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
         let response_deadline = options.response_deadline;
         let penalty_bps = options.penalty_bps;
@@ -2436,14 +2567,21 @@ impl ChainSettleContract {
             if env
                 .storage()
                 .instance()
-                .get::<DataKey, soroban_sdk::BytesN<32>>(&DataKey::Blacklisted(buyers.get(i).unwrap().clone()))
+                .get::<DataKey, soroban_sdk::BytesN<32>>(&DataKey::Blacklisted(
+                    buyers.get(i).unwrap().clone(),
+                ))
                 .is_some()
             {
                 panic!("unauthorized");
             }
         }
         for addr in [supplier.clone(), logistics.clone(), arbiter.clone()] {
-            if env.storage().instance().get::<DataKey, soroban_sdk::BytesN<32>>(&DataKey::Blacklisted(addr)).is_some() {
+            if env
+                .storage()
+                .instance()
+                .get::<DataKey, soroban_sdk::BytesN<32>>(&DataKey::Blacklisted(addr))
+                .is_some()
+            {
                 panic!("unauthorized");
             }
         }
@@ -2705,9 +2843,10 @@ impl ChainSettleContract {
         }
 
         if let Some(cooldown) = confirmation_cooldown_ledgers {
-            env.storage()
-                .persistent()
-                .set(&DataKeyExt::ShipmentConfirmationCooldown(shipment_id.clone()), &cooldown);
+            env.storage().persistent().set(
+                &DataKeyExt::ShipmentConfirmationCooldown(shipment_id.clone()),
+                &cooldown,
+            );
             env.storage().persistent().extend_ttl(
                 &DataKeyExt::ShipmentConfirmationCooldown(shipment_id.clone()),
                 constants::TTL_INITIAL_LEDGERS,
@@ -2717,9 +2856,10 @@ impl ChainSettleContract {
 
         // Feature A: Store the arbiter panel when provided.
         if arbiter_panel.len() > 0 {
-            env.storage()
-                .persistent()
-                .set(&DataKeyExt::ArbiterPanel(shipment_id.clone()), &arbiter_panel);
+            env.storage().persistent().set(
+                &DataKeyExt::ArbiterPanel(shipment_id.clone()),
+                &arbiter_panel,
+            );
             env.storage().persistent().extend_ttl(
                 &DataKeyExt::ArbiterPanel(shipment_id.clone()),
                 constants::TTL_INITIAL_LEDGERS,
@@ -2901,7 +3041,9 @@ impl ChainSettleContract {
         shipment_id: String,
         new_percents: Vec<u32>,
     ) {
-        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
 
         let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
@@ -2972,7 +3114,9 @@ impl ChainSettleContract {
         milestone_index: u32,
         advance_percent: u32,
     ) {
-        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
 
         let shipment = Self::get_shipment_internal(&env, &shipment_id);
@@ -3027,7 +3171,9 @@ impl ChainSettleContract {
     /// the supplier immediately. The advance is deducted from the milestone payment
     /// when the milestone is later confirmed.
     pub fn approve_advance(env: Env, buyer: Address, shipment_id: String, milestone_index: u32) {
-        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
 
         let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
@@ -3128,7 +3274,9 @@ impl ChainSettleContract {
         milestone_index: u32,
         allowed_types: Vec<Symbol>,
     ) {
-        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
 
         let shipment = Self::get_shipment_internal(&env, &shipment_id);
@@ -3144,9 +3292,11 @@ impl ChainSettleContract {
 
         let key = DataKey::MilestoneProofWhitelist(shipment_id.clone(), milestone_index);
         env.storage().persistent().set(&key, &allowed_types);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
 
         env.events().publish(
             (
@@ -3181,6 +3331,124 @@ impl ChainSettleContract {
     }
 
     // ----------------------------------------------------------
+    // CO-BUYER (#367)
+    // ----------------------------------------------------------
+
+    /// Designate a co-buyer for joint (dual-control) milestone confirmation.
+    /// Callable once, by a registered buyer, only while the shipment is still
+    /// at its starting state (nothing released or advanced yet) — i.e. "at creation".
+    /// Immutable once set.
+    pub fn set_co_buyer(env: Env, caller: Address, shipment_id: String, co_buyer: Address) {
+        Self::assert_not_paused(&env);
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+        if shipment.status != ShipmentStatus::Active {
+            panic!("shipment is not active");
+        }
+        Self::require_buyer_auth(&shipment, &caller);
+        if shipment.released_amount > 0 || shipment.total_advanced_amount > 0 {
+            panic!("co-buyer must be set before the shipment progresses");
+        }
+        let key = DataKeyExt2::CoBuyer(shipment_id.clone());
+        if env.storage().persistent().has(&key) {
+            panic!("co-buyer is already set");
+        }
+        env.storage().persistent().set(&key, &co_buyer);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+        env.events()
+            .publish((Symbol::new(&env, "co_buyer_set"), shipment_id), co_buyer);
+    }
+
+    /// Returns the designated co-buyer for a shipment, if any.
+    pub fn get_co_buyer(env: Env, shipment_id: String) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::CoBuyer(shipment_id))
+    }
+
+    /// Returns the partial joint-confirmation progress for a milestone.
+    pub fn get_joint_confirmation_status(
+        env: Env,
+        shipment_id: String,
+        milestone_index: u32,
+    ) -> JointConfirmationStatus {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::JointConfirmation(
+                shipment_id,
+                milestone_index,
+            ))
+            .unwrap_or_default()
+    }
+
+    /// Whether `shipment` requires joint buyer + co-buyer confirmation (#367):
+    /// a co-buyer must be designated AND the shipment value must exceed the
+    /// admin-configured threshold (0 = disabled).
+    fn joint_confirmation_required(env: &Env, shipment: &Shipment) -> bool {
+        let threshold: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::JointConfirmationThreshold)
+            .unwrap_or(0);
+        if threshold <= 0 || shipment.total_amount <= threshold {
+            return false;
+        }
+        env.storage()
+            .persistent()
+            .has(&DataKeyExt2::CoBuyer(shipment.id.clone()))
+    }
+
+    /// Records a joint-confirmation vote from `caller` (who must act as the buyer side
+    /// via `acts_as_buyer`, or be the designated co-buyer via `is_co_buyer`). Returns
+    /// true once both sides have confirmed (caller should proceed with payout), false
+    /// while awaiting the other party (caller should return without releasing funds).
+    fn record_joint_confirmation(
+        env: &Env,
+        shipment_id: &String,
+        milestone_index: u32,
+        caller: &Address,
+        acts_as_buyer: bool,
+        is_co_buyer: bool,
+    ) -> bool {
+        let key = DataKeyExt2::JointConfirmation(shipment_id.clone(), milestone_index);
+        let mut status: JointConfirmationStatus =
+            env.storage().persistent().get(&key).unwrap_or_default();
+        if acts_as_buyer {
+            status.buyer_confirmed = true;
+        }
+        if is_co_buyer {
+            status.co_buyer_confirmed = true;
+        }
+        let both_confirmed = status.buyer_confirmed && status.co_buyer_confirmed;
+        if both_confirmed {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(&key, &status);
+            env.storage().persistent().extend_ttl(
+                &key,
+                constants::TTL_INITIAL_LEDGERS,
+                constants::TTL_MAX_LEDGERS,
+            );
+        }
+        env.events().publish(
+            (
+                Symbol::new(env, "joint_confirmation_recorded"),
+                shipment_id.clone(),
+            ),
+            (
+                milestone_index,
+                caller.clone(),
+                status.buyer_confirmed,
+                status.co_buyer_confirmed,
+            ),
+        );
+        both_confirmed
+    }
+
+    // ----------------------------------------------------------
     // SUBMIT PROOF
     // ----------------------------------------------------------
 
@@ -3192,7 +3460,9 @@ impl ChainSettleContract {
         proof_hash: String,
         proof_type: Symbol,
     ) {
-        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
 
         let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
@@ -3246,11 +3516,8 @@ impl ChainSettleContract {
 
         // Issue #304 — Enforce per-milestone evidence submission cap.
         let evidence_key = DataKey::EvidenceCount(shipment_id.clone(), milestone_index);
-        let current_evidence_count: u32 = env
-            .storage()
-            .persistent()
-            .get(&evidence_key)
-            .unwrap_or(0);
+        let current_evidence_count: u32 =
+            env.storage().persistent().get(&evidence_key).unwrap_or(0);
         let max_evidence: u32 = env
             .storage()
             .instance()
@@ -3290,23 +3557,29 @@ impl ChainSettleContract {
         env.storage()
             .persistent()
             .set(&evidence_key, &(current_evidence_count + 1));
-        env.storage()
-            .persistent()
-            .extend_ttl(&evidence_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &evidence_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
 
         // Record the declared proof content type for off-chain and on-chain querying.
         let type_key = DataKey::SubmittedProofType(shipment_id.clone(), milestone_index);
         env.storage().persistent().set(&type_key, &proof_type);
-        env.storage()
-            .persistent()
-            .extend_ttl(&type_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &type_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
 
         // Record original submitter so correct_proof can enforce same-role corrections.
         let submitter_key = DataKeyExt::ProofSubmitter(shipment_id.clone(), milestone_index);
         env.storage().persistent().set(&submitter_key, &caller);
-        env.storage()
-            .persistent()
-            .extend_ttl(&submitter_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &submitter_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
 
         let event_topic = if is_resubmission {
             Symbol::new(&env, "proof_resubmitted")
@@ -3348,7 +3621,9 @@ impl ChainSettleContract {
         new_proof_hash: String,
         new_proof_type: Symbol,
     ) {
-        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
         caller.require_auth();
 
@@ -3417,9 +3692,11 @@ impl ChainSettleContract {
 
         let type_key = DataKey::SubmittedProofType(shipment_id.clone(), milestone_index);
         env.storage().persistent().set(&type_key, &new_proof_type);
-        env.storage()
-            .persistent()
-            .extend_ttl(&type_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &type_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "proof_corrected"), shipment_id.clone()),
@@ -3432,7 +3709,9 @@ impl ChainSettleContract {
     // ----------------------------------------------------------
 
     pub fn confirm_milestone(env: Env, buyer: Address, shipment_id: String, milestone_index: u32) {
-        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
 
         // Batch read shipment and contract stats in a single context fetch.
@@ -3442,11 +3721,22 @@ impl ChainSettleContract {
         if shipment.status != ShipmentStatus::Active {
             panic!("shipment is not active");
         }
+        Self::assert_shipment_not_on_hold(&env, &shipment_id);
 
         // Issue #306 — Accept either the registered buyer or an authorized delegate.
         // Delegates are limited to confirm_milestone only (not dispute/cancel/etc.).
+        // #367 — Also accept the designated co-buyer (for joint confirmation).
         let caller_is_buyer = Self::is_buyer(&shipment, &buyer);
-        if !caller_is_buyer {
+        let caller_is_co_buyer = env
+            .storage()
+            .persistent()
+            .get::<DataKeyExt2, Address>(&DataKeyExt2::CoBuyer(shipment_id.clone()))
+            .map(|cb| cb == buyer)
+            .unwrap_or(false);
+        let mut acts_as_buyer = caller_is_buyer;
+        if caller_is_co_buyer {
+            buyer.require_auth();
+        } else if !caller_is_buyer {
             let delegate_config: DelegateConfig = env
                 .storage()
                 .persistent()
@@ -3457,6 +3747,7 @@ impl ChainSettleContract {
             }
             // Delegate auth check — must require_auth before checking cap.
             buyer.require_auth();
+            acts_as_buyer = true;
         } else {
             Self::require_buyer_auth(&shipment, &buyer);
         }
@@ -3471,6 +3762,22 @@ impl ChainSettleContract {
         }
 
         Self::assert_shipment_not_paused(&env, &shipment_id);
+
+        // #367 — High-value shipments with a designated co-buyer require both the
+        // buyer and co-buyer to confirm before payout executes.
+        if Self::joint_confirmation_required(&env, &shipment) {
+            let both_confirmed = Self::record_joint_confirmation(
+                &env,
+                &shipment_id,
+                milestone_index,
+                &buyer,
+                acts_as_buyer,
+                caller_is_co_buyer,
+            );
+            if !both_confirmed {
+                return;
+            }
+        }
 
         let cooldown = Self::get_confirmation_cooldown_internal(&env, &shipment_id);
         let fast_track = Self::is_fast_track_eligible_internal(&env, &shipment.supplier);
@@ -4191,6 +4498,7 @@ impl ChainSettleContract {
             panic!("shipment is not active");
         }
         Self::assert_shipment_not_paused(&env, &shipment_id);
+        Self::assert_shipment_not_on_hold(&env, &shipment_id);
         Self::require_buyer_auth(&shipment, &buyer);
 
         // Dispute cooldown check.
@@ -4267,6 +4575,20 @@ impl ChainSettleContract {
         milestone.release_after_ledger = 0;
         milestone.status = MilestoneStatus::Disputed;
 
+        // #369: Fresh dispute cycle — clear any prior appeal-window bookkeeping.
+        env.storage()
+            .persistent()
+            .remove(&DataKeyExt2::DisputeResolvedAtLedger(
+                shipment_id.clone(),
+                milestone_index,
+            ));
+        env.storage()
+            .persistent()
+            .remove(&DataKeyExt2::DisputeAppealed(
+                shipment_id.clone(),
+                milestone_index,
+            ));
+
         Self::append_audit_entry(
             &env,
             &mut shipment,
@@ -4282,9 +4604,11 @@ impl ChainSettleContract {
         env.storage()
             .persistent()
             .set(&dispute_opened_at_key, &env.ledger().timestamp());
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_opened_at_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &dispute_opened_at_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
         shipment.milestones.set(milestone_index, milestone);
 
         env.storage()
@@ -4357,6 +4681,7 @@ impl ChainSettleContract {
         if shipment.status != ShipmentStatus::Active {
             panic!("shipment is not active");
         }
+        Self::assert_shipment_not_on_hold(&env, &shipment_id);
         Self::require_buyer_auth(&shipment, &buyer);
 
         if milestone_index as usize >= shipment.milestones.len() as usize {
@@ -4473,6 +4798,20 @@ impl ChainSettleContract {
         milestone.release_after_ledger = 0;
         milestone.status = MilestoneStatus::Disputed;
 
+        // #369: Fresh dispute cycle — clear any prior appeal-window bookkeeping.
+        env.storage()
+            .persistent()
+            .remove(&DataKeyExt2::DisputeResolvedAtLedger(
+                shipment_id.clone(),
+                milestone_index,
+            ));
+        env.storage()
+            .persistent()
+            .remove(&DataKeyExt2::DisputeAppealed(
+                shipment_id.clone(),
+                milestone_index,
+            ));
+
         Self::append_audit_entry(
             &env,
             &mut shipment,
@@ -4488,9 +4827,11 @@ impl ChainSettleContract {
         env.storage()
             .persistent()
             .set(&dispute_opened_at_key, &env.ledger().timestamp());
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_opened_at_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &dispute_opened_at_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
         shipment.milestones.set(milestone_index, milestone);
 
         env.storage()
@@ -4556,8 +4897,12 @@ impl ChainSettleContract {
     ///
     /// The arbiter fee (`applicable_arbiter_fee_bps`) is deducted from the disputed payment
     /// and transferred to the arbiter address whenever a monetary disbursement occurs.
-    
-    pub(crate) fn applicable_arbiter_fee_bps(env: &Env, contested_amount: i128, default_bps: u32) -> u32 {
+
+    pub(crate) fn applicable_arbiter_fee_bps(
+        env: &Env,
+        contested_amount: i128,
+        default_bps: u32,
+    ) -> u32 {
         let tiers: Vec<(i128, u32)> = env
             .storage()
             .persistent()
@@ -4566,7 +4911,7 @@ impl ChainSettleContract {
         if tiers.is_empty() {
             return default_bps;
         }
-        
+
         let mut applicable_bps = default_bps;
         for i in 0..tiers.len() {
             let (threshold, bps) = tiers.get(i).unwrap();
@@ -4727,7 +5072,10 @@ impl ChainSettleContract {
             env.storage().persistent().remove(&contested_key);
         }
 
-        let resolution_ledgers = env.ledger().sequence() - milestone.dispute_opened_ledger.unwrap_or(env.ledger().sequence());
+        let resolution_ledgers = env.ledger().sequence()
+            - milestone
+                .dispute_opened_ledger
+                .unwrap_or(env.ledger().sequence());
         let mut arbiter_stats: ArbiterStats = env
             .storage()
             .persistent()
@@ -4741,15 +5089,22 @@ impl ChainSettleContract {
         arbiter_stats.total_resolution_ledgers += resolution_ledgers as u64;
         let stats_key = DataKeyExt::ArbiterStats(arbiter.clone());
         env.storage().persistent().set(&stats_key, &arbiter_stats);
-        env.storage()
-            .persistent()
-            .extend_ttl(&stats_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &stats_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
 
         shipment.milestones.set(milestone_index, milestone);
         shipment.open_dispute_count = shipment.open_dispute_count.saturating_sub(1);
 
         // Update cooldown tracking regardless of approve/reject.
         shipment.last_dispute_resolved_ledger = Some(env.ledger().sequence());
+        // #369: Record the resolution ledger so appeal_dispute can enforce its window.
+        env.storage().persistent().set(
+            &DataKeyExt2::DisputeResolvedAtLedger(shipment_id.clone(), milestone_index),
+            &env.ledger().sequence(),
+        );
 
         Self::append_audit_entry(
             &env,
@@ -4877,6 +5232,95 @@ impl ChainSettleContract {
     }
 
     // ----------------------------------------------------------
+    // DISPUTE APPEAL (#369)
+    // ----------------------------------------------------------
+
+    /// Buyer or supplier escalates an already-resolved dispute to a second, independent
+    /// arbiter drawn from the admin-managed arbiter pool, within the admin-configured
+    /// appeal window. Reassigns the shipment's arbiter and reopens the milestone as
+    /// `Disputed` so the new arbiter can call `resolve_dispute` again. That second
+    /// resolution is final — a milestone may only ever be appealed once per dispute cycle.
+    pub fn appeal_dispute(env: Env, caller: Address, shipment_id: String, milestone_index: u32) {
+        Self::assert_not_paused(&env);
+
+        let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
+        if shipment.status != ShipmentStatus::Active {
+            panic!("shipment is not active");
+        }
+        Self::assert_buyer_or_supplier(&shipment, &caller);
+        caller.require_auth();
+
+        if milestone_index as usize >= shipment.milestones.len() as usize {
+            panic!("invalid milestone index");
+        }
+
+        let window: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::AppealWindowLedgers)
+            .unwrap_or(0);
+        if window == 0 {
+            panic!("appeals are not enabled");
+        }
+
+        let appealed_key = DataKeyExt2::DisputeAppealed(shipment_id.clone(), milestone_index);
+        if env
+            .storage()
+            .persistent()
+            .get(&appealed_key)
+            .unwrap_or(false)
+        {
+            panic!("dispute has already been appealed");
+        }
+
+        let resolved_key =
+            DataKeyExt2::DisputeResolvedAtLedger(shipment_id.clone(), milestone_index);
+        let resolved_at: u32 = env
+            .storage()
+            .persistent()
+            .get(&resolved_key)
+            .unwrap_or_else(|| panic!("dispute has not been resolved"));
+
+        if env.ledger().sequence() > resolved_at + window {
+            panic!("appeal window has closed");
+        }
+
+        // Draw a distinct arbiter (not the one who issued the original resolution) from
+        // the admin-managed pool.
+        let pool = Self::get_arbiter_pool(env.clone());
+        let mut new_arbiter: Option<Address> = None;
+        for i in 0..pool.len() {
+            let candidate = pool.get(i).unwrap();
+            if candidate != shipment.arbiter {
+                new_arbiter = Some(candidate);
+                break;
+            }
+        }
+        let new_arbiter =
+            new_arbiter.unwrap_or_else(|| panic!("no distinct arbiter available for appeal"));
+
+        let mut milestone = shipment.milestones.get(milestone_index).unwrap();
+        shipment.arbiter = new_arbiter.clone();
+        milestone.release_after_ledger = 0;
+        milestone.status = MilestoneStatus::Disputed;
+        milestone.dispute_opened_ledger = Some(env.ledger().sequence());
+        shipment.open_dispute_count += 1;
+        shipment.milestones.set(milestone_index, milestone);
+
+        env.storage().persistent().set(&appealed_key, &true);
+        env.storage().persistent().remove(&resolved_key);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
+
+        env.events().publish(
+            (Symbol::new(&env, "dispute_appealed"), shipment_id),
+            (milestone_index, caller, new_arbiter),
+        );
+    }
+
+    // ----------------------------------------------------------
     // CHECK ESCALATION
     // ----------------------------------------------------------
 
@@ -4915,11 +5359,78 @@ impl ChainSettleContract {
     }
 
     // ----------------------------------------------------------
+    // CHECK DEADLINE WARNING (#366)
+    // ----------------------------------------------------------
+
+    /// Permissionless off-chain notification hook: emits `deadline_approaching` if
+    /// `milestone_index`'s deadline falls within the admin-configured lead window and
+    /// the warning hasn't already fired for this milestone. No on-chain state changes
+    /// beyond the fired-once flag; a no-op outside the window or once already fired.
+    pub fn check_deadline_warning(env: Env, shipment_id: String, milestone_index: u32) {
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+        let lead: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::WarningLeadLedgers)
+            .unwrap_or(0);
+        if lead == 0 {
+            return; // Deadline warnings not enabled
+        }
+
+        if milestone_index as usize >= shipment.milestones.len() as usize {
+            panic!("invalid milestone index");
+        }
+
+        let milestone = shipment.milestones.get(milestone_index).unwrap();
+        if milestone.status != MilestoneStatus::Pending
+            && milestone.status != MilestoneStatus::ProofSubmitted
+        {
+            return; // Deadline no longer relevant.
+        }
+        if milestone.deadline_ledger == 0 {
+            return; // No deadline configured for this milestone.
+        }
+
+        let fired_key = DataKeyExt2::DeadlineWarningFired(shipment_id.clone(), milestone_index);
+        if env.storage().persistent().get(&fired_key).unwrap_or(false) {
+            return; // Already fired for this milestone.
+        }
+
+        let current_ledger = env.ledger().sequence();
+        let window_start = milestone.deadline_ledger.saturating_sub(lead);
+        if current_ledger < window_start || current_ledger >= milestone.deadline_ledger {
+            return; // Outside the lead window.
+        }
+
+        env.storage().persistent().set(&fired_key, &true);
+        env.storage().persistent().extend_ttl(
+            &fired_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+
+        let ledgers_remaining = milestone.deadline_ledger - current_ledger;
+        env.events().publish(
+            (
+                Symbol::new(&env, "deadline_approaching"),
+                shipment_id.clone(),
+            ),
+            (
+                milestone_index,
+                ledgers_remaining,
+                milestone.deadline_ledger,
+            ),
+        );
+    }
+
+    // ----------------------------------------------------------
     // CANCEL SHIPMENT (buyer)
     // ----------------------------------------------------------
 
     pub fn cancel_shipment(env: Env, buyer: Address, shipment_id: String) {
-        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::assert_not_paused(&env);
         buyer.require_auth();
 
@@ -4928,6 +5439,7 @@ impl ChainSettleContract {
         if shipment.status != ShipmentStatus::Active {
             panic!("shipment is not active");
         }
+        Self::assert_shipment_not_on_hold(&env, &shipment_id);
         Self::assert_is_buyer(&shipment, &buyer);
 
         // Block cancellation if any milestone is Disputed.
@@ -4967,8 +5479,7 @@ impl ChainSettleContract {
         }
 
         shipment.status = ShipmentStatus::Cancelled;
-        shipment.cancellation_reason =
-            Vec::from_array(&env, [CancellationReason::BuyerCancelled]);
+        shipment.cancellation_reason = Vec::from_array(&env, [CancellationReason::BuyerCancelled]);
 
         Self::increment_reputation_internal(&env, &shipment.supplier, 0, 0, 1);
 
@@ -5039,6 +5550,7 @@ impl ChainSettleContract {
         if shipment.status != ShipmentStatus::Active {
             panic!("shipment is not active");
         }
+        Self::assert_shipment_not_on_hold(&env, &shipment_id);
         if supplier != shipment.supplier {
             panic!("unauthorized");
         }
@@ -5294,9 +5806,11 @@ impl ChainSettleContract {
                 ledger: env.ledger().sequence(),
             });
             env.storage().persistent().set(&log_key, &log);
-            env.storage()
-                .persistent()
-                .extend_ttl(&log_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+            env.storage().persistent().extend_ttl(
+                &log_key,
+                constants::TTL_INITIAL_LEDGERS,
+                constants::TTL_MAX_LEDGERS,
+            );
         } else {
             env.storage().temporary().set(&amendment_key, &proposal);
         }
@@ -6246,8 +6760,7 @@ impl ChainSettleContract {
             &shipment_id,
         );
         shipment.status = ShipmentStatus::Expired;
-        shipment.cancellation_reason =
-            Vec::from_array(&env, [CancellationReason::DeadlineRefund]);
+        shipment.cancellation_reason = Vec::from_array(&env, [CancellationReason::DeadlineRefund]);
         Self::increment_reputation_internal(&env, &shipment.supplier, 0, 0, 1);
 
         env.storage()
@@ -6278,7 +6791,7 @@ impl ChainSettleContract {
             .storage()
             .persistent()
             .get(&DataKeyExt::BackupArbiter(shipment_id.clone()));
-        
+
         let backup = backup_arbiter.unwrap_or_else(|| panic!("no backup arbiter configured"));
 
         if shipment.arbiter == backup {
@@ -6299,12 +6812,14 @@ impl ChainSettleContract {
             .instance()
             .get(&DataKeyExt::ArbiterInactivityThreshold)
             .unwrap_or(0);
-        
+
         if threshold == 0 {
             panic!("arbiter failover is disabled globally");
         }
 
-        let opened_ledger = milestone.dispute_opened_ledger.unwrap_or_else(|| panic!("dispute not opened"));
+        let opened_ledger = milestone
+            .dispute_opened_ledger
+            .unwrap_or_else(|| panic!("dispute not opened"));
         let current_ledger = env.ledger().sequence();
         if current_ledger < opened_ledger + threshold {
             panic!("inactivity threshold not reached");
@@ -6367,10 +6882,8 @@ impl ChainSettleContract {
         env.storage()
             .instance()
             .set(&DataKeyExt::GlobalConfirmationCooldown, &ledgers);
-        env.events().publish(
-            (Symbol::new(&env, "confirmation_cooldown_set"),),
-            ledgers,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "confirmation_cooldown_set"),), ledgers);
     }
 
     // ----------------------------------------------------------
@@ -6678,16 +7191,20 @@ impl ChainSettleContract {
             approve,
         });
         env.storage().persistent().set(&votes_key, &votes);
-        env.storage()
-            .persistent()
-            .extend_ttl(&votes_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &votes_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
 
         env.events().publish(
+            (Symbol::new(&env, "dispute_vote_cast"), shipment_id.clone()),
             (
-                Symbol::new(&env, "dispute_vote_cast"),
-                shipment_id.clone(),
+                milestone_index,
+                arbiter.clone(),
+                approve,
+                votes.len() as u32,
             ),
-            (milestone_index, arbiter.clone(), approve, votes.len() as u32),
         );
 
         // Check for majority: count approve vs reject votes.
@@ -6746,8 +7263,12 @@ impl ChainSettleContract {
         let token_client = token::Client::new(env, &shipment.token);
 
         if approve {
-            let advance_deducted =
-                Self::consume_advance_for_milestone(env, &mut shipment, &shipment_id, milestone_index);
+            let advance_deducted = Self::consume_advance_for_milestone(
+                env,
+                &mut shipment,
+                &shipment_id,
+                milestone_index,
+            );
 
             let mut fee_amount: i128 = 0;
             let net_payment = Self::deduct_fee(env, payment, &shipment.token, &mut fee_amount);
@@ -6832,7 +7353,11 @@ impl ChainSettleContract {
             let buyer_refund = (payment - arbiter_fee_total).max(0);
             if buyer_refund > 0 {
                 let primary_buyer = shipment.buyers.get(0).unwrap();
-                token_client.transfer(&env.current_contract_address(), &primary_buyer, &buyer_refund);
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &primary_buyer,
+                    &buyer_refund,
+                );
             }
             shipment.released_amount += payment;
             if shipment.dispute_bond_amount > 0 {
@@ -6863,7 +7388,10 @@ impl ChainSettleContract {
         if is_partial {
             env.storage()
                 .persistent()
-                .remove(&DataKey::DisputeContestedPercent(shipment_id.clone(), milestone_index));
+                .remove(&DataKey::DisputeContestedPercent(
+                    shipment_id.clone(),
+                    milestone_index,
+                ));
         }
 
         // Update arbiter stats for the resolver.
@@ -6938,7 +7466,13 @@ impl ChainSettleContract {
         let remaining_amount = shipment.total_amount - released_amount;
         env.events().publish(
             (Symbol::new(env, "dispute_resolved"), shipment_id.clone()),
-            (milestone_index, approve, is_partial, released_amount, remaining_amount),
+            (
+                milestone_index,
+                approve,
+                is_partial,
+                released_amount,
+                remaining_amount,
+            ),
         );
         let resolution = if approve {
             Symbol::new(env, "supplier")
@@ -7051,9 +7585,11 @@ impl ChainSettleContract {
         let key = DataKeyExt::MilestonePayees(shipment_id.clone(), milestone_index);
         if payees.len() > 0 {
             env.storage().persistent().set(&key, &payees);
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+            env.storage().persistent().extend_ttl(
+                &key,
+                constants::TTL_INITIAL_LEDGERS,
+                constants::TTL_MAX_LEDGERS,
+            );
         } else {
             env.storage().persistent().remove(&key);
         }
@@ -7084,7 +7620,12 @@ impl ChainSettleContract {
     /// Admin configures the auto-blacklist thresholds.
     /// Either threshold set to `0` disables that individual check.
     /// Both `0` disables auto-blacklisting entirely (default).
-    pub fn set_auto_blacklist_rule(env: Env, admin: Address, max_cancelled: u32, max_disputed: u32) {
+    pub fn set_auto_blacklist_rule(
+        env: Env,
+        admin: Address,
+        max_cancelled: u32,
+        max_disputed: u32,
+    ) {
         admin.require_auth();
         Self::assert_admin(&env, &admin);
         env.storage().instance().set(
@@ -7423,6 +7964,68 @@ impl ChainSettleContract {
     }
 
     // ----------------------------------------------------------
+    // PER-SHIPMENT COMPLIANCE HOLD (#368)
+    // ----------------------------------------------------------
+
+    /// Admin unilaterally freezes all state-changing operations on a single shipment
+    /// pending an off-chain compliance/legal review. `reason_hash` is an off-chain
+    /// document hash (e.g. IPFS CID) describing the reason. Other shipments are unaffected.
+    pub fn set_compliance_hold(
+        env: Env,
+        admin: Address,
+        shipment_id: String,
+        reason_hash: BytesN<32>,
+    ) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        // Ensure the shipment exists (panics with "shipment not found" otherwise).
+        Self::get_shipment_internal(&env, &shipment_id);
+        let key = DataKeyExt2::ComplianceHold(shipment_id.clone());
+        env.storage().persistent().set(&key, &reason_hash);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+        env.events().publish(
+            (Symbol::new(&env, "compliance_hold_set"), shipment_id),
+            reason_hash,
+        );
+    }
+
+    /// Admin lifts a compliance hold on a single shipment.
+    pub fn clear_compliance_hold(env: Env, admin: Address, shipment_id: String) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        let key = DataKeyExt2::ComplianceHold(shipment_id.clone());
+        if !env.storage().persistent().has(&key) {
+            panic!("shipment is not on compliance hold");
+        }
+        env.storage().persistent().remove(&key);
+        env.events().publish(
+            (Symbol::new(&env, "compliance_hold_cleared"), shipment_id),
+            (),
+        );
+    }
+
+    /// Read-only check for whether a shipment is currently on compliance hold.
+    pub fn is_on_compliance_hold(env: Env, shipment_id: String) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKeyExt2::ComplianceHold(shipment_id))
+    }
+
+    fn assert_shipment_not_on_hold(env: &Env, shipment_id: &String) {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKeyExt2::ComplianceHold(shipment_id.clone()))
+        {
+            panic!("shipment is on compliance hold pending review");
+        }
+    }
+
+    // ----------------------------------------------------------
     // MILESTONE NOTES
     // ----------------------------------------------------------
 
@@ -7465,11 +8068,17 @@ impl ChainSettleContract {
             notes = next;
         }
         env.storage().persistent().set(&key, &notes);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
         env.events().publish(
-            (Symbol::new(&env, "milestone_note_added"), shipment_id, milestone_index),
+            (
+                Symbol::new(&env, "milestone_note_added"),
+                shipment_id,
+                milestone_index,
+            ),
             (caller, note),
         );
     }
@@ -7551,9 +8160,10 @@ impl ChainSettleContract {
             released_amount: shipment.released_amount,
             completed_at: shipment.created_at,
         };
-        env.storage()
-            .persistent()
-            .set(&DataKeyExt::ArchivedShipment(shipment_id.clone()), &archived);
+        env.storage().persistent().set(
+            &DataKeyExt::ArchivedShipment(shipment_id.clone()),
+            &archived,
+        );
         env.storage()
             .persistent()
             .remove(&DataKey::Shipment(shipment_id.clone()));
@@ -7579,7 +8189,9 @@ impl ChainSettleContract {
     // ----------------------------------------------------------
 
     pub fn get_shipment(env: Env, shipment_id: String) -> Shipment {
-        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         Self::get_shipment_internal(&env, &shipment_id)
     }
 
@@ -7588,7 +8200,9 @@ impl ChainSettleContract {
     }
 
     pub fn get_milestone(env: Env, shipment_id: String, milestone_index: u32) -> Milestone {
-        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         let shipment = Self::get_shipment_internal(&env, &shipment_id);
         shipment
             .milestones
@@ -7620,7 +8234,9 @@ impl ChainSettleContract {
     }
 
     pub fn get_escrow_balance(env: Env, shipment_id: String) -> i128 {
-        env.storage().instance().extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
         let shipment = Self::get_shipment_internal(&env, &shipment_id);
         shipment.total_amount - shipment.released_amount - shipment.total_advanced_amount
     }
@@ -7679,20 +8295,26 @@ impl ChainSettleContract {
         let mut late = 0;
         let mut disputed = 0;
         let total = shipment.milestones.len();
-        
+
         let current_ledger = env.ledger().sequence();
-        
+
         for i in 0..total {
             let m = shipment.milestones.get(i).unwrap();
-            
+
             if m.status == MilestoneStatus::Disputed || m.status == MilestoneStatus::Resolved {
                 disputed += 1;
             }
-            
+
             let deadline = Self::get_milestone_deadline(env.clone(), shipment_id.clone(), i);
-            if deadline > 0 && current_ledger > deadline && m.status != MilestoneStatus::Confirmed && m.status != MilestoneStatus::Resolved {
+            if deadline > 0
+                && current_ledger > deadline
+                && m.status != MilestoneStatus::Confirmed
+                && m.status != MilestoneStatus::Resolved
+            {
                 late += 1;
-            } else if m.status == MilestoneStatus::Confirmed || m.status == MilestoneStatus::Resolved {
+            } else if m.status == MilestoneStatus::Confirmed
+                || m.status == MilestoneStatus::Resolved
+            {
                 // If the milestone is finished, we could consider if it *was* late,
                 // but the standard says "deadline vs current ledger for lateness",
                 // meaning currently late. If we want historically late, we'd need to check when it was finished.
@@ -7700,7 +8322,7 @@ impl ChainSettleContract {
                 // I will consider a milestone currently late if the deadline has passed and it's not confirmed.
             }
         }
-        
+
         ShipmentRisk {
             late_milestones: late,
             disputed_milestones: disputed,
@@ -7727,7 +8349,11 @@ impl ChainSettleContract {
                 .unwrap_or_else(|| Vec::new(&env)),
         };
 
-        let clamped_limit = if limit > constants::LIST_SHIPMENTS_MAX_PAGE { constants::LIST_SHIPMENTS_MAX_PAGE } else { limit };
+        let clamped_limit = if limit > constants::LIST_SHIPMENTS_MAX_PAGE {
+            constants::LIST_SHIPMENTS_MAX_PAGE
+        } else {
+            limit
+        };
         let start_idx = cursor.unwrap_or(0);
         let total_len = source_list.len() as u32;
 
@@ -7802,10 +8428,12 @@ impl ChainSettleContract {
     // ----------------------------------------------------------
 
     fn get_confirmation_cooldown_internal(env: &Env, shipment_id: &String) -> u32 {
-        let override_cooldown: Option<u32> = env
-            .storage()
-            .persistent()
-            .get(&DataKeyExt::ShipmentConfirmationCooldown(shipment_id.clone()));
+        let override_cooldown: Option<u32> =
+            env.storage()
+                .persistent()
+                .get(&DataKeyExt::ShipmentConfirmationCooldown(
+                    shipment_id.clone(),
+                ));
         if let Some(c) = override_cooldown {
             c
         } else {
@@ -7893,9 +8521,7 @@ impl ChainSettleContract {
         if score.completed == 0 {
             return false;
         }
-        let ratio_bps = (score.disputed as u64)
-            .saturating_mul(10_000)
-            / (score.completed as u64);
+        let ratio_bps = (score.disputed as u64).saturating_mul(10_000) / (score.completed as u64);
         ratio_bps <= policy.max_disputed_ratio_bps as u64
     }
 
@@ -8105,9 +8731,11 @@ impl ChainSettleContract {
     fn set_reputation_internal(env: &Env, supplier: &Address, score: &ReputationScore) {
         let key = DataKey::SupplierRep(supplier.clone());
         env.storage().persistent().set(&key, score);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
     }
 
     fn increment_reputation_internal(
@@ -8334,7 +8962,11 @@ impl ChainSettleContract {
     /// instead of being SAC-transferred on each confirmation.
     pub fn set_payout_mode(env: Env, supplier: Address, batched: bool) {
         supplier.require_auth();
-        let mode = if batched { PayoutMode::Batched } else { PayoutMode::Immediate };
+        let mode = if batched {
+            PayoutMode::Batched
+        } else {
+            PayoutMode::Immediate
+        };
         env.storage()
             .persistent()
             .set(&DataKeyExt::PayoutMode(supplier.clone()), &mode);
@@ -8401,30 +9033,32 @@ impl ChainSettleContract {
         env.storage()
             .persistent()
             .set(&DataKeyExt::AddressOutflowLimit(address.clone()), &limit);
-        env.storage()
-            .persistent()
-            .set(&DataKeyExt::AddressOutflowWindow(address.clone()), &window_ledgers);
+        env.storage().persistent().set(
+            &DataKeyExt::AddressOutflowWindow(address.clone()),
+            &window_ledgers,
+        );
         // Reset window tracking on config change.
         env.storage().persistent().set(
             &DataKeyExt::AddressOutflowWindowStart(address.clone()),
             &env.ledger().sequence(),
         );
-        env.storage()
-            .persistent()
-            .set(&DataKeyExt::AddressOutflowWindowOutflow(address.clone()), &0i128);
+        env.storage().persistent().set(
+            &DataKeyExt::AddressOutflowWindowOutflow(address.clone()),
+            &0i128,
+        );
 
         env.events().publish(
-            (Symbol::new(&env, "address_outflow_limit_set"), address.clone()),
+            (
+                Symbol::new(&env, "address_outflow_limit_set"),
+                address.clone(),
+            ),
             (limit, window_ledgers),
         );
     }
 
     /// Read-only getter for per-address outflow config.
     /// Returns (limit, window_ledgers, window_start, window_outflow).
-    pub fn get_address_outflow_limit(
-        env: Env,
-        address: Address,
-    ) -> (i128, u32, u32, i128) {
+    pub fn get_address_outflow_limit(env: Env, address: Address) -> (i128, u32, u32, i128) {
         let limit: i128 = env
             .storage()
             .persistent()
@@ -8497,12 +9131,17 @@ impl ChainSettleContract {
         });
 
         env.storage().persistent().set(&evidence_key, &entries);
-        env.storage()
-            .persistent()
-            .extend_ttl(&evidence_key, constants::TTL_INITIAL_LEDGERS, constants::TTL_MAX_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &evidence_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
 
         env.events().publish(
-            (Symbol::new(&env, "dispute_evidence_submitted"), shipment_id.clone()),
+            (
+                Symbol::new(&env, "dispute_evidence_submitted"),
+                shipment_id.clone(),
+            ),
             (milestone_index, caller, evidence_hash, evidence_type),
         );
     }
@@ -8528,12 +9167,7 @@ impl ChainSettleContract {
     /// ProofSubmitted. Only callable while the milestone is Disputed and the
     /// caller is the shipment's registered buyer.
     /// Emits `dispute_withdrawn` with (shipment_id, milestone_index).
-    pub fn withdraw_dispute(
-        env: Env,
-        buyer: Address,
-        shipment_id: String,
-        milestone_index: u32,
-    ) {
+    pub fn withdraw_dispute(env: Env, buyer: Address, shipment_id: String, milestone_index: u32) {
         Self::assert_not_paused(&env);
         buyer.require_auth();
 
@@ -8829,11 +9463,8 @@ impl ChainSettleContract {
             let client = ConfirmationWebhookClient::new(env, &hook_addr);
             // try_on_milestone_confirmed returns a Result; we discard errors
             // so that a reverting webhook cannot affect the confirmation.
-            let _ = client.try_on_milestone_confirmed(
-                shipment_id,
-                &milestone_index,
-                &payment_amount,
-            );
+            let _ =
+                client.try_on_milestone_confirmed(shipment_id, &milestone_index, &payment_amount);
         }
     }
 
@@ -9492,11 +10123,12 @@ impl ChainSettleContract {
 pub mod constants;
 mod storage;
 mod test_arbiter_pool;
-mod test_common;
-mod test_new_features;
-mod test_feat_four;
-mod test_correct_proof;
 mod test_cancellation_reason;
+mod test_common;
+mod test_correct_proof;
+mod test_feat_four;
+mod test_issues_366_369;
+mod test_new_features;
 
 // Legacy test modules — some have pre-existing compilation issues.
 // They are kept as source but only enabled when their API drift is resolved.
@@ -9506,18 +10138,22 @@ mod test;
 // mod test_admin;
 // mod test_dispute;
 // mod test_errors;
+mod test_arbiter_security;
+mod test_boundaries;
+mod test_boundary_validation;
+mod test_chaos;
+mod test_concurrent_disputes;
+mod test_escalation;
+mod test_features;
+mod test_issues;
+mod test_new_issues;
+mod test_oracle;
+mod test_panel_features;
 mod test_permissions;
 mod test_query;
-mod test_shipment;
-mod test_issues;
-mod test_arbiter_security;
-mod test_boundary_validation;
-mod test_escalation;
-mod test_new_issues;
 mod test_rebalance_milestones;
+mod test_shipment;
 mod test_top_up_escrow;
-mod test_panel_features;
-mod test_oracle;
 mod test_upgrade;
 mod test_concurrent_disputes;
 mod test_boundaries;

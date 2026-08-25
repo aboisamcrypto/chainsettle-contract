@@ -1,7 +1,9 @@
 extern crate chainsetttle;
 use chainsetttle::*;
 use serde::Serialize;
-use soroban_sdk::{testutils::{Address as _}, token, vec, Address, Env, String as SorobanString, Symbol};
+use soroban_sdk::{
+    testutils::Address as _, token, vec, Address, Env, String as SorobanString, Symbol,
+};
 use std::{env, fs, path::PathBuf};
 
 struct TestSetup {
@@ -154,7 +156,9 @@ impl SnapshotShipment {
 }
 
 fn snapshot_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("snapshots")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("snapshots")
 }
 
 fn snapshot_file(name: &str) -> PathBuf {
@@ -337,7 +341,8 @@ fn test_shipment_lifecycle_snapshots() {
         &t.supplier,
         &shipment_id,
         &0,
-        &SorobanString::from_str(&t.env, "ipfs://d0"), &Symbol::new(&t.env, "ipfs"),
+        &SorobanString::from_str(&t.env, "ipfs://d0"),
+        &Symbol::new(&t.env, "ipfs"),
     );
     let after_submit_snapshot = SnapshotShipment::from_shipment(client.get_shipment(&shipment_id));
 
@@ -348,7 +353,8 @@ fn test_shipment_lifecycle_snapshots() {
         &t.supplier,
         &shipment_id,
         &1,
-        &SorobanString::from_str(&t.env, "ipfs://d1"), &Symbol::new(&t.env, "ipfs"),
+        &SorobanString::from_str(&t.env, "ipfs://d1"),
+        &Symbol::new(&t.env, "ipfs"),
     );
     client.raise_dispute(&t.buyer, &shipment_id, &1);
     let after_dispute_snapshot = SnapshotShipment::from_shipment(client.get_shipment(&shipment_id));

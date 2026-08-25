@@ -46,7 +46,15 @@ fn setup() -> Setup {
 
     ChainSettleContractClient::new(&env, &contract_id).init(&buyer);
 
-    Setup { env, contract_id, token_id, buyer, supplier, logistics, arbiter }
+    Setup {
+        env,
+        contract_id,
+        token_id,
+        buyer,
+        supplier,
+        logistics,
+        arbiter,
+    }
 }
 
 fn default_options(_env: &Env) -> ShipmentOptions {
@@ -107,16 +115,27 @@ fn one_hundred_percent_milestone(env: &Env) -> soroban_sdk::Vec<Milestone> {
 fn build_ten_milestones(env: &Env) -> soroban_sdk::Vec<Milestone> {
     let mut ms = soroban_sdk::Vec::new(env);
     for i in 0u32..10u32 {
-        let name = if i == 0 { String::from_str(env, "M0") }
-            else if i == 1 { String::from_str(env, "M1") }
-            else if i == 2 { String::from_str(env, "M2") }
-            else if i == 3 { String::from_str(env, "M3") }
-            else if i == 4 { String::from_str(env, "M4") }
-            else if i == 5 { String::from_str(env, "M5") }
-            else if i == 6 { String::from_str(env, "M6") }
-            else if i == 7 { String::from_str(env, "M7") }
-            else if i == 8 { String::from_str(env, "M8") }
-            else { String::from_str(env, "M9") };
+        let name = if i == 0 {
+            String::from_str(env, "M0")
+        } else if i == 1 {
+            String::from_str(env, "M1")
+        } else if i == 2 {
+            String::from_str(env, "M2")
+        } else if i == 3 {
+            String::from_str(env, "M3")
+        } else if i == 4 {
+            String::from_str(env, "M4")
+        } else if i == 5 {
+            String::from_str(env, "M5")
+        } else if i == 6 {
+            String::from_str(env, "M6")
+        } else if i == 7 {
+            String::from_str(env, "M7")
+        } else if i == 8 {
+            String::from_str(env, "M8")
+        } else {
+            String::from_str(env, "M9")
+        };
         ms.push_back(Milestone {
             name,
             payment_percent: 10,
@@ -183,7 +202,8 @@ fn test_ten_milestone_full_lifecycle() {
             shipment.released_amount,
             expected_released,
             "after milestone {}: released should be {}% of total",
-            idx, (idx + 1) * 10
+            idx,
+            (idx + 1) * 10
         );
 
         // Verify escrow balance decreases accordingly.
@@ -244,7 +264,8 @@ fn test_ten_milestone_intermediate_released_amounts() {
         assert_eq!(
             client.get_shipment(&shipment_id).released_amount,
             per * (idx as i128 + 1),
-            "step {}: released_amount mismatch", idx
+            "step {}: released_amount mismatch",
+            idx
         );
     }
 }
@@ -264,7 +285,10 @@ fn test_duplicate_shipment_id_same_caller() {
     client.create_shipment(
         &id,
         &single_buyer(&s.env, &s.buyer),
-        &s.supplier, &s.logistics, &s.arbiter, &s.token_id,
+        &s.supplier,
+        &s.logistics,
+        &s.arbiter,
+        &s.token_id,
         &500_000_000,
         &one_hundred_percent_milestone(&s.env),
         &default_options(&s.env),
@@ -274,7 +298,10 @@ fn test_duplicate_shipment_id_same_caller() {
     client.create_shipment(
         &id,
         &single_buyer(&s.env, &s.buyer),
-        &s.supplier, &s.logistics, &s.arbiter, &s.token_id,
+        &s.supplier,
+        &s.logistics,
+        &s.arbiter,
+        &s.token_id,
         &999_999_999,
         &one_hundred_percent_milestone(&s.env),
         &default_options(&s.env),
@@ -296,7 +323,10 @@ fn test_duplicate_shipment_id_different_caller() {
     client.create_shipment(
         &id,
         &single_buyer(&s.env, &s.buyer),
-        &s.supplier, &s.logistics, &s.arbiter, &s.token_id,
+        &s.supplier,
+        &s.logistics,
+        &s.arbiter,
+        &s.token_id,
         &1_000_000_000,
         &one_hundred_percent_milestone(&s.env),
         &default_options(&s.env),
@@ -306,7 +336,10 @@ fn test_duplicate_shipment_id_different_caller() {
     client.create_shipment(
         &id,
         &single_buyer(&s.env, &buyer2),
-        &s.supplier, &s.logistics, &s.arbiter, &s.token_id,
+        &s.supplier,
+        &s.logistics,
+        &s.arbiter,
+        &s.token_id,
         &1_000_000_000,
         &one_hundred_percent_milestone(&s.env),
         &default_options(&s.env),
@@ -324,7 +357,10 @@ fn test_duplicate_shipment_id_original_state_unchanged() {
     client.create_shipment(
         &id,
         &single_buyer(&s.env, &s.buyer),
-        &s.supplier, &s.logistics, &s.arbiter, &s.token_id,
+        &s.supplier,
+        &s.logistics,
+        &s.arbiter,
+        &s.token_id,
         &original_amount,
         &one_hundred_percent_milestone(&s.env),
         &default_options(&s.env),
@@ -336,7 +372,10 @@ fn test_duplicate_shipment_id_original_state_unchanged() {
         client.create_shipment(
             &id,
             &single_buyer(&s.env, &s.buyer),
-            &s.supplier, &s.logistics, &s.arbiter, &s.token_id,
+            &s.supplier,
+            &s.logistics,
+            &s.arbiter,
+            &s.token_id,
             &999_000_000,
             &one_hundred_percent_milestone(&s.env),
             &default_options(&s.env),
@@ -346,9 +385,15 @@ fn test_duplicate_shipment_id_original_state_unchanged() {
     assert!(result.is_err(), "duplicate create must panic");
 
     let after = client.get_shipment(&id);
-    assert_eq!(after.total_amount, before.total_amount, "total_amount must be unchanged");
+    assert_eq!(
+        after.total_amount, before.total_amount,
+        "total_amount must be unchanged"
+    );
     assert_eq!(after.status, before.status, "status must be unchanged");
-    assert_eq!(after.released_amount, before.released_amount, "released_amount must be unchanged");
+    assert_eq!(
+        after.released_amount, before.released_amount,
+        "released_amount must be unchanged"
+    );
 }
 
 /// Issue #127 — Unique IDs are always accepted (positive counterpart).
@@ -358,7 +403,11 @@ fn test_unique_shipment_ids_always_accepted() {
     let client = ChainSettleContractClient::new(&s.env, &s.contract_id);
 
     let ids = [
-        "SHIP-UNIQ-A", "SHIP-UNIQ-B", "SHIP-UNIQ-C", "SHIP-UNIQ-D", "SHIP-UNIQ-E",
+        "SHIP-UNIQ-A",
+        "SHIP-UNIQ-B",
+        "SHIP-UNIQ-C",
+        "SHIP-UNIQ-D",
+        "SHIP-UNIQ-E",
     ];
 
     for id_str in ids.iter() {
@@ -366,7 +415,10 @@ fn test_unique_shipment_ids_always_accepted() {
         client.create_shipment(
             &id,
             &single_buyer(&s.env, &s.buyer),
-            &s.supplier, &s.logistics, &s.arbiter, &s.token_id,
+            &s.supplier,
+            &s.logistics,
+            &s.arbiter,
+            &s.token_id,
             &100_000_000,
             &one_hundred_percent_milestone(&s.env),
             &default_options(&s.env),

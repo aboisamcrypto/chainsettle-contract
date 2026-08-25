@@ -110,7 +110,17 @@ fn setup() -> Roles {
 
     ChainSettleContractClient::new(&env, &contract_id).init(&admin);
 
-    Roles { env, contract_id, token_id, admin, buyer, supplier, logistics, arbiter, stranger }
+    Roles {
+        env,
+        contract_id,
+        token_id,
+        admin,
+        buyer,
+        supplier,
+        logistics,
+        arbiter,
+        stranger,
+    }
 }
 
 fn milestones(env: &Env) -> soroban_sdk::Vec<Milestone> {
@@ -300,16 +310,14 @@ fn test_perm_unpause_arbiter_denied() {
 #[test]
 fn test_perm_set_escalation_threshold_admin_allowed() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_escalation_threshold(&r.admin, &100);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_escalation_threshold(&r.admin, &100);
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_set_escalation_threshold_buyer_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_escalation_threshold(&r.buyer, &100);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_escalation_threshold(&r.buyer, &100);
 }
 
 #[test]
@@ -386,40 +394,55 @@ fn test_perm_set_max_shipment_value_arbiter_denied() {
 #[test]
 fn test_perm_set_circuit_breaker_admin_allowed() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_circuit_breaker(&r.admin, &1_000_000_000, &1000);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_circuit_breaker(
+        &r.admin,
+        &1_000_000_000,
+        &1000,
+    );
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_set_circuit_breaker_buyer_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_circuit_breaker(&r.buyer, &1_000_000_000, &1000);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_circuit_breaker(
+        &r.buyer,
+        &1_000_000_000,
+        &1000,
+    );
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_set_circuit_breaker_supplier_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_circuit_breaker(&r.supplier, &1_000_000_000, &1000);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_circuit_breaker(
+        &r.supplier,
+        &1_000_000_000,
+        &1000,
+    );
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_set_circuit_breaker_logistics_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_circuit_breaker(&r.logistics, &1_000_000_000, &1000);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_circuit_breaker(
+        &r.logistics,
+        &1_000_000_000,
+        &1000,
+    );
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_set_circuit_breaker_arbiter_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_circuit_breaker(&r.arbiter, &1_000_000_000, &1000);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_circuit_breaker(
+        &r.arbiter,
+        &1_000_000_000,
+        &1000,
+    );
 }
 
 // ============================================================
@@ -429,40 +452,55 @@ fn test_perm_set_circuit_breaker_arbiter_denied() {
 #[test]
 fn test_perm_set_fee_config_admin_allowed() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_fee_config(&r.admin, &100, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_fee_config(
+        &r.admin,
+        &100,
+        &r.stranger,
+    );
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_set_fee_config_buyer_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_fee_config(&r.buyer, &100, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_fee_config(
+        &r.buyer,
+        &100,
+        &r.stranger,
+    );
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_set_fee_config_supplier_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_fee_config(&r.supplier, &100, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_fee_config(
+        &r.supplier,
+        &100,
+        &r.stranger,
+    );
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_set_fee_config_logistics_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_fee_config(&r.logistics, &100, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_fee_config(
+        &r.logistics,
+        &100,
+        &r.stranger,
+    );
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_set_fee_config_arbiter_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_fee_config(&r.arbiter, &100, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_fee_config(
+        &r.arbiter,
+        &100,
+        &r.stranger,
+    );
 }
 
 // ============================================================
@@ -515,16 +553,14 @@ fn test_perm_set_max_concurrent_disputes_arbiter_denied() {
 #[test]
 fn test_perm_set_min_milestone_percent_admin_allowed() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_min_milestone_percent(&r.admin, &5);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_min_milestone_percent(&r.admin, &5);
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_set_min_milestone_percent_buyer_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_min_milestone_percent(&r.buyer, &5);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_min_milestone_percent(&r.buyer, &5);
 }
 
 #[test]
@@ -558,16 +594,14 @@ fn test_perm_set_min_milestone_percent_arbiter_denied() {
 #[test]
 fn test_perm_set_max_advance_percent_admin_allowed() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_max_advance_percent(&r.admin, &50);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_max_advance_percent(&r.admin, &50);
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_set_max_advance_percent_buyer_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_max_advance_percent(&r.buyer, &50);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_max_advance_percent(&r.buyer, &50);
 }
 
 #[test]
@@ -590,8 +624,7 @@ fn test_perm_set_max_advance_percent_logistics_denied() {
 #[should_panic(expected = "unauthorized")]
 fn test_perm_set_max_advance_percent_arbiter_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_max_advance_percent(&r.arbiter, &50);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_max_advance_percent(&r.arbiter, &50);
 }
 
 // ============================================================
@@ -601,40 +634,55 @@ fn test_perm_set_max_advance_percent_arbiter_denied() {
 #[test]
 fn test_perm_blacklist_address_admin_allowed() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .blacklist_address(&r.admin, &r.stranger, &dummy_wasm_hash(&r.env));
+    ChainSettleContractClient::new(&r.env, &r.contract_id).blacklist_address(
+        &r.admin,
+        &r.stranger,
+        &dummy_wasm_hash(&r.env),
+    );
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_blacklist_address_buyer_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .blacklist_address(&r.buyer, &r.stranger, &dummy_wasm_hash(&r.env));
+    ChainSettleContractClient::new(&r.env, &r.contract_id).blacklist_address(
+        &r.buyer,
+        &r.stranger,
+        &dummy_wasm_hash(&r.env),
+    );
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_blacklist_address_supplier_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .blacklist_address(&r.supplier, &r.stranger, &dummy_wasm_hash(&r.env));
+    ChainSettleContractClient::new(&r.env, &r.contract_id).blacklist_address(
+        &r.supplier,
+        &r.stranger,
+        &dummy_wasm_hash(&r.env),
+    );
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_blacklist_address_logistics_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .blacklist_address(&r.logistics, &r.stranger, &dummy_wasm_hash(&r.env));
+    ChainSettleContractClient::new(&r.env, &r.contract_id).blacklist_address(
+        &r.logistics,
+        &r.stranger,
+        &dummy_wasm_hash(&r.env),
+    );
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_blacklist_address_arbiter_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .blacklist_address(&r.arbiter, &r.stranger, &dummy_wasm_hash(&r.env));
+    ChainSettleContractClient::new(&r.env, &r.contract_id).blacklist_address(
+        &r.arbiter,
+        &r.stranger,
+        &dummy_wasm_hash(&r.env),
+    );
 }
 
 // ============================================================
@@ -688,8 +736,7 @@ fn test_perm_remove_from_blacklist_arbiter_denied() {
 #[test]
 fn test_perm_add_allowed_token_admin_allowed() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .add_allowed_token(&r.token_id);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).add_allowed_token(&r.token_id);
 }
 
 // ============================================================
@@ -711,24 +758,21 @@ fn test_perm_remove_allowed_token_admin_allowed() {
 #[test]
 fn test_perm_nominate_admin_admin_allowed() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .nominate_admin(&r.admin, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).nominate_admin(&r.admin, &r.stranger);
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_nominate_admin_buyer_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .nominate_admin(&r.buyer, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).nominate_admin(&r.buyer, &r.stranger);
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_nominate_admin_supplier_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .nominate_admin(&r.supplier, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).nominate_admin(&r.supplier, &r.stranger);
 }
 
 #[test]
@@ -743,8 +787,7 @@ fn test_perm_nominate_admin_logistics_denied() {
 #[should_panic(expected = "unauthorized")]
 fn test_perm_nominate_admin_arbiter_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .nominate_admin(&r.arbiter, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).nominate_admin(&r.arbiter, &r.stranger);
 }
 
 // ============================================================
@@ -763,32 +806,28 @@ fn test_perm_revoke_nomination_admin_allowed() {
 #[should_panic(expected = "unauthorized")]
 fn test_perm_revoke_nomination_buyer_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .revoke_nomination(&r.buyer);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).revoke_nomination(&r.buyer);
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_revoke_nomination_supplier_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .revoke_nomination(&r.supplier);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).revoke_nomination(&r.supplier);
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_revoke_nomination_logistics_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .revoke_nomination(&r.logistics);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).revoke_nomination(&r.logistics);
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
 fn test_perm_revoke_nomination_arbiter_denied() {
     let r = setup();
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .revoke_nomination(&r.arbiter);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).revoke_nomination(&r.arbiter);
 }
 
 // ============================================================
@@ -814,8 +853,7 @@ fn test_perm_create_shipment_supplier_as_buyer_denied() {
     let sid = make_shipment(&r, "PERM-CS-S");
     submit_m0(&r, &sid);
     // supplier tries to confirm — must panic
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .confirm_milestone(&r.supplier, &sid, &0);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).confirm_milestone(&r.supplier, &sid, &0);
 }
 
 #[test]
@@ -824,8 +862,11 @@ fn test_perm_create_shipment_logistics_as_confirmer_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-CS-L");
     submit_m0(&r, &sid);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .confirm_milestone(&r.logistics, &sid, &0);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).confirm_milestone(
+        &r.logistics,
+        &sid,
+        &0,
+    );
 }
 
 #[test]
@@ -834,8 +875,7 @@ fn test_perm_create_shipment_arbiter_as_confirmer_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-CS-A");
     submit_m0(&r, &sid);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .confirm_milestone(&r.arbiter, &sid, &0);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).confirm_milestone(&r.arbiter, &sid, &0);
 }
 
 // ============================================================
@@ -846,8 +886,11 @@ fn test_perm_create_shipment_arbiter_as_confirmer_denied() {
 fn test_perm_top_up_escrow_buyer_allowed() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-TUE-OK");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .top_up_escrow(&r.buyer, &sid, &500_000_000);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).top_up_escrow(
+        &r.buyer,
+        &sid,
+        &500_000_000,
+    );
 }
 
 #[test]
@@ -855,8 +898,11 @@ fn test_perm_top_up_escrow_buyer_allowed() {
 fn test_perm_top_up_escrow_supplier_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-TUE-S");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .top_up_escrow(&r.supplier, &sid, &500_000_000);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).top_up_escrow(
+        &r.supplier,
+        &sid,
+        &500_000_000,
+    );
 }
 
 #[test]
@@ -864,8 +910,11 @@ fn test_perm_top_up_escrow_supplier_denied() {
 fn test_perm_top_up_escrow_logistics_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-TUE-L");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .top_up_escrow(&r.logistics, &sid, &500_000_000);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).top_up_escrow(
+        &r.logistics,
+        &sid,
+        &500_000_000,
+    );
 }
 
 #[test]
@@ -873,8 +922,11 @@ fn test_perm_top_up_escrow_logistics_denied() {
 fn test_perm_top_up_escrow_arbiter_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-TUE-A");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .top_up_escrow(&r.arbiter, &sid, &500_000_000);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).top_up_escrow(
+        &r.arbiter,
+        &sid,
+        &500_000_000,
+    );
 }
 
 // ============================================================
@@ -896,8 +948,11 @@ fn test_perm_rebalance_milestones_supplier_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-RBM-S");
     let new_pcts = vec![&r.env, 40u32, 60u32];
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .rebalance_milestones(&r.supplier, &sid, &new_pcts);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).rebalance_milestones(
+        &r.supplier,
+        &sid,
+        &new_pcts,
+    );
 }
 
 #[test]
@@ -906,8 +961,11 @@ fn test_perm_rebalance_milestones_logistics_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-RBM-L");
     let new_pcts = vec![&r.env, 40u32, 60u32];
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .rebalance_milestones(&r.logistics, &sid, &new_pcts);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).rebalance_milestones(
+        &r.logistics,
+        &sid,
+        &new_pcts,
+    );
 }
 
 #[test]
@@ -929,8 +987,7 @@ fn test_perm_confirm_milestone_buyer_allowed() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-CM-OK");
     submit_m0(&r, &sid);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .confirm_milestone(&r.buyer, &sid, &0);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).confirm_milestone(&r.buyer, &sid, &0);
 }
 
 #[test]
@@ -939,8 +996,7 @@ fn test_perm_confirm_milestone_supplier_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-CM-S");
     submit_m0(&r, &sid);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .confirm_milestone(&r.supplier, &sid, &0);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).confirm_milestone(&r.supplier, &sid, &0);
 }
 
 #[test]
@@ -949,8 +1005,11 @@ fn test_perm_confirm_milestone_logistics_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-CM-L");
     submit_m0(&r, &sid);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .confirm_milestone(&r.logistics, &sid, &0);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).confirm_milestone(
+        &r.logistics,
+        &sid,
+        &0,
+    );
 }
 
 #[test]
@@ -959,8 +1018,7 @@ fn test_perm_confirm_milestone_arbiter_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-CM-A");
     submit_m0(&r, &sid);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .confirm_milestone(&r.arbiter, &sid, &0);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).confirm_milestone(&r.arbiter, &sid, &0);
 }
 
 // ============================================================
@@ -972,8 +1030,7 @@ fn test_perm_raise_dispute_buyer_allowed() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-RD-OK");
     submit_m0(&r, &sid);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .raise_dispute(&r.buyer, &sid, &0);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).raise_dispute(&r.buyer, &sid, &0);
 }
 
 #[test]
@@ -982,8 +1039,7 @@ fn test_perm_raise_dispute_supplier_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-RD-S");
     submit_m0(&r, &sid);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .raise_dispute(&r.supplier, &sid, &0);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).raise_dispute(&r.supplier, &sid, &0);
 }
 
 #[test]
@@ -992,8 +1048,7 @@ fn test_perm_raise_dispute_logistics_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-RD-L");
     submit_m0(&r, &sid);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .raise_dispute(&r.logistics, &sid, &0);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).raise_dispute(&r.logistics, &sid, &0);
 }
 
 #[test]
@@ -1002,8 +1057,7 @@ fn test_perm_raise_dispute_arbiter_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-RD-A");
     submit_m0(&r, &sid);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .raise_dispute(&r.arbiter, &sid, &0);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).raise_dispute(&r.arbiter, &sid, &0);
 }
 
 // ============================================================
@@ -1025,8 +1079,12 @@ fn test_perm_raise_partial_dispute_supplier_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-RPD-S");
     submit_m0(&r, &sid);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .raise_partial_dispute(&r.supplier, &sid, &0, &40);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).raise_partial_dispute(
+        &r.supplier,
+        &sid,
+        &0,
+        &40,
+    );
 }
 
 #[test]
@@ -1035,8 +1093,12 @@ fn test_perm_raise_partial_dispute_logistics_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-RPD-L");
     submit_m0(&r, &sid);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .raise_partial_dispute(&r.logistics, &sid, &0, &40);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).raise_partial_dispute(
+        &r.logistics,
+        &sid,
+        &0,
+        &40,
+    );
 }
 
 #[test]
@@ -1057,8 +1119,7 @@ fn test_perm_raise_partial_dispute_arbiter_denied() {
 fn test_perm_cancel_shipment_buyer_allowed() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-CAN-OK");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .cancel_shipment(&r.buyer, &sid);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).cancel_shipment(&r.buyer, &sid);
 }
 
 #[test]
@@ -1066,8 +1127,7 @@ fn test_perm_cancel_shipment_buyer_allowed() {
 fn test_perm_cancel_shipment_supplier_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-CAN-S");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .cancel_shipment(&r.supplier, &sid);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).cancel_shipment(&r.supplier, &sid);
 }
 
 #[test]
@@ -1075,8 +1135,7 @@ fn test_perm_cancel_shipment_supplier_denied() {
 fn test_perm_cancel_shipment_logistics_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-CAN-L");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .cancel_shipment(&r.logistics, &sid);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).cancel_shipment(&r.logistics, &sid);
 }
 
 #[test]
@@ -1084,8 +1143,7 @@ fn test_perm_cancel_shipment_logistics_denied() {
 fn test_perm_cancel_shipment_arbiter_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-CAN-A");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .cancel_shipment(&r.arbiter, &sid);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).cancel_shipment(&r.arbiter, &sid);
 }
 
 // ============================================================
@@ -1097,10 +1155,13 @@ fn test_perm_approve_advance_buyer_allowed() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-AA-OK");
     // supplier first requests an advance
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .request_advance(&r.supplier, &sid, &0, &20);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .approve_advance(&r.buyer, &sid, &0);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).request_advance(
+        &r.supplier,
+        &sid,
+        &0,
+        &20,
+    );
+    ChainSettleContractClient::new(&r.env, &r.contract_id).approve_advance(&r.buyer, &sid, &0);
 }
 
 #[test]
@@ -1108,10 +1169,13 @@ fn test_perm_approve_advance_buyer_allowed() {
 fn test_perm_approve_advance_supplier_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-AA-S");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .request_advance(&r.supplier, &sid, &0, &20);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .approve_advance(&r.supplier, &sid, &0);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).request_advance(
+        &r.supplier,
+        &sid,
+        &0,
+        &20,
+    );
+    ChainSettleContractClient::new(&r.env, &r.contract_id).approve_advance(&r.supplier, &sid, &0);
 }
 
 #[test]
@@ -1119,10 +1183,13 @@ fn test_perm_approve_advance_supplier_denied() {
 fn test_perm_approve_advance_logistics_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-AA-L");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .request_advance(&r.supplier, &sid, &0, &20);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .approve_advance(&r.logistics, &sid, &0);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).request_advance(
+        &r.supplier,
+        &sid,
+        &0,
+        &20,
+    );
+    ChainSettleContractClient::new(&r.env, &r.contract_id).approve_advance(&r.logistics, &sid, &0);
 }
 
 #[test]
@@ -1130,10 +1197,13 @@ fn test_perm_approve_advance_logistics_denied() {
 fn test_perm_approve_advance_arbiter_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-AA-A");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .request_advance(&r.supplier, &sid, &0, &20);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .approve_advance(&r.arbiter, &sid, &0);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).request_advance(
+        &r.supplier,
+        &sid,
+        &0,
+        &20,
+    );
+    ChainSettleContractClient::new(&r.env, &r.contract_id).approve_advance(&r.arbiter, &sid, &0);
 }
 
 // ============================================================
@@ -1155,8 +1225,12 @@ fn test_perm_set_proof_whitelist_supplier_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-SPW-S");
     let types = vec![&r.env, Symbol::new(&r.env, "ipfs")];
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_proof_whitelist(&r.supplier, &sid, &0, &types);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_proof_whitelist(
+        &r.supplier,
+        &sid,
+        &0,
+        &types,
+    );
 }
 
 #[test]
@@ -1165,8 +1239,12 @@ fn test_perm_set_proof_whitelist_logistics_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-SPW-L");
     let types = vec![&r.env, Symbol::new(&r.env, "ipfs")];
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .set_proof_whitelist(&r.logistics, &sid, &0, &types);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).set_proof_whitelist(
+        &r.logistics,
+        &sid,
+        &0,
+        &types,
+    );
 }
 
 #[test]
@@ -1187,8 +1265,11 @@ fn test_perm_set_proof_whitelist_arbiter_denied() {
 fn test_perm_transfer_buyer_buyer_allowed() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-TB-OK");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .transfer_buyer(&r.buyer, &sid, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).transfer_buyer(
+        &r.buyer,
+        &sid,
+        &r.stranger,
+    );
 }
 
 #[test]
@@ -1196,8 +1277,11 @@ fn test_perm_transfer_buyer_buyer_allowed() {
 fn test_perm_transfer_buyer_supplier_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-TB-S");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .transfer_buyer(&r.supplier, &sid, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).transfer_buyer(
+        &r.supplier,
+        &sid,
+        &r.stranger,
+    );
 }
 
 #[test]
@@ -1205,8 +1289,11 @@ fn test_perm_transfer_buyer_supplier_denied() {
 fn test_perm_transfer_buyer_logistics_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-TB-L");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .transfer_buyer(&r.logistics, &sid, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).transfer_buyer(
+        &r.logistics,
+        &sid,
+        &r.stranger,
+    );
 }
 
 #[test]
@@ -1214,8 +1301,11 @@ fn test_perm_transfer_buyer_logistics_denied() {
 fn test_perm_transfer_buyer_arbiter_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-TB-A");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .transfer_buyer(&r.arbiter, &sid, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).transfer_buyer(
+        &r.arbiter,
+        &sid,
+        &r.stranger,
+    );
 }
 
 // ============================================================
@@ -1247,8 +1337,12 @@ fn test_perm_resolve_dispute_supplier_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-RES-S");
     dispute_m0(&r, &sid);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .resolve_dispute(&r.supplier, &sid, &0, &true);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).resolve_dispute(
+        &r.supplier,
+        &sid,
+        &0,
+        &true,
+    );
 }
 
 #[test]
@@ -1257,8 +1351,12 @@ fn test_perm_resolve_dispute_logistics_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-RES-L");
     dispute_m0(&r, &sid);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .resolve_dispute(&r.logistics, &sid, &0, &true);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).resolve_dispute(
+        &r.logistics,
+        &sid,
+        &0,
+        &true,
+    );
 }
 
 // ============================================================
@@ -1327,8 +1425,12 @@ fn test_perm_submit_proof_arbiter_denied() {
 fn test_perm_request_advance_supplier_allowed() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-RA-OK");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .request_advance(&r.supplier, &sid, &0, &20);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).request_advance(
+        &r.supplier,
+        &sid,
+        &0,
+        &20,
+    );
 }
 
 #[test]
@@ -1336,8 +1438,7 @@ fn test_perm_request_advance_supplier_allowed() {
 fn test_perm_request_advance_buyer_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-RA-B");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .request_advance(&r.buyer, &sid, &0, &20);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).request_advance(&r.buyer, &sid, &0, &20);
 }
 
 #[test]
@@ -1345,8 +1446,12 @@ fn test_perm_request_advance_buyer_denied() {
 fn test_perm_request_advance_logistics_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-RA-L");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .request_advance(&r.logistics, &sid, &0, &20);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).request_advance(
+        &r.logistics,
+        &sid,
+        &0,
+        &20,
+    );
 }
 
 #[test]
@@ -1369,8 +1474,7 @@ fn test_perm_supplier_cancel_supplier_allowed() {
     // Submit proof so a deadline can pass; advance ledger past response_deadline (100)
     submit_m0(&r, &sid);
     r.env.ledger().set_sequence_number(200);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .supplier_cancel(&r.supplier, &sid);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).supplier_cancel(&r.supplier, &sid);
 }
 
 #[test]
@@ -1380,8 +1484,7 @@ fn test_perm_supplier_cancel_buyer_denied() {
     let sid = make_shipment(&r, "PERM-SC-B");
     submit_m0(&r, &sid);
     r.env.ledger().set_sequence_number(200);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .supplier_cancel(&r.buyer, &sid);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).supplier_cancel(&r.buyer, &sid);
 }
 
 #[test]
@@ -1391,8 +1494,7 @@ fn test_perm_supplier_cancel_logistics_denied() {
     let sid = make_shipment(&r, "PERM-SC-L");
     submit_m0(&r, &sid);
     r.env.ledger().set_sequence_number(200);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .supplier_cancel(&r.logistics, &sid);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).supplier_cancel(&r.logistics, &sid);
 }
 
 #[test]
@@ -1402,8 +1504,7 @@ fn test_perm_supplier_cancel_arbiter_denied() {
     let sid = make_shipment(&r, "PERM-SC-A");
     submit_m0(&r, &sid);
     r.env.ledger().set_sequence_number(200);
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .supplier_cancel(&r.arbiter, &sid);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).supplier_cancel(&r.arbiter, &sid);
 }
 
 // ============================================================
@@ -1414,8 +1515,11 @@ fn test_perm_supplier_cancel_arbiter_denied() {
 fn test_perm_transfer_supplier_supplier_allowed() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-TS-OK");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .transfer_supplier(&r.supplier, &sid, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).transfer_supplier(
+        &r.supplier,
+        &sid,
+        &r.stranger,
+    );
 }
 
 #[test]
@@ -1423,8 +1527,11 @@ fn test_perm_transfer_supplier_supplier_allowed() {
 fn test_perm_transfer_supplier_buyer_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-TS-B");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .transfer_supplier(&r.buyer, &sid, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).transfer_supplier(
+        &r.buyer,
+        &sid,
+        &r.stranger,
+    );
 }
 
 #[test]
@@ -1432,8 +1539,11 @@ fn test_perm_transfer_supplier_buyer_denied() {
 fn test_perm_transfer_supplier_logistics_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-TS-L");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .transfer_supplier(&r.logistics, &sid, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).transfer_supplier(
+        &r.logistics,
+        &sid,
+        &r.stranger,
+    );
 }
 
 #[test]
@@ -1441,8 +1551,11 @@ fn test_perm_transfer_supplier_logistics_denied() {
 fn test_perm_transfer_supplier_arbiter_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-TS-A");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .transfer_supplier(&r.arbiter, &sid, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).transfer_supplier(
+        &r.arbiter,
+        &sid,
+        &r.stranger,
+    );
 }
 
 // ============================================================
@@ -1453,16 +1566,26 @@ fn test_perm_transfer_supplier_arbiter_denied() {
 fn test_perm_propose_amendment_buyer_allowed() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-PA-B-OK");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .propose_amendment(&r.buyer, &sid, &0, &50, &String::from_str(&r.env, "M0v2"));
+    ChainSettleContractClient::new(&r.env, &r.contract_id).propose_amendment(
+        &r.buyer,
+        &sid,
+        &0,
+        &50,
+        &String::from_str(&r.env, "M0v2"),
+    );
 }
 
 #[test]
 fn test_perm_propose_amendment_supplier_allowed() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-PA-S-OK");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .propose_amendment(&r.supplier, &sid, &0, &50, &String::from_str(&r.env, "M0v2"));
+    ChainSettleContractClient::new(&r.env, &r.contract_id).propose_amendment(
+        &r.supplier,
+        &sid,
+        &0,
+        &50,
+        &String::from_str(&r.env, "M0v2"),
+    );
 }
 
 #[test]
@@ -1470,8 +1593,13 @@ fn test_perm_propose_amendment_supplier_allowed() {
 fn test_perm_propose_amendment_logistics_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-PA-L");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .propose_amendment(&r.logistics, &sid, &0, &50, &String::from_str(&r.env, "M0v2"));
+    ChainSettleContractClient::new(&r.env, &r.contract_id).propose_amendment(
+        &r.logistics,
+        &sid,
+        &0,
+        &50,
+        &String::from_str(&r.env, "M0v2"),
+    );
 }
 
 #[test]
@@ -1479,8 +1607,13 @@ fn test_perm_propose_amendment_logistics_denied() {
 fn test_perm_propose_amendment_arbiter_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-PA-A");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .propose_amendment(&r.arbiter, &sid, &0, &50, &String::from_str(&r.env, "M0v2"));
+    ChainSettleContractClient::new(&r.env, &r.contract_id).propose_amendment(
+        &r.arbiter,
+        &sid,
+        &0,
+        &50,
+        &String::from_str(&r.env, "M0v2"),
+    );
 }
 
 // ============================================================
@@ -1491,16 +1624,22 @@ fn test_perm_propose_amendment_arbiter_denied() {
 fn test_perm_propose_arbiter_rotation_buyer_allowed() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-PAR-B-OK");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .propose_arbiter_rotation(&r.buyer, &sid, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).propose_arbiter_rotation(
+        &r.buyer,
+        &sid,
+        &r.stranger,
+    );
 }
 
 #[test]
 fn test_perm_propose_arbiter_rotation_supplier_allowed() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-PAR-S-OK");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .propose_arbiter_rotation(&r.supplier, &sid, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).propose_arbiter_rotation(
+        &r.supplier,
+        &sid,
+        &r.stranger,
+    );
 }
 
 #[test]
@@ -1508,8 +1647,11 @@ fn test_perm_propose_arbiter_rotation_supplier_allowed() {
 fn test_perm_propose_arbiter_rotation_logistics_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-PAR-L");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .propose_arbiter_rotation(&r.logistics, &sid, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).propose_arbiter_rotation(
+        &r.logistics,
+        &sid,
+        &r.stranger,
+    );
 }
 
 #[test]
@@ -1517,8 +1659,11 @@ fn test_perm_propose_arbiter_rotation_logistics_denied() {
 fn test_perm_propose_arbiter_rotation_arbiter_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-PAR-A");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .propose_arbiter_rotation(&r.arbiter, &sid, &r.stranger);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).propose_arbiter_rotation(
+        &r.arbiter,
+        &sid,
+        &r.stranger,
+    );
 }
 
 // ============================================================
@@ -1530,8 +1675,7 @@ fn test_perm_propose_arbiter_rotation_arbiter_denied() {
 fn test_perm_emergency_recover_buyer_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-ER-B");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .emergency_recover(&r.buyer, &sid);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).emergency_recover(&r.buyer, &sid);
 }
 
 #[test]
@@ -1539,8 +1683,7 @@ fn test_perm_emergency_recover_buyer_denied() {
 fn test_perm_emergency_recover_supplier_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-ER-S");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .emergency_recover(&r.supplier, &sid);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).emergency_recover(&r.supplier, &sid);
 }
 
 #[test]
@@ -1548,8 +1691,7 @@ fn test_perm_emergency_recover_supplier_denied() {
 fn test_perm_emergency_recover_logistics_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-ER-L");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .emergency_recover(&r.logistics, &sid);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).emergency_recover(&r.logistics, &sid);
 }
 
 #[test]
@@ -1557,8 +1699,7 @@ fn test_perm_emergency_recover_logistics_denied() {
 fn test_perm_emergency_recover_arbiter_denied() {
     let r = setup();
     let sid = make_shipment(&r, "PERM-ER-A");
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .emergency_recover(&r.arbiter, &sid);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).emergency_recover(&r.arbiter, &sid);
 }
 
 // ============================================================
@@ -1582,8 +1723,11 @@ fn test_perm_batch_confirm_milestones_supplier_denied() {
     let sid = make_shipment(&r, "PERM-BCM-S");
     submit_m0(&r, &sid);
     let indices = vec![&r.env, 0u32];
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .batch_confirm_milestones(&r.supplier, &sid, &indices);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).batch_confirm_milestones(
+        &r.supplier,
+        &sid,
+        &indices,
+    );
 }
 
 #[test]
@@ -1593,8 +1737,11 @@ fn test_perm_batch_confirm_milestones_logistics_denied() {
     let sid = make_shipment(&r, "PERM-BCM-L");
     submit_m0(&r, &sid);
     let indices = vec![&r.env, 0u32];
-    ChainSettleContractClient::new(&r.env, &r.contract_id)
-        .batch_confirm_milestones(&r.logistics, &sid, &indices);
+    ChainSettleContractClient::new(&r.env, &r.contract_id).batch_confirm_milestones(
+        &r.logistics,
+        &sid,
+        &indices,
+    );
 }
 
 #[test]
@@ -1623,5 +1770,8 @@ fn test_perm_count_guard() {
     // Counts the number of permission tests via the constant above.
     // If PERMISSION_TEST_COUNT is wrong the build will fail to compile
     // (unreachable assertion) or alert reviewers during code review.
-    assert!(PERMISSION_TEST_COUNT >= 40, "permission matrix requires at least 40 test cases");
+    assert!(
+        PERMISSION_TEST_COUNT >= 40,
+        "permission matrix requires at least 40 test cases"
+    );
 }

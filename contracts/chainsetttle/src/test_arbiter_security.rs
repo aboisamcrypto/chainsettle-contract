@@ -80,7 +80,13 @@ fn test_arbiter_cannot_resolve_proof_submitted_milestone() {
     );
 
     // Submit proof - milestone now in ProofSubmitted state
-    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &shipment_id,
+        &0u32,
+        &proof_hash,
+        &proof_type(&t.env),
+    );
 
     // Arbiter attempts to resolve dispute on ProofSubmitted milestone
     // Should panic: milestone is not in disputed status
@@ -115,8 +121,16 @@ fn test_arbiter_cannot_resolve_confirmed_milestone() {
     );
 
     // Submit proof and confirm milestone
-    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
-    t.env.ledger().set_sequence_number(t.env.ledger().sequence() + 100);
+    client.submit_proof(
+        &t.supplier,
+        &shipment_id,
+        &0u32,
+        &proof_hash,
+        &proof_type(&t.env),
+    );
+    t.env
+        .ledger()
+        .set_sequence_number(t.env.ledger().sequence() + 100);
     client.confirm_milestone(&t.buyer, &shipment_id, &0u32);
 
     // Arbiter attempts to resolve dispute on Confirmed milestone
@@ -155,8 +169,16 @@ fn test_arbiter_cannot_resolve_confirmed_held_milestone() {
     );
 
     // Submit proof and confirm milestone - will go to ConfirmedHeld
-    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
-    t.env.ledger().set_sequence_number(t.env.ledger().sequence() + 100);
+    client.submit_proof(
+        &t.supplier,
+        &shipment_id,
+        &0u32,
+        &proof_hash,
+        &proof_type(&t.env),
+    );
+    t.env
+        .ledger()
+        .set_sequence_number(t.env.ledger().sequence() + 100);
     client.confirm_milestone(&t.buyer, &shipment_id, &0u32);
 
     // Arbiter attempts to resolve dispute on ConfirmedHeld milestone
@@ -192,7 +214,13 @@ fn test_arbiter_cannot_resolve_resolved_milestone() {
     );
 
     // Submit proof and raise dispute
-    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &shipment_id,
+        &0u32,
+        &proof_hash,
+        &proof_type(&t.env),
+    );
     client.raise_dispute(&t.buyer, &shipment_id, &0u32);
 
     // Resolve the dispute - milestone now in Resolved state
@@ -231,7 +259,13 @@ fn test_arbiter_cannot_call_confirm_milestone() {
     );
 
     // Submit proof
-    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &shipment_id,
+        &0u32,
+        &proof_hash,
+        &proof_type(&t.env),
+    );
 
     // Arbiter (non-buyer) attempts to confirm milestone
     // Should panic: unauthorized
@@ -298,21 +332,33 @@ fn test_only_arbiter_can_resolve_after_buyer_raises_dispute() {
     );
 
     // Buyer submits proof
-    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &shipment_id,
+        &0u32,
+        &proof_hash,
+        &proof_type(&t.env),
+    );
 
     // Buyer raises dispute
     client.raise_dispute(&t.buyer, &shipment_id, &0u32);
 
     // Verify milestone is now Disputed
     let shipment = client.get_shipment(&shipment_id);
-    assert_eq!(shipment.milestones.get(0).unwrap().status, MilestoneStatus::Disputed);
+    assert_eq!(
+        shipment.milestones.get(0).unwrap().status,
+        MilestoneStatus::Disputed
+    );
 
     // Arbiter resolves dispute (should succeed)
     client.resolve_dispute(&t.arbiter, &shipment_id, &0u32, &true);
 
     // Verify milestone is now Resolved
     let shipment = client.get_shipment(&shipment_id);
-    assert_eq!(shipment.milestones.get(0).unwrap().status, MilestoneStatus::Resolved);
+    assert_eq!(
+        shipment.milestones.get(0).unwrap().status,
+        MilestoneStatus::Resolved
+    );
 }
 
 // ============================================================
@@ -343,7 +389,13 @@ fn test_arbiter_cannot_bypass_dispute_process_for_payment_redirect() {
     );
 
     // Submit proof (milestone now in ProofSubmitted)
-    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &shipment_id,
+        &0u32,
+        &proof_hash,
+        &proof_type(&t.env),
+    );
 
     // Arbiter attempts to directly resolve without buyer raising dispute
     // This is a security attack: arbiter trying to bypass buyer oversight
@@ -419,7 +471,13 @@ fn test_non_designated_arbiter_cannot_resolve_dispute() {
         &default_options(&t.env),
     );
 
-    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &shipment_id,
+        &0u32,
+        &proof_hash,
+        &proof_type(&t.env),
+    );
     client.raise_dispute(&t.buyer, &shipment_id, &0u32);
 
     // A random third party (not the shipment's designated arbiter) attempts to resolve.
@@ -454,7 +512,13 @@ fn test_arbiter_cannot_raise_dispute() {
         &default_options(&t.env),
     );
 
-    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &shipment_id,
+        &0u32,
+        &proof_hash,
+        &proof_type(&t.env),
+    );
 
     // Arbiter (not the buyer) attempts to raise a dispute on its own milestone.
     // Should panic: unauthorized
@@ -487,7 +551,13 @@ fn test_supplier_cannot_resolve_dispute() {
         &default_options(&t.env),
     );
 
-    client.submit_proof(&t.supplier, &shipment_id, &0u32, &proof_hash, &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &shipment_id,
+        &0u32,
+        &proof_hash,
+        &proof_type(&t.env),
+    );
     client.raise_dispute(&t.buyer, &shipment_id, &0u32);
 
     // Supplier (a stakeholder, but not the arbiter) attempts to resolve the dispute in its own favor.

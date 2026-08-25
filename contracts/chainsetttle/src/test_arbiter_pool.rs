@@ -88,7 +88,13 @@ fn test_raise_dispute_empty_pool_panics() {
         &default_options(&t.env),
     );
 
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &proof_hash(&t.env),
+        &proof_type(&t.env),
+    );
     // Should panic: no arbiters in pool
     client.raise_dispute(&t.buyer, &ship_id, &0u32);
 }
@@ -111,14 +117,20 @@ fn test_explicit_arbiter_override_still_works() {
         &single_buyer_vec(&t.env, &t.buyer),
         &t.supplier,
         &t.logistics,
-        &t.arbiter,   // explicit, not sentinel
+        &t.arbiter, // explicit, not sentinel
         &t.token_id,
         &1_000_000,
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
 
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &proof_hash(&t.env),
+        &proof_type(&t.env),
+    );
     client.raise_dispute(&t.buyer, &ship_id, &0u32);
 
     // Arbiter stored on shipment should still be the explicit one
@@ -157,7 +169,13 @@ fn test_round_robin_assigns_in_order() {
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
-    client.submit_proof(&t.supplier, &ship1, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship1,
+        &0u32,
+        &proof_hash(&t.env),
+        &proof_type(&t.env),
+    );
     client.raise_dispute(&t.buyer, &ship1, &0u32);
     assert_eq!(client.get_shipment(&ship1).arbiter, arb1);
 
@@ -174,7 +192,13 @@ fn test_round_robin_assigns_in_order() {
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
-    client.submit_proof(&t.supplier, &ship2, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship2,
+        &0u32,
+        &proof_hash(&t.env),
+        &proof_type(&t.env),
+    );
     client.raise_dispute(&t.buyer, &ship2, &0u32);
     assert_eq!(client.get_shipment(&ship2).arbiter, arb2);
 }
@@ -205,13 +229,25 @@ fn test_round_robin_wraps_at_end() {
             &build_milestones(&t.env),
             &default_options(&t.env),
         );
-        client.submit_proof(&t.supplier, &ship_id, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+        client.submit_proof(
+            &t.supplier,
+            &ship_id,
+            &0u32,
+            &proof_hash(&t.env),
+            &proof_type(&t.env),
+        );
         client.raise_dispute(&t.buyer, &ship_id, &0u32);
         assert_eq!(client.get_shipment(&ship_id).arbiter, arb1);
 
         // Resolve so the shipment doesn't block a second iteration
         client.resolve_dispute(&arb1, &ship_id, &0u32, &false); // reject → back to Pending
-        client.submit_proof(&t.supplier, &ship_id, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+        client.submit_proof(
+            &t.supplier,
+            &ship_id,
+            &0u32,
+            &proof_hash(&t.env),
+            &proof_type(&t.env),
+        );
         client.confirm_milestone(&t.buyer, &ship_id, &0u32);
     }
 }
@@ -240,7 +276,13 @@ fn test_pool_assigned_arbiter_resolves_dispute() {
         &default_options(&t.env),
     );
 
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &proof_hash(&t.env),
+        &proof_type(&t.env),
+    );
     client.raise_dispute(&t.buyer, &ship_id, &0u32);
 
     // Pool-assigned arbiter (t.arbiter) should be able to resolve
