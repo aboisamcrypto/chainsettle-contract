@@ -469,6 +469,9 @@ pub struct ArbiterStats {
     pub resolved_approved: u32,
     pub resolved_rejected: u32,
     pub total_resolution_ledgers: u64,
+    /// Number of this arbiter's resolutions that were later overturned on
+    /// appeal (#372). Feeds `max_overturned_before_slash`.
+    pub overturned_count: u32,
 }
 
 #[contracttype]
@@ -539,6 +542,15 @@ pub struct DelegateConfig {
 pub struct UpgradeProposal {
     pub new_wasm_hash: BytesN<32>,
     /// Distinct admin keys (from `MultiAdminConfig.admins`) that have approved so far.
+    pub approvals: Vec<Address>,
+}
+
+/// #402 – Pending emergency freeze/unfreeze proposal gated by a supermajority
+/// of `MultiAdminConfig.admins` (stricter than the standard action threshold).
+#[contracttype]
+#[derive(Clone)]
+pub struct EmergencyFreezeProposal {
+    /// Distinct admin keys that have approved so far.
     pub approvals: Vec<Address>,
 }
 
@@ -987,6 +999,55 @@ pub enum DataKeyExt2 {
     BuyerSpendingLimit(Address),
     /// Current window usage for a buyer: (window_start_ledger, used_amount).
     BuyerSpendingUsage(Address),
+
+    // ── #372 Arbiter reputation slashing ────────────────────────────────
+    /// Admin-configured overturned-resolution count that triggers automatic
+    /// slashing (0/unset = disabled).
+    MaxOverturnedBeforeSlash,
+    /// Whether an arbiter is currently slashed (removed from the pool and
+    /// blocked from new dispute assignment until explicit admin reinstatement).
+    ArbiterSlashed(Address),
+    /// Original (arbiter, approve) outcome of a dispute resolution, recorded by
+    /// `appeal_dispute` so the appeal's `resolve_dispute` call can detect an
+    /// overturn by comparing outcomes.
+    DisputeAppealOriginal(String, u32),
+    /// The `approve` outcome of the most recent `resolve_dispute` call for
+    /// (shipment_id, milestone_index) — read by `appeal_dispute` to snapshot
+    /// the original decision before reassignment.
+    DisputeResolvedApprove(String, u32),
+
+    // ── #402 Emergency global freeze (supermajority multisig) ────────────
+    /// Admin-configured supermajority percentage (basis points, e.g. 8000 =
+    /// 80%) of registered multisig admins required to activate/lift an
+    /// emergency freeze. 0/unset = use constants::DEFAULT_EMERGENCY_FREEZE_SUPERMAJORITY_BPS.
+    EmergencyFreezeSupermajorityBps,
+    /// Whether the contract is currently under an emergency freeze (tracked
+    /// separately from the routine `DataKey::Paused` flag).
+    EmergencyFrozen,
+    /// Monotonic counter for emergency-freeze/unfreeze proposal ids.
+    EmergencyFreezeProposalCounter,
+    /// Pending emergency-freeze activation proposal, by id.
+    EmergencyFreezeProposal(u64),
+    /// Pending emergency-freeze lift (unfreeze) proposal, by id.
+    EmergencyUnfreezeProposal(u64),
+
+    // ── #405 Milestone proof size/format validation hook ─────────────────
+    /// Admin-configured minimum proof-hash length (0/unset = no minimum).
+    ProofHashMinLen,
+    /// Admin-configured maximum proof-hash length (0/unset = no maximum).
+    ProofHashMaxLen,
+    /// Admin-configured required proof-hash prefix (empty/unset = no
+    /// requirement), e.g. "Qm" or "bafy" for basic CID-version sanity checking.
+    ProofHashRequiredPrefix,
+
+    // ── #404 Supplier payout currency preference ─────────────────────────
+    /// Supplier's preferred settlement token for `claim_payout`; absent =
+    /// no preference, pay out in whatever token the caller specifies.
+    PayoutCurrencyPreference(Address),
+    /// Admin-registered fixed conversion rate for a (from_token, to_token)
+    /// pair, in basis points of `to_token` per unit of `from_token`
+    /// (10_000 = 1:1). Absent = no route available for that pair.
+    ConversionRateBps(Address, Address),
 }
 
 /// Partial joint-confirmation progress for a high-value shipment's milestone (#367).
@@ -1369,6 +1430,299 @@ impl ChainSettleContract {
             (Symbol::new(&env, "contract_unpaused"),),
             env.ledger().sequence(),
         );
+    }
+
+    // ----------------------------------------------------------
+    // #402 EMERGENCY GLOBAL FREEZE (SUPERMAJORITY MULTISIG)
+    // ----------------------------------------------------------
+    // A stricter, separately-tracked alternative to pause()/unpause(). When
+    // multisig admin governance (`initialize_multisig_admin`, #166) is
+    // configured, activating or lifting the freeze requires a configurable
+    // supermajority (default 80%) of registered admins — a higher bar than
+    // the routine `MultiAdminConfig.threshold` used elsewhere. When multisig
+    // governance is not configured, falls back to single-admin pause()
+    // semantics: the freeze activates/lifts immediately on one admin's call.
+
+    /// Set the supermajority (basis points, e.g. 8000 = 80%) of registered
+    /// multisig admins required to activate/lift an emergency freeze.
+    pub fn set_freeze_supermajority_bps(env: Env, admin: Address, bps: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        if bps == 0 || bps > 10_000 {
+            panic!("supermajority bps must be in (0, 10000]");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::EmergencyFreezeSupermajorityBps, &bps);
+        env.events().publish(
+            (Symbol::new(&env, "freeze_supermajority_bps_set"),),
+            bps,
+        );
+    }
+
+    /// Read the configured emergency-freeze supermajority (basis points).
+    pub fn get_freeze_supermajority_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt2::EmergencyFreezeSupermajorityBps)
+            .unwrap_or(constants::DEFAULT_EMERGENCY_FREEZE_SUPERMAJORITY_BPS)
+    }
+
+    /// Whether the contract is currently under an emergency freeze.
+    pub fn is_emergency_frozen(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt2::EmergencyFrozen)
+            .unwrap_or(false)
+    }
+
+    /// Number of distinct admins required for a supermajority, given `total`
+    /// registered multisig admins and a `bps` supermajority (rounded up).
+    fn supermajority_required(total: u32, bps: u32) -> u32 {
+        let required = ((total as u64) * (bps as u64) + 9_999) / 10_000;
+        required.max(1) as u32
+    }
+
+    /// Propose activating the emergency freeze. If multisig admin governance
+    /// is configured, requires the configured supermajority of registered
+    /// admins to approve (via `approve_emergency_freeze`) before it takes
+    /// effect; the proposer's own approval is recorded immediately. If
+    /// multisig governance is not configured, falls back to single-admin
+    /// `pause()` semantics and activates immediately.
+    pub fn propose_emergency_freeze(env: Env, admin: Address) -> u64 {
+        admin.require_auth();
+
+        if !env.storage().instance().has(&DataKey::MultiAdminConfig) {
+            Self::assert_admin(&env, &admin);
+            env.storage()
+                .instance()
+                .set(&DataKeyExt2::EmergencyFrozen, &true);
+            env.events().publish(
+                (Symbol::new(&env, "emergency_freeze_activated"),),
+                (admin, env.ledger().sequence()),
+            );
+            return 0;
+        }
+
+        let config = Self::require_multisig_config(&env);
+        Self::assert_multisig_admin(&config, &admin);
+
+        let proposal_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::EmergencyFreezeProposalCounter)
+            .unwrap_or(0)
+            + 1;
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::EmergencyFreezeProposalCounter, &proposal_id);
+
+        let mut approvals: Vec<Address> = Vec::new(&env);
+        approvals.push_back(admin.clone());
+        let proposal = EmergencyFreezeProposal { approvals };
+        let key = DataKeyExt2::EmergencyFreezeProposal(proposal_id);
+        env.storage().persistent().set(&key, &proposal);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "emergency_freeze_proposed"), proposal_id),
+            (admin, 1u32),
+        );
+
+        let bps = Self::get_freeze_supermajority_bps(env.clone());
+        let required = Self::supermajority_required(config.admins.len(), bps);
+        if required <= 1 {
+            Self::execute_emergency_freeze_proposal(&env, proposal_id);
+        }
+
+        proposal_id
+    }
+
+    /// Approve a pending emergency-freeze proposal. Activates the freeze once
+    /// the configured supermajority of distinct admins have approved.
+    pub fn approve_emergency_freeze(env: Env, admin: Address, proposal_id: u64) {
+        admin.require_auth();
+        let config = Self::require_multisig_config(&env);
+        Self::assert_multisig_admin(&config, &admin);
+
+        let key = DataKeyExt2::EmergencyFreezeProposal(proposal_id);
+        let mut proposal: EmergencyFreezeProposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("emergency freeze proposal not found"));
+
+        for i in 0..proposal.approvals.len() {
+            if proposal.approvals.get(i).unwrap() == admin {
+                panic!("already approved by this admin");
+            }
+        }
+        proposal.approvals.push_back(admin.clone());
+        let approvals_count = proposal.approvals.len() as u32;
+        env.storage().persistent().set(&key, &proposal);
+
+        env.events().publish(
+            (Symbol::new(&env, "emergency_freeze_approved"), proposal_id),
+            (admin, approvals_count),
+        );
+
+        let bps = Self::get_freeze_supermajority_bps(env.clone());
+        let required = Self::supermajority_required(config.admins.len(), bps);
+        if approvals_count >= required {
+            Self::execute_emergency_freeze_proposal(&env, proposal_id);
+        }
+    }
+
+    fn execute_emergency_freeze_proposal(env: &Env, proposal_id: u64) {
+        let key = DataKeyExt2::EmergencyFreezeProposal(proposal_id);
+        if !env.storage().persistent().has(&key) {
+            panic!("emergency freeze proposal not found");
+        }
+        env.storage().persistent().remove(&key);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::EmergencyFrozen, &true);
+        env.events().publish(
+            (Symbol::new(env, "emergency_freeze_activated"),),
+            proposal_id,
+        );
+    }
+
+    /// Propose lifting an active emergency freeze. Mirrors
+    /// `propose_emergency_freeze`'s gating: requires the same configured
+    /// supermajority when multisig governance is configured, otherwise falls
+    /// back to single-admin `unpause()` semantics.
+    pub fn propose_emergency_unfreeze(env: Env, admin: Address) -> u64 {
+        admin.require_auth();
+
+        if !env.storage().instance().has(&DataKey::MultiAdminConfig) {
+            Self::assert_admin(&env, &admin);
+            env.storage()
+                .instance()
+                .set(&DataKeyExt2::EmergencyFrozen, &false);
+            env.events().publish(
+                (Symbol::new(&env, "emergency_freeze_lifted"),),
+                (admin, env.ledger().sequence()),
+            );
+            return 0;
+        }
+
+        let config = Self::require_multisig_config(&env);
+        Self::assert_multisig_admin(&config, &admin);
+
+        let proposal_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::EmergencyFreezeProposalCounter)
+            .unwrap_or(0)
+            + 1;
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::EmergencyFreezeProposalCounter, &proposal_id);
+
+        let mut approvals: Vec<Address> = Vec::new(&env);
+        approvals.push_back(admin.clone());
+        let proposal = EmergencyFreezeProposal { approvals };
+        let key = DataKeyExt2::EmergencyUnfreezeProposal(proposal_id);
+        env.storage().persistent().set(&key, &proposal);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "emergency_unfreeze_proposed"),
+                proposal_id,
+            ),
+            (admin, 1u32),
+        );
+
+        let bps = Self::get_freeze_supermajority_bps(env.clone());
+        let required = Self::supermajority_required(config.admins.len(), bps);
+        if required <= 1 {
+            Self::execute_emergency_unfreeze_proposal(&env, proposal_id);
+        }
+
+        proposal_id
+    }
+
+    /// Approve a pending emergency-unfreeze proposal. Lifts the freeze once
+    /// the configured supermajority of distinct admins have approved.
+    pub fn approve_emergency_unfreeze(env: Env, admin: Address, proposal_id: u64) {
+        admin.require_auth();
+        let config = Self::require_multisig_config(&env);
+        Self::assert_multisig_admin(&config, &admin);
+
+        let key = DataKeyExt2::EmergencyUnfreezeProposal(proposal_id);
+        let mut proposal: EmergencyFreezeProposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("emergency unfreeze proposal not found"));
+
+        for i in 0..proposal.approvals.len() {
+            if proposal.approvals.get(i).unwrap() == admin {
+                panic!("already approved by this admin");
+            }
+        }
+        proposal.approvals.push_back(admin.clone());
+        let approvals_count = proposal.approvals.len() as u32;
+        env.storage().persistent().set(&key, &proposal);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "emergency_unfreeze_approved"),
+                proposal_id,
+            ),
+            (admin, approvals_count),
+        );
+
+        let bps = Self::get_freeze_supermajority_bps(env.clone());
+        let required = Self::supermajority_required(config.admins.len(), bps);
+        if approvals_count >= required {
+            Self::execute_emergency_unfreeze_proposal(&env, proposal_id);
+        }
+    }
+
+    fn execute_emergency_unfreeze_proposal(env: &Env, proposal_id: u64) {
+        let key = DataKeyExt2::EmergencyUnfreezeProposal(proposal_id);
+        if !env.storage().persistent().has(&key) {
+            panic!("emergency unfreeze proposal not found");
+        }
+        env.storage().persistent().remove(&key);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::EmergencyFrozen, &false);
+        env.events().publish(
+            (Symbol::new(env, "emergency_freeze_lifted"),),
+            proposal_id,
+        );
+    }
+
+    /// Returns a pending emergency-freeze activation proposal, or None.
+    pub fn get_emergency_freeze_proposal(
+        env: Env,
+        proposal_id: u64,
+    ) -> Option<EmergencyFreezeProposal> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::EmergencyFreezeProposal(proposal_id))
+    }
+
+    /// Returns a pending emergency-unfreeze proposal, or None.
+    pub fn get_emergency_unfreeze_proposal(
+        env: Env,
+        proposal_id: u64,
+    ) -> Option<EmergencyFreezeProposal> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::EmergencyUnfreezeProposal(proposal_id))
     }
 
     // ----------------------------------------------------------
@@ -2510,10 +2864,20 @@ impl ChainSettleContract {
     // ADMIN: ARBITER POOL
     // ----------------------------------------------------------
 
-    /// Add an arbiter to the admin-managed pool.
+    /// Add an arbiter to the admin-managed pool. Panics if the arbiter is
+    /// currently slashed (#372) — it must be reinstated via
+    /// `reinstate_arbiter` first.
     pub fn add_arbiter_to_pool(env: Env, admin: Address, arbiter: Address) {
         admin.require_auth();
         Self::assert_admin(&env, &admin);
+        if env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt2::ArbiterSlashed(arbiter.clone()))
+            .unwrap_or(false)
+        {
+            panic!("arbiter is slashed and must be reinstated before re-adding");
+        }
         let pool_key = Symbol::new(&env, "arbiters_pool");
         let mut pool: Vec<Address> = env
             .storage()
@@ -2578,6 +2942,84 @@ impl ChainSettleContract {
             .instance()
             .get::<Symbol, Vec<Address>>(&pool_key)
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    // ----------------------------------------------------------
+    // #372: ARBITER REPUTATION SLASHING
+    // ----------------------------------------------------------
+
+    /// Set the number of overturned resolutions that automatically slashes an
+    /// arbiter (removes them from the pool). 0 disables auto-slashing.
+    pub fn set_max_overturned_before_slash(env: Env, admin: Address, threshold: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::MaxOverturnedBeforeSlash, &threshold);
+        env.events().publish(
+            (Symbol::new(&env, "max_overturned_before_slash_set"),),
+            threshold,
+        );
+    }
+
+    /// Read the configured overturned-resolution slash threshold (0 = disabled).
+    pub fn get_max_overturned_before_slash(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt2::MaxOverturnedBeforeSlash)
+            .unwrap_or(0)
+    }
+
+    /// Whether the given arbiter is currently slashed.
+    pub fn is_arbiter_slashed(env: Env, arbiter: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::ArbiterSlashed(arbiter))
+            .unwrap_or(false)
+    }
+
+    /// Remove a slashed arbiter's slashed flag, allowing them to be re-added to
+    /// the pool via `add_arbiter_to_pool`. Does not itself re-add them to the
+    /// pool — reinstatement is a deliberate, explicit two-step admin action.
+    pub fn reinstate_arbiter(env: Env, admin: Address, arbiter: Address) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .remove(&DataKeyExt2::ArbiterSlashed(arbiter.clone()));
+        env.events()
+            .publish((Symbol::new(&env, "arbiter_reinstated"),), arbiter);
+    }
+
+    /// Remove `arbiter` from the pool and mark them slashed, so they can no
+    /// longer be assigned to new disputes. Called automatically when an
+    /// arbiter's overturned-resolution count crosses the configured threshold;
+    /// also usable directly for immediate admin-initiated slashing.
+    fn slash_arbiter(env: &Env, arbiter: &Address, overturned_count: u32) {
+        let pool_key = Symbol::new(env, "arbiters_pool");
+        let pool: Vec<Address> = env
+            .storage()
+            .instance()
+            .get::<Symbol, Vec<Address>>(&pool_key)
+            .unwrap_or_else(|| Vec::new(env));
+        let mut new_pool: Vec<Address> = Vec::new(env);
+        for i in 0..pool.len() {
+            let a = pool.get(i).unwrap();
+            if a != *arbiter {
+                new_pool.push_back(a);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&Symbol::new(env, "arb_pool_idx"), &0u32);
+        env.storage().instance().set(&pool_key, &new_pool);
+        env.storage()
+            .persistent()
+            .set(&DataKeyExt2::ArbiterSlashed(arbiter.clone()), &true);
+        env.events().publish(
+            (Symbol::new(env, "arbiter_slashed"),),
+            (arbiter.clone(), overturned_count),
+        );
     }
 
     // ----------------------------------------------------------
@@ -3706,6 +4148,123 @@ impl ChainSettleContract {
     }
 
     // ----------------------------------------------------------
+    // #405 PROOF HASH VALIDATION HOOK
+    // ----------------------------------------------------------
+
+    /// Set the admin-configured minimum/maximum proof-hash length bounds
+    /// enforced by `submit_proof`/`correct_proof`. 0 for either bound means
+    /// "no minimum"/"no maximum" respectively.
+    pub fn set_proof_hash_length_bounds(env: Env, admin: Address, min_len: u32, max_len: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        if max_len > 0 && min_len > max_len {
+            panic!("min_len must not exceed max_len");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::ProofHashMinLen, &min_len);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::ProofHashMaxLen, &max_len);
+        env.events().publish(
+            (Symbol::new(&env, "proof_hash_length_bounds_set"),),
+            (min_len, max_len),
+        );
+    }
+
+    /// Returns the configured (min_len, max_len) proof-hash length bounds
+    /// (0 = no bound for that side).
+    pub fn get_proof_hash_length_bounds(env: Env) -> (u32, u32) {
+        let min_len: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::ProofHashMinLen)
+            .unwrap_or(0);
+        let max_len: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::ProofHashMaxLen)
+            .unwrap_or(0);
+        (min_len, max_len)
+    }
+
+    /// Set (or clear, with an empty string) the admin-configured required
+    /// proof-hash prefix, e.g. "Qm" or "bafy" for basic CID-version sanity
+    /// checking. Empty = no requirement.
+    pub fn set_proof_hash_required_prefix(env: Env, admin: Address, prefix: String) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::ProofHashRequiredPrefix, &prefix);
+        env.events().publish(
+            (Symbol::new(&env, "proof_hash_required_prefix_set"),),
+            prefix,
+        );
+    }
+
+    /// Returns the configured required proof-hash prefix (empty = none).
+    pub fn get_proof_hash_required_prefix(env: Env) -> String {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt2::ProofHashRequiredPrefix)
+            .unwrap_or_else(|| String::from_str(&env, ""))
+    }
+
+    /// Validates `proof_hash` against the configured length bounds and
+    /// required prefix (if any). Panics with a dedicated message on
+    /// violation. Defaults (all unset) are fully permissive.
+    fn validate_proof_hash(env: &Env, proof_hash: &String) {
+        let len = proof_hash.len();
+        let min_len: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::ProofHashMinLen)
+            .unwrap_or(0);
+        if min_len > 0 && len < min_len {
+            panic!("proof hash is shorter than the minimum configured length");
+        }
+        let max_len: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::ProofHashMaxLen)
+            .unwrap_or(0);
+        if max_len > 0 && len > max_len {
+            panic!("proof hash exceeds the maximum configured length");
+        }
+
+        let prefix: String = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::ProofHashRequiredPrefix)
+            .unwrap_or_else(|| String::from_str(env, ""));
+        let prefix_len = prefix.len();
+        if prefix_len > 0 {
+            if len < prefix_len {
+                panic!("proof hash does not match the required prefix");
+            }
+            // soroban_sdk::String only exposes whole-string copy_into_slice
+            // (the destination slice length must equal the full string
+            // length), so both strings are copied out in full and compared
+            // over their shared leading `prefix_len` bytes.
+            const MAX_BYTES: usize = 256;
+            if prefix_len as usize > MAX_BYTES {
+                panic!("configured proof hash prefix is too long");
+            }
+            if len as usize > MAX_BYTES {
+                panic!("proof hash exceeds the internal prefix-check length limit");
+            }
+            let mut prefix_buf = [0u8; MAX_BYTES];
+            let mut hash_buf = [0u8; MAX_BYTES];
+            prefix.copy_into_slice(&mut prefix_buf[..prefix_len as usize]);
+            proof_hash.copy_into_slice(&mut hash_buf[..len as usize]);
+            if prefix_buf[..prefix_len as usize] != hash_buf[..prefix_len as usize] {
+                panic!("proof hash does not match the required prefix");
+            }
+        }
+    }
+
+    // ----------------------------------------------------------
     // SUBMIT PROOF
     // ----------------------------------------------------------
 
@@ -3738,6 +4297,9 @@ impl ChainSettleContract {
             panic!("milestone is not in pending status");
         }
         Self::require_supplier_or_logistics_auth(&shipment, &caller);
+
+        // #405: Validate proof_hash length/prefix bounds (if configured).
+        Self::validate_proof_hash(&env, &proof_hash);
 
         // Validate proof_type against per-milestone whitelist (if one is set).
         let whitelist_key = DataKey::MilestoneProofWhitelist(shipment_id.clone(), milestone_index);
@@ -3908,6 +4470,9 @@ impl ChainSettleContract {
         if caller != original {
             panic!("unauthorized");
         }
+
+        // #405: Validate new_proof_hash length/prefix bounds (if configured).
+        Self::validate_proof_hash(&env, &new_proof_hash);
 
         // Validate new_proof_type against per-milestone whitelist (same rules as submit_proof).
         let whitelist_key = DataKey::MilestoneProofWhitelist(shipment_id.clone(), milestone_index);
@@ -5375,6 +5940,58 @@ impl ChainSettleContract {
             &DataKeyExt2::DisputeResolvedAtLedger(shipment_id.clone(), milestone_index),
             &env.ledger().sequence(),
         );
+        // #372: Record this outcome so a later appeal_dispute can snapshot it.
+        env.storage().persistent().set(
+            &DataKeyExt2::DisputeResolvedApprove(shipment_id.clone(), milestone_index),
+            &approve,
+        );
+
+        // #372: If this resolution is the second (appeal) resolution of this
+        // dispute cycle, compare it against the original arbiter's outcome —
+        // a differing outcome means the original arbiter was overturned.
+        let appeal_original_key =
+            DataKeyExt2::DisputeAppealOriginal(shipment_id.clone(), milestone_index);
+        if let Some((original_arbiter, original_approve)) = env
+            .storage()
+            .persistent()
+            .get::<DataKeyExt2, (Address, bool)>(&appeal_original_key)
+        {
+            env.storage().persistent().remove(&appeal_original_key);
+            if original_approve != approve {
+                let overturned_stats_key = DataKeyExt::ArbiterStats(original_arbiter.clone());
+                let mut overturned_stats: ArbiterStats = env
+                    .storage()
+                    .persistent()
+                    .get(&overturned_stats_key)
+                    .unwrap_or_default();
+                overturned_stats.overturned_count += 1;
+                env.storage()
+                    .persistent()
+                    .set(&overturned_stats_key, &overturned_stats);
+                env.storage().persistent().extend_ttl(
+                    &overturned_stats_key,
+                    constants::TTL_INITIAL_LEDGERS,
+                    constants::TTL_MAX_LEDGERS,
+                );
+
+                let slash_threshold: u32 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKeyExt2::MaxOverturnedBeforeSlash)
+                    .unwrap_or(0);
+                let already_slashed = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKeyExt2::ArbiterSlashed(original_arbiter.clone()))
+                    .unwrap_or(false);
+                if slash_threshold > 0
+                    && overturned_stats.overturned_count >= slash_threshold
+                    && !already_slashed
+                {
+                    Self::slash_arbiter(&env, &original_arbiter, overturned_stats.overturned_count);
+                }
+            }
+        }
 
         Self::append_audit_entry(
             &env,
@@ -5568,6 +6185,21 @@ impl ChainSettleContract {
         }
         let new_arbiter =
             new_arbiter.unwrap_or_else(|| panic!("no distinct arbiter available for appeal"));
+
+        // #372: Record the original arbiter + outcome so the appeal's
+        // resolve_dispute call can detect whether it overturns this decision.
+        let original_approve: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt2::DisputeResolvedApprove(
+                shipment_id.clone(),
+                milestone_index,
+            ))
+            .unwrap_or(false);
+        env.storage().persistent().set(
+            &DataKeyExt2::DisputeAppealOriginal(shipment_id.clone(), milestone_index),
+            &(shipment.arbiter.clone(), original_approve),
+        );
 
         let mut milestone = shipment.milestones.get(milestone_index).unwrap();
         shipment.arbiter = new_arbiter.clone();
@@ -9239,6 +9871,14 @@ impl ChainSettleContract {
         if paused {
             panic!("contract is paused");
         }
+        let frozen: bool = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::EmergencyFrozen)
+            .unwrap_or(false);
+        if frozen {
+            panic!("contract is under emergency freeze");
+        }
     }
 
     fn is_shipment_paused_internal(env: &Env, shipment_id: &String) -> bool {
@@ -9726,6 +10366,14 @@ impl ChainSettleContract {
 
     /// Withdraw the full accumulated pending payout balance in one transaction.
     /// Panics if the balance is zero. Resets the balance to zero after transfer.
+    ///
+    /// #404: If the supplier has a configured payout currency preference that
+    /// differs from `token`, and an admin-registered conversion rate route
+    /// exists for (token -> preference) with sufficient contract balance in
+    /// the preferred token, the payout is converted and paid out in the
+    /// preferred token instead; the conversion rate is recorded on the
+    /// `payout_claimed` event. Otherwise falls back to paying out in `token`
+    /// unchanged (never reverts due to a missing/insufficient route).
     pub fn claim_payout(env: Env, supplier: Address, token: Address) {
         Self::assert_not_paused(&env);
         supplier.require_auth();
@@ -9745,12 +10393,45 @@ impl ChainSettleContract {
             .persistent()
             .set(&DataKeyExt::PendingPayout(supplier.clone()), &0i128);
 
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&env.current_contract_address(), &supplier, &pending);
+        let preference: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt2::PayoutCurrencyPreference(supplier.clone()));
+
+        let mut payout_token = token.clone();
+        let mut payout_amount = pending;
+        let mut rate_bps: i128 = 0;
+
+        if let Some(preferred) = preference {
+            if preferred != token {
+                let rate: Option<u32> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKeyExt2::ConversionRateBps(token.clone(), preferred.clone()));
+                if let Some(rate_val) = rate {
+                    let converted = (pending * rate_val as i128) / 10_000;
+                    let preferred_client = token::Client::new(&env, &preferred);
+                    let contract_balance =
+                        preferred_client.balance(&env.current_contract_address());
+                    if converted > 0 && contract_balance >= converted {
+                        payout_token = preferred;
+                        payout_amount = converted;
+                        rate_bps = rate_val as i128;
+                    }
+                }
+            }
+        }
+
+        let token_client = token::Client::new(&env, &payout_token);
+        token_client.transfer(&env.current_contract_address(), &supplier, &payout_amount);
 
         env.events().publish(
             (Symbol::new(&env, "payout_claimed"), supplier.clone()),
-            pending,
+            (
+                payout_amount,
+                payout_token,
+                rate_bps,
+            ),
         );
     }
 
@@ -9760,6 +10441,82 @@ impl ChainSettleContract {
             .persistent()
             .get(&DataKeyExt::PendingPayout(supplier))
             .unwrap_or(0)
+    }
+
+    /// Set the supplier's preferred settlement token for future
+    /// `claim_payout` calls. Conversion only happens when an admin has also
+    /// registered a route via `set_conversion_rate` for the source token.
+    pub fn set_payout_currency_preference(env: Env, supplier: Address, preferred_token: Address) {
+        supplier.require_auth();
+        env.storage().persistent().set(
+            &DataKeyExt2::PayoutCurrencyPreference(supplier.clone()),
+            &preferred_token,
+        );
+        env.events().publish(
+            (
+                Symbol::new(&env, "payout_currency_preference_set"),
+                supplier,
+            ),
+            preferred_token,
+        );
+    }
+
+    /// Read the supplier's configured payout currency preference, if any.
+    pub fn get_payout_currency_preference(env: Env, supplier: Address) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::PayoutCurrencyPreference(supplier))
+    }
+
+    /// Admin-registers a fixed conversion rate (basis points of `to_token`
+    /// per unit of `from_token`; 10_000 = 1:1) used by `claim_payout` to
+    /// convert a supplier's payout when a currency preference is set. This is
+    /// a stand-in swap-venue/oracle route — no live pricing is queried.
+    pub fn set_conversion_rate(
+        env: Env,
+        admin: Address,
+        from_token: Address,
+        to_token: Address,
+        rate_bps: u32,
+    ) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        if rate_bps == 0 {
+            panic!("rate_bps must be > 0");
+        }
+        env.storage().instance().set(
+            &DataKeyExt2::ConversionRateBps(from_token.clone(), to_token.clone()),
+            &rate_bps,
+        );
+        env.events().publish(
+            (Symbol::new(&env, "conversion_rate_set"), from_token, to_token),
+            rate_bps,
+        );
+    }
+
+    /// Remove a previously registered conversion rate route.
+    pub fn clear_conversion_rate(env: Env, admin: Address, from_token: Address, to_token: Address) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .remove(&DataKeyExt2::ConversionRateBps(from_token.clone(), to_token.clone()));
+        env.events().publish(
+            (
+                Symbol::new(&env, "conversion_rate_cleared"),
+                from_token,
+                to_token,
+            ),
+            (),
+        );
+    }
+
+    /// Read the registered conversion rate (basis points) for a token pair,
+    /// or None if no route is configured.
+    pub fn get_conversion_rate(env: Env, from_token: Address, to_token: Address) -> Option<u32> {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt2::ConversionRateBps(from_token, to_token))
     }
 
     // ============================================================
@@ -10933,6 +11690,7 @@ impl ChainSettleContract {
 pub mod constants;
 mod storage;
 mod test_arbiter_pool;
+mod test_arbiter_slashing;
 mod test_cancellation_reason;
 mod test_common;
 mod test_correct_proof;
@@ -10968,10 +11726,13 @@ mod test_upgrade;
 mod test_configurable_limits;
 mod test_buyer_spending_limit;
 mod test_dispute_mediator;
+mod test_emergency_freeze;
 mod test_event_schema;
 mod test_fee_tier_recalc;
 mod test_multi_token;
 mod test_partial_cancellation;
+mod test_payout_currency_preference;
+mod test_proof_validation;
 mod test_supplier_collateral;
 mod test_supplier_tiering;
 mod test_upgrade_multisig;
