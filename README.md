@@ -672,6 +672,66 @@ resolution time. If no fee config has been set, the effective fee rate is
 
 ---
 
+Long-hold escrow rebate (#300)
+The long-hold escrow rebate returns part of the platform fee to the supplier
+when a milestone is paid out after the escrow has been held open long enough.
+This rewards escrows that sit in the contract for a long time (long-hold) with a
+cheaper effective fee when their funds are finally released.
+
+`set_long_hold_rebate(admin, threshold_ledgers, rebate_bps)` — admin-only.
+Configures the rebate and emits a `long_hold_rebate_set` event.
+`get_long_hold_rebate() → (u32, u32)` (read-only) — returns the current
+`(threshold_ledgers, rebate_bps)` configuration, or `(0, 0)` if the rebate has
+never been configured (disabled by default).
+
+| Parameter | Type | Description |
+|---|---|---|
+| `threshold_ledgers` | `u32` | Minimum age of the shipment, measured in ledger sequences, before the rebate can apply. A shipment's age is `current_ledger_sequence − Shipment.created_at`. `0` disables the rebate. |
+| `rebate_bps` | `u32` | The share of the platform fee returned to the supplier, in basis points. `1 bps = 0.01%`; `10_000 bps = 100%`. `0` disables the rebate. |
+
+A basis point (bps) is one-hundredth of a percent: `1 bps = 0.01%`, and
+`10_000 bps = 100%`.
+
+**How it works**
+
+1. The rebate is applied on the immediate-release path of `confirm_milestone`
+   (i.e. a milestone with no holdback window).
+2. The platform fee is first computed on the milestone payout via
+   `deduct_fee_for_shipment`: `fee_amount = payout × fee_bps / 10_000`.
+3. The rebate only applies when **both** `threshold_ledgers > 0` **and**
+   `rebate_bps > 0` are set, and only when a fee was actually charged
+   (`fee_amount > 0`).
+4. If the shipment's ledger age is at least `threshold_ledgers`, the contract
+   computes `rebate = fee_amount × rebate_bps / 10_000` and adds it back to the
+   supplier's net payment, reducing the effective platform fee by the same amount.
+
+> **Ledger threshold, not time.** `threshold_ledgers` is expressed purely in
+> ledgers (the Stellar ledger sequence number), not seconds/minutes. Because the
+> exact wall-clock duration of a ledger depends on the network, the threshold is
+> defined in ledger terms; on Stellar a ledger closes roughly every 5 seconds,
+> so `1000` ledgers ≈ ~83 minutes, but this is an approximation and should not be
+> relied on for time-sensitive accounting.
+
+**Worked example** — `set_long_hold_rebate(admin, 1000, 1000)`
+
+Assume the platform fee is configured at `fee_bps = 100` (1%) and a single
+milestone is worth `1_000_000` units.
+
+| Step | Computation | Result |
+|---|---|---|
+| 1. Platform fee on payout | `fee_amount = 1_000_000 × 100 / 10_000` | `10_000` |
+| 2. Supplier net before rebate | `1_000_000 − 10_000` | `990_000` |
+| 3. Shipment age | `3200 − 2000` (current ledger − created) | `1200` |
+| 4. Threshold met? | `1200 ≥ 1000` | yes |
+| 5. Rebate | `10_000 × 1000 / 10_000` | `1_000` |
+| 6. Supplier net after rebate | `990_000 + 1_000` | `991_000` |
+| 7. Effective platform fee | `10_000 − 1_000` | `9_000` (0.9%) |
+
+So the supplier keeps an extra `1_000` (the rebated share of the fee), and the
+collectible platform fee drops from `1%` to `0.9%` for that milestone.
+
+---
+
 Referral fee program
 The referral fee mechanism lets an admin reward a referrer when a shipment
 completes successfully. The fee is paid out of the protocol fee that would
@@ -1163,6 +1223,28 @@ Post-upgrade state migration entrypoint.
 
 Events
 The contract emits the following events (subscribe via Horizon or RPC):
+
+Event name	Payload	When
+`shipment_created`	`shipment_id`	New shipment created
+`proof_submitted`	`(shipment_id, milestone_index)`	Proof submitted for a milestone
+`milestone_confirmed`	`(shipment_id, milestone_index, payment_amount)`	Milestone confirmed, payment released
+`dispute_raised`	`(shipment_id, milestone_index)`	Buyer disputes a milestone
+`partial_uncontested_released`	`(shipment_id)` topic, `(milestone_index, uncontested_amount, fee_amount)` data	Uncontested portion released immediately at partial dispute time
+`dispute_resolved`	`(shipment_id, milestone_index, approved)`	Arbiter resolves dispute
+`dispute_escalated`	`(shipment_id)` topic, `(milestone_index, opened_ledger, current_ledger)` data	Dispute open duration surpassed escalation threshold
+`escalation_threshold_set`	`threshold_ledgers`	Admin configured escalation threshold
+`shipment_cancelled`	`(shipment_id, refund_amount)`	Shipment cancelled
+`milestones_rebalanced`	`(buyer, new_percents)`	Buyer rebalanced milestone percentages
+`nft_hook_config_updated`	`(admin, enabled, ledger_sequence)`	Admin toggled the NFT mint hook via `set_nft_hook_enabled`
+`circuit_breaker_set`	`(limit, window_ledgers)`	Admin configured rate-limiting circuit breaker
+`long_hold_rebate_set`	`(threshold_ledgers, rebate_bps)`	Admin configured the long-hold escrow rebate
+`nft_mint_hook`	`(shipment_id)` topic, `(buyer, supplier, total_amount, ledger_sequence, metadata_hash)` data	Final milestone completed while the NFT mint hook is enabled
+`contract_upgraded`	`(new_wasm_hash, ledger_sequence)`	Single-key WASM upgrade executed
+`upgrade_proposed`	`(new_wasm_hash, admin, 1)`	Multisig WASM upgrade proposed
+`upgrade_approved`	`(admin, approvals_count)`	Multisig WASM upgrade approved by an admin
+`upgrade_cancelled`	`admin`	Multisig WASM upgrade proposal cancelled
+`upgrade_executed`	`new_wasm_hash`	Multisig WASM upgrade executed after threshold reached
+
 Event name Payload When
 `shipment_created` `shipment_id` New shipment created
 `proof_submitted` `(shipment_id, milestone_index)` Proof submitted for a milestone
@@ -1182,6 +1264,7 @@ Event name Payload When
 `upgrade_approved` `(admin, approvals_count)` Multisig WASM upgrade approved by an admin
 `upgrade_cancelled` `admin` Multisig WASM upgrade proposal cancelled
 `upgrade_executed` `new_wasm_hash` Multisig WASM upgrade executed after threshold reached
+
 The backend service (`chainsetttle-backend`) listens for these events and
 sends push notifications to the relevant parties.
 

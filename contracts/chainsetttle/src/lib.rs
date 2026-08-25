@@ -6259,6 +6259,37 @@ impl ChainSettleContract {
     // ADMIN: LONG-HOLD ESCROW REBATE (#300)
     // ----------------------------------------------------------
 
+    /// Configure the long-hold escrow rebate (admin-only).
+    ///
+    /// Stores a `(threshold_ledgers, rebate_bps)` tuple on instance storage and
+    /// emits a `long_hold_rebate_set` event.
+    ///
+    /// * `threshold_ledgers` — the minimum age, measured in ledger sequences
+    ///   since the shipment was created (`current_ledger - Shipment.created_at`),
+    ///   that a shipment must reach before the rebate can apply. `0` disables the
+    ///   threshold and therefore the rebate.
+    /// * `rebate_bps` — the share of the platform fee that is given back to the
+    ///   supplier, expressed in basis points (`1 bps = 0.01%`, `10_000 bps = 100%`).
+    ///   `0` disables the rebate.
+    ///
+    /// The rebate is applied inside `confirm_milestone` on the immediate-release
+    /// path (no holdback): if the shipment's ledger age is at least
+    /// `threshold_ledgers` AND a platform fee was actually charged, then
+    /// `rebate = fee_amount * rebate_bps / 10_000` is added back to the supplier's
+    /// net payment and removed from the fee reported for the milestone.
+    ///
+    /// Both values must be non-zero for the rebate to take effect.
+    ///
+    /// ```text
+    /// Worked example: set_long_hold_rebate(admin, 1000, 1000)
+    ///   fee_bps       = 100  (1% platform fee)
+    ///   payout        = 1_000_000
+    ///   fee_amount    = 1_000_000 * 100 / 10_000   = 10_000
+    ///   shipment age  = 3200 - 2000                = 1200   (>= 1000, threshold met)
+    ///   rebate        = 10_000 * 1000 / 10_000     = 1_000
+    ///   supplier net  = 990_000 + 1_000            = 991_000
+    ///   effective fee = 10_000 - 1_000             = 9_000  (0.9% instead of 1%)
+    /// ```
     pub fn set_long_hold_rebate(env: Env, admin: Address, threshold_ledgers: u32, rebate_bps: u32) {
         admin.require_auth();
         Self::assert_admin(&env, &admin);
@@ -6272,6 +6303,11 @@ impl ChainSettleContract {
         );
     }
 
+    /// Read the current long-hold escrow rebate configuration (read-only).
+    ///
+    /// Returns the `(threshold_ledgers, rebate_bps)` tuple stored by
+    /// `set_long_hold_rebate`, or `(0, 0)` if the rebate has never been
+    /// configured (i.e. the rebate is disabled by default).
     pub fn get_long_hold_rebate(env: Env) -> (u32, u32) {
         env.storage()
             .instance()
