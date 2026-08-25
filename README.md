@@ -180,6 +180,17 @@ Arbiter resolves a `Disputed` milestone.
 - `approve = true` → releases payment, status → `Resolved`
 - `approve = false` → resets status → `Pending` (supplier must resubmit)
 
+### Backup arbiter failover
+If the assigned arbiter becomes unavailable, the contract supports a backup arbiter failover flow.
+
+#### `set_arbiter_inactivity_threshold(admin, threshold_ledgers)`
+Sets the ledger-based inactivity window after which a dispute is treated as stale if the primary arbiter has not acted. This threshold is measured from the moment the dispute is opened; once `current_ledger >= dispute_opened_at + threshold_ledgers`, the failover logic is eligible to take effect. A value of `0` disables the inactivity trigger.
+
+#### `activate_backup_arbiter(...)`
+Configures the backup arbiter for a shipment and activates failover handling for that shipment. The backup arbiter is intended as a secondary resolver that can take over when the primary arbiter does not resolve the dispute within the configured inactivity window. In practice, the backup arbiter is set up after the inactivity threshold is configured, and the failover path is triggered automatically once that window has elapsed without arbiter action.
+
+This ensures that a dispute does not stall indefinitely while waiting on an inactive arbiter: the system keeps the primary arbiter on record, but the backup arbiter can assume dispute resolution duties after the inactivity threshold is reached.
+
 ### `cancel_shipment(buyer, shipment_id)`
 Cancels the shipment if no milestones have been confirmed yet.
 Returns all locked funds to the buyer.
