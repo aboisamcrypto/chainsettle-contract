@@ -60,13 +60,24 @@ fn test_panel_stored_on_creation() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let arbiter2 = Address::generate(&t.env);
     let arbiter3 = Address::generate(&t.env);
-    let panel = vec![&t.env, t.arbiter.clone(), arbiter2.clone(), arbiter3.clone()];
+    let panel = vec![
+        &t.env,
+        t.arbiter.clone(),
+        arbiter2.clone(),
+        arbiter3.clone(),
+    ];
     let ship_id = sid(&t.env, "panel_create");
 
     create_panel_shipment(
-        &client, &t.env, &ship_id,
-        &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, panel.clone(),
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        panel.clone(),
     );
 
     let stored = client.get_arbiter_panel(&ship_id);
@@ -83,13 +94,20 @@ fn test_single_arbiter_shipment_unaffected_by_panel_feature() {
     client.create_shipment(
         &ship_id,
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &1_000_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &1_000_000i128,
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
 
-    assert_eq!(client.get_arbiter_panel(&ship_id).len(), 0, "no panel for single-arbiter shipment");
+    assert_eq!(
+        client.get_arbiter_panel(&ship_id).len(),
+        0,
+        "no panel for single-arbiter shipment"
+    );
 }
 
 #[test]
@@ -101,9 +119,15 @@ fn test_panel_too_small_rejected() {
     // Only 2 members – must panic.
     let panel = vec![&t.env, t.arbiter.clone(), arbiter2.clone()];
     create_panel_shipment(
-        &client, &t.env, &sid(&t.env, "small_panel"),
-        &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, panel,
+        &client,
+        &t.env,
+        &sid(&t.env, "small_panel"),
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        panel,
     );
 }
 
@@ -115,48 +139,91 @@ fn test_panel_2_of_3_majority_approve_resolves_dispute() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let arbiter2 = Address::generate(&t.env);
     let arbiter3 = Address::generate(&t.env);
-    let panel = vec![&t.env, t.arbiter.clone(), arbiter2.clone(), arbiter3.clone()];
+    let panel = vec![
+        &t.env,
+        t.arbiter.clone(),
+        arbiter2.clone(),
+        arbiter3.clone(),
+    ];
     let ship_id = sid(&t.env, "panel_21_approve");
 
     create_panel_shipment(
-        &client, &t.env, &ship_id,
-        &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, panel,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        panel,
     );
 
     // Submit proof and raise dispute.
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &sid(&t.env, "h0"), &ipfs(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &sid(&t.env, "h0"),
+        &ipfs(&t.env),
+    );
     client.raise_dispute(&t.buyer, &ship_id, &0u32);
 
     // First vote: approve. No majority yet (1/3).
     client.cast_dispute_vote(&t.arbiter, &ship_id, &0u32, &true);
     let m = client.get_milestone(&ship_id, &0u32);
-    assert_eq!(m.status, MilestoneStatus::Disputed, "still disputed after 1 vote");
+    assert_eq!(
+        m.status,
+        MilestoneStatus::Disputed,
+        "still disputed after 1 vote"
+    );
 
     // Second vote: approve. Majority reached (2/3) → auto-resolves.
     client.cast_dispute_vote(&arbiter2, &ship_id, &0u32, &true);
     let m = client.get_milestone(&ship_id, &0u32);
-    assert_eq!(m.status, MilestoneStatus::Resolved, "should be resolved after 2-of-3 approve");
+    assert_eq!(
+        m.status,
+        MilestoneStatus::Resolved,
+        "should be resolved after 2-of-3 approve"
+    );
 }
 
 #[test]
 fn test_panel_3_of_5_majority_reject_resets_milestone() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-    let arb = (0..4).map(|_| Address::generate(&t.env)).collect::<std::vec::Vec<_>>();
+    let arb = (0..4)
+        .map(|_| Address::generate(&t.env))
+        .collect::<std::vec::Vec<_>>();
     let panel = vec![
         &t.env,
-        t.arbiter.clone(), arb[0].clone(), arb[1].clone(), arb[2].clone(), arb[3].clone()
+        t.arbiter.clone(),
+        arb[0].clone(),
+        arb[1].clone(),
+        arb[2].clone(),
+        arb[3].clone(),
     ];
     let ship_id = sid(&t.env, "panel_35_reject");
 
     create_panel_shipment(
-        &client, &t.env, &ship_id,
-        &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, panel,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        panel,
     );
 
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &sid(&t.env, "h0"), &ipfs(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &sid(&t.env, "h0"),
+        &ipfs(&t.env),
+    );
     client.raise_dispute(&t.buyer, &ship_id, &0u32);
 
     // 3 reject votes → majority (3 > 5/2 = 2) → resolves as buyer win (Pending).
@@ -165,7 +232,11 @@ fn test_panel_3_of_5_majority_reject_resets_milestone() {
     client.cast_dispute_vote(&arb[1], &ship_id, &0u32, &false);
 
     let m = client.get_milestone(&ship_id, &0u32);
-    assert_eq!(m.status, MilestoneStatus::Pending, "full dispute reject should reset to Pending");
+    assert_eq!(
+        m.status,
+        MilestoneStatus::Pending,
+        "full dispute reject should reset to Pending"
+    );
 }
 
 // ─── Duplicate vote and non-member rejection ───────────────────────
@@ -177,15 +248,32 @@ fn test_panel_duplicate_vote_rejected() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let arbiter2 = Address::generate(&t.env);
     let arbiter3 = Address::generate(&t.env);
-    let panel = vec![&t.env, t.arbiter.clone(), arbiter2.clone(), arbiter3.clone()];
+    let panel = vec![
+        &t.env,
+        t.arbiter.clone(),
+        arbiter2.clone(),
+        arbiter3.clone(),
+    ];
     let ship_id = sid(&t.env, "panel_dup_vote");
 
     create_panel_shipment(
-        &client, &t.env, &ship_id,
-        &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, panel,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        panel,
     );
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &sid(&t.env, "h0"), &ipfs(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &sid(&t.env, "h0"),
+        &ipfs(&t.env),
+    );
     client.raise_dispute(&t.buyer, &ship_id, &0u32);
 
     client.cast_dispute_vote(&t.arbiter, &ship_id, &0u32, &true);
@@ -201,15 +289,32 @@ fn test_non_panel_member_vote_rejected() {
     let arbiter2 = Address::generate(&t.env);
     let arbiter3 = Address::generate(&t.env);
     let outsider = Address::generate(&t.env);
-    let panel = vec![&t.env, t.arbiter.clone(), arbiter2.clone(), arbiter3.clone()];
+    let panel = vec![
+        &t.env,
+        t.arbiter.clone(),
+        arbiter2.clone(),
+        arbiter3.clone(),
+    ];
     let ship_id = sid(&t.env, "panel_outsider");
 
     create_panel_shipment(
-        &client, &t.env, &ship_id,
-        &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, panel,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        panel,
     );
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &sid(&t.env, "h0"), &ipfs(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &sid(&t.env, "h0"),
+        &ipfs(&t.env),
+    );
     client.raise_dispute(&t.buyer, &ship_id, &0u32);
 
     // Outsider is not in the panel → must panic.
@@ -223,15 +328,32 @@ fn test_vote_after_resolution_rejected() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let arbiter2 = Address::generate(&t.env);
     let arbiter3 = Address::generate(&t.env);
-    let panel = vec![&t.env, t.arbiter.clone(), arbiter2.clone(), arbiter3.clone()];
+    let panel = vec![
+        &t.env,
+        t.arbiter.clone(),
+        arbiter2.clone(),
+        arbiter3.clone(),
+    ];
     let ship_id = sid(&t.env, "panel_post_resolve");
 
     create_panel_shipment(
-        &client, &t.env, &ship_id,
-        &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, panel,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        panel,
     );
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &sid(&t.env, "h0"), &ipfs(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &sid(&t.env, "h0"),
+        &ipfs(&t.env),
+    );
     client.raise_dispute(&t.buyer, &ship_id, &0u32);
 
     // 2-of-3 approve → resolves.
@@ -250,7 +372,11 @@ fn test_vote_after_resolution_rejected() {
 fn test_exposure_cap_disabled_by_default() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
-    assert_eq!(client.get_supplier_exposure_cap(), 0i128, "cap should default to 0 (disabled)");
+    assert_eq!(
+        client.get_supplier_exposure_cap(),
+        0i128,
+        "cap should default to 0 (disabled)"
+    );
 }
 
 #[test]
@@ -261,8 +387,11 @@ fn test_exposure_increases_on_new_shipment() {
     client.create_shipment(
         &sid(&t.env, "exp1"),
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &500_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &500_000i128,
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
@@ -282,8 +411,11 @@ fn test_exposure_cap_enforced_on_create_shipment() {
     client.create_shipment(
         &sid(&t.env, "cap1"),
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &500_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &500_000i128,
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
@@ -293,13 +425,19 @@ fn test_exposure_cap_enforced_on_create_shipment() {
         client.create_shipment(
             &sid(&t.env, "cap2"),
             &single_buyer_vec(&t.env, &t.buyer),
-            &t.supplier, &t.logistics, &t.arbiter,
-            &t.token_id, &400_000i128,
+            &t.supplier,
+            &t.logistics,
+            &t.arbiter,
+            &t.token_id,
+            &400_000i128,
             &build_milestones(&t.env),
             &default_options(&t.env),
         );
     }));
-    assert!(result.is_err(), "second shipment should be rejected by exposure cap");
+    assert!(
+        result.is_err(),
+        "second shipment should be rejected by exposure cap"
+    );
 }
 
 #[test]
@@ -320,15 +458,18 @@ fn test_exposure_decreases_after_shipment_completes() {
             dispute_opened_ledger: None,
             deadline_ledger: 0,
             penalty_bps_per_ledger: 0,
-        }
+        },
     ];
 
     let ship_id = sid(&t.env, "exp_complete");
     client.create_shipment(
         &ship_id,
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &500_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &500_000i128,
         &single_ms,
         &default_options(&t.env),
     );
@@ -336,11 +477,20 @@ fn test_exposure_decreases_after_shipment_completes() {
     assert_eq!(client.get_supplier_exposure(&t.supplier), 500_000i128);
 
     // Complete the shipment.
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &sid(&t.env, "h0"), &ipfs(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &sid(&t.env, "h0"),
+        &ipfs(&t.env),
+    );
     client.confirm_milestone(&t.buyer, &ship_id, &0u32);
 
-    assert_eq!(client.get_supplier_exposure(&t.supplier), 0i128,
-        "exposure should be 0 after shipment completes");
+    assert_eq!(
+        client.get_supplier_exposure(&t.supplier),
+        0i128,
+        "exposure should be 0 after shipment completes"
+    );
 }
 
 #[test]
@@ -353,8 +503,11 @@ fn test_exposure_cap_enforced_on_top_up() {
     client.create_shipment(
         &sid(&t.env, "topup_cap"),
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &500_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &500_000i128,
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
@@ -363,7 +516,10 @@ fn test_exposure_cap_enforced_on_top_up() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.top_up_escrow(&t.buyer, &sid(&t.env, "topup_cap"), &200_000i128);
     }));
-    assert!(result.is_err(), "top-up exceeding exposure cap should be rejected");
+    assert!(
+        result.is_err(),
+        "top-up exceeding exposure cap should be rejected"
+    );
 }
 
 #[test]
@@ -377,16 +533,22 @@ fn test_exposure_cap_across_multiple_concurrent_shipments() {
     client.create_shipment(
         &sid(&t.env, "concA"),
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &400_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &400_000i128,
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
     client.create_shipment(
         &sid(&t.env, "concB"),
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &400_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &400_000i128,
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
@@ -398,13 +560,19 @@ fn test_exposure_cap_across_multiple_concurrent_shipments() {
         client.create_shipment(
             &sid(&t.env, "concC"),
             &single_buyer_vec(&t.env, &t.buyer),
-            &t.supplier, &t.logistics, &t.arbiter,
-            &t.token_id, &400_000i128,
+            &t.supplier,
+            &t.logistics,
+            &t.arbiter,
+            &t.token_id,
+            &400_000i128,
             &build_milestones(&t.env),
             &default_options(&t.env),
         );
     }));
-    assert!(result.is_err(), "third concurrent shipment should be rejected");
+    assert!(
+        result.is_err(),
+        "third concurrent shipment should be rejected"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -421,16 +589,25 @@ fn test_milestone_payees_stored_and_retrieved() {
     client.create_shipment(
         &ship_id,
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &1_000_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &1_000_000i128,
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
 
     let payees = vec![
         &t.env,
-        MilestonePayee { payee: t.supplier.clone(), percent: 60 },
-        MilestonePayee { payee: payee2.clone(),    percent: 40 },
+        MilestonePayee {
+            payee: t.supplier.clone(),
+            percent: 60,
+        },
+        MilestonePayee {
+            payee: payee2.clone(),
+            percent: 40,
+        },
     ];
     client.set_milestone_payees(&t.buyer, &ship_id, &0u32, &payees);
 
@@ -451,8 +628,11 @@ fn test_payees_must_sum_to_100() {
     client.create_shipment(
         &ship_id,
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &1_000_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &1_000_000i128,
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
@@ -460,8 +640,14 @@ fn test_payees_must_sum_to_100() {
     // 60 + 30 = 90 ≠ 100 → must panic.
     let payees = vec![
         &t.env,
-        MilestonePayee { payee: t.supplier.clone(), percent: 60 },
-        MilestonePayee { payee: payee2.clone(),    percent: 30 },
+        MilestonePayee {
+            payee: t.supplier.clone(),
+            percent: 60,
+        },
+        MilestonePayee {
+            payee: payee2.clone(),
+            percent: 30,
+        },
     ];
     client.set_milestone_payees(&t.buyer, &ship_id, &0u32, &payees);
 }
@@ -476,16 +662,31 @@ fn test_payees_not_configurable_after_proof_submitted() {
     client.create_shipment(
         &ship_id,
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &1_000_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &1_000_000i128,
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
 
     // Submit proof → milestone leaves Pending.
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &sid(&t.env, "h0"), &ipfs(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &sid(&t.env, "h0"),
+        &ipfs(&t.env),
+    );
 
-    let payees = vec![&t.env, MilestonePayee { payee: t.supplier.clone(), percent: 100 }];
+    let payees = vec![
+        &t.env,
+        MilestonePayee {
+            payee: t.supplier.clone(),
+            percent: 100,
+        },
+    ];
     client.set_milestone_payees(&t.buyer, &ship_id, &0u32, &payees);
 }
 
@@ -509,14 +710,17 @@ fn test_two_way_payee_split_on_confirm() {
             dispute_opened_ledger: None,
             deadline_ledger: 0,
             penalty_bps_per_ledger: 0,
-        }
+        },
     ];
 
     client.create_shipment(
         &ship_id,
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &1_000_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &1_000_000i128,
         &single_ms,
         &default_options(&t.env),
     );
@@ -524,28 +728,40 @@ fn test_two_way_payee_split_on_confirm() {
     // 70/30 split.
     let payees = vec![
         &t.env,
-        MilestonePayee { payee: t.supplier.clone(), percent: 70 },
-        MilestonePayee { payee: payee2.clone(),    percent: 30 },
+        MilestonePayee {
+            payee: t.supplier.clone(),
+            percent: 70,
+        },
+        MilestonePayee {
+            payee: payee2.clone(),
+            percent: 30,
+        },
     ];
     client.set_milestone_payees(&t.buyer, &ship_id, &0u32, &payees);
 
     // Record balances before confirm.
     let token_client = soroban_sdk::token::Client::new(&t.env, &t.token_id);
     let before_supplier = token_client.balance(&t.supplier);
-    let before_payee2  = token_client.balance(&payee2);
+    let before_payee2 = token_client.balance(&payee2);
 
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &sid(&t.env, "h0"), &ipfs(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &sid(&t.env, "h0"),
+        &ipfs(&t.env),
+    );
     client.confirm_milestone(&t.buyer, &ship_id, &0u32);
 
     let after_supplier = token_client.balance(&t.supplier);
-    let after_payee2  = token_client.balance(&payee2);
+    let after_payee2 = token_client.balance(&payee2);
 
     let supplier_recv = after_supplier - before_supplier;
-    let payee2_recv   = after_payee2  - before_payee2;
+    let payee2_recv = after_payee2 - before_payee2;
 
     // Supplier should receive 70%, payee2 30% (no protocol fee in test).
     assert_eq!(supplier_recv, 700_000i128, "supplier should get 70%");
-    assert_eq!(payee2_recv,   300_000i128, "payee2 should get 30%");
+    assert_eq!(payee2_recv, 300_000i128, "payee2 should get 30%");
 }
 
 #[test]
@@ -568,14 +784,17 @@ fn test_three_way_payee_split_on_confirm() {
             dispute_opened_ledger: None,
             deadline_ledger: 0,
             penalty_bps_per_ledger: 0,
-        }
+        },
     ];
 
     client.create_shipment(
         &ship_id,
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &1_200_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &1_200_000i128,
         &single_ms,
         &default_options(&t.env),
     );
@@ -583,9 +802,18 @@ fn test_three_way_payee_split_on_confirm() {
     // 50/30/20 split.
     let payees = vec![
         &t.env,
-        MilestonePayee { payee: t.supplier.clone(), percent: 50 },
-        MilestonePayee { payee: payee2.clone(),    percent: 30 },
-        MilestonePayee { payee: payee3.clone(),    percent: 20 },
+        MilestonePayee {
+            payee: t.supplier.clone(),
+            percent: 50,
+        },
+        MilestonePayee {
+            payee: payee2.clone(),
+            percent: 30,
+        },
+        MilestonePayee {
+            payee: payee3.clone(),
+            percent: 20,
+        },
     ];
     client.set_milestone_payees(&t.buyer, &ship_id, &0u32, &payees);
 
@@ -594,12 +822,22 @@ fn test_three_way_payee_split_on_confirm() {
     let before_2 = token_client.balance(&payee2);
     let before_3 = token_client.balance(&payee3);
 
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &sid(&t.env, "h0"), &ipfs(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &sid(&t.env, "h0"),
+        &ipfs(&t.env),
+    );
     client.confirm_milestone(&t.buyer, &ship_id, &0u32);
 
-    assert_eq!(token_client.balance(&t.supplier) - before_s, 600_000i128, "50%");
-    assert_eq!(token_client.balance(&payee2) - before_2,     360_000i128, "30%");
-    assert_eq!(token_client.balance(&payee3) - before_3,     240_000i128, "20%");
+    assert_eq!(
+        token_client.balance(&t.supplier) - before_s,
+        600_000i128,
+        "50%"
+    );
+    assert_eq!(token_client.balance(&payee2) - before_2, 360_000i128, "30%");
+    assert_eq!(token_client.balance(&payee3) - before_3, 240_000i128, "20%");
 }
 
 #[test]
@@ -620,14 +858,17 @@ fn test_no_payees_configured_falls_back_to_supplier() {
             dispute_opened_ledger: None,
             deadline_ledger: 0,
             penalty_bps_per_ledger: 0,
-        }
+        },
     ];
 
     client.create_shipment(
         &ship_id,
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &1_000_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &1_000_000i128,
         &single_ms,
         &default_options(&t.env),
     );
@@ -636,11 +877,20 @@ fn test_no_payees_configured_falls_back_to_supplier() {
     let token_client = soroban_sdk::token::Client::new(&t.env, &t.token_id);
     let before = token_client.balance(&t.supplier);
 
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &sid(&t.env, "h0"), &ipfs(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &sid(&t.env, "h0"),
+        &ipfs(&t.env),
+    );
     client.confirm_milestone(&t.buyer, &ship_id, &0u32);
 
-    assert_eq!(token_client.balance(&t.supplier) - before, 1_000_000i128,
-        "entire payment should go to supplier when no payees configured");
+    assert_eq!(
+        token_client.balance(&t.supplier) - before,
+        1_000_000i128,
+        "entire payment should go to supplier when no payees configured"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -653,7 +903,7 @@ fn test_auto_blacklist_disabled_by_default() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let rule = client.get_auto_blacklist_rule();
     assert_eq!(rule.max_cancelled, 0, "max_cancelled should default to 0");
-    assert_eq!(rule.max_disputed,  0, "max_disputed should default to 0");
+    assert_eq!(rule.max_disputed, 0, "max_disputed should default to 0");
 }
 
 #[test]
@@ -665,8 +915,11 @@ fn test_auto_blacklist_not_triggered_when_disabled() {
     client.create_shipment(
         &ship_id,
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &1_000_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &1_000_000i128,
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
@@ -674,7 +927,10 @@ fn test_auto_blacklist_not_triggered_when_disabled() {
     client.cancel_shipment(&t.buyer, &ship_id);
 
     // Rule disabled (both 0) → supplier must not be blacklisted.
-    assert!(!client.is_blacklisted(&t.supplier), "supplier should not be auto-blacklisted when rule is disabled");
+    assert!(
+        !client.is_blacklisted(&t.supplier),
+        "supplier should not be auto-blacklisted when rule is disabled"
+    );
 }
 
 #[test]
@@ -689,15 +945,20 @@ fn test_auto_blacklist_triggered_by_cancelled_threshold() {
     client.create_shipment(
         &ship_id,
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &1_000_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &1_000_000i128,
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
     client.cancel_shipment(&t.buyer, &ship_id);
 
-    assert!(client.is_blacklisted(&t.supplier),
-        "supplier should be auto-blacklisted after reaching cancelled threshold");
+    assert!(
+        client.is_blacklisted(&t.supplier),
+        "supplier should be auto-blacklisted after reaching cancelled threshold"
+    );
 }
 
 #[test]
@@ -712,16 +973,27 @@ fn test_auto_blacklist_triggered_by_disputed_threshold() {
     client.create_shipment(
         &ship_id,
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &1_000_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &1_000_000i128,
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &sid(&t.env, "h0"), &ipfs(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &sid(&t.env, "h0"),
+        &ipfs(&t.env),
+    );
     client.raise_dispute(&t.buyer, &ship_id, &0u32);
 
-    assert!(client.is_blacklisted(&t.supplier),
-        "supplier should be auto-blacklisted after reaching disputed threshold");
+    assert!(
+        client.is_blacklisted(&t.supplier),
+        "supplier should be auto-blacklisted after reaching disputed threshold"
+    );
 }
 
 #[test]
@@ -735,8 +1007,11 @@ fn test_auto_blacklist_log_entry_distinguishable() {
     client.create_shipment(
         &ship_id,
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &1_000_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &1_000_000i128,
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
@@ -746,7 +1021,10 @@ fn test_auto_blacklist_log_entry_distinguishable() {
     let log = client.get_admin_log();
     let auto_detail = Symbol::new(&t.env, "auto_blacklist_triggered");
     let found = (0..log.len()).any(|i| log.get(i as u32).unwrap().detail == auto_detail);
-    assert!(found, "admin log should contain an auto_blacklist_triggered entry");
+    assert!(
+        found,
+        "admin log should contain an auto_blacklist_triggered entry"
+    );
 }
 
 #[test]
@@ -760,8 +1038,11 @@ fn test_manual_remove_from_blacklist_works_after_auto_trigger() {
     client.create_shipment(
         &ship_id,
         &single_buyer_vec(&t.env, &t.buyer),
-        &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, &1_000_000i128,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        &1_000_000i128,
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
@@ -771,6 +1052,8 @@ fn test_manual_remove_from_blacklist_works_after_auto_trigger() {
 
     // Admin manually removes from blacklist.
     client.remove_from_blacklist(&t.buyer, &t.supplier);
-    assert!(!client.is_blacklisted(&t.supplier),
-        "should no longer be blacklisted after manual removal");
+    assert!(
+        !client.is_blacklisted(&t.supplier),
+        "should no longer be blacklisted after manual removal"
+    );
 }

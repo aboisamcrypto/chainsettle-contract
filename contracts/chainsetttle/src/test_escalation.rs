@@ -20,7 +20,13 @@ fn proof_type(env: &soroban_sdk::Env) -> Symbol {
 }
 
 fn open_dispute(t: &TestSetup, client: &ChainSettleContractClient, ship_id: &String) {
-    client.submit_proof(&t.supplier, ship_id, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        ship_id,
+        &0u32,
+        &proof_hash(&t.env),
+        &proof_type(&t.env),
+    );
     client.raise_dispute(&t.buyer, ship_id, &0u32);
 }
 
@@ -44,15 +50,24 @@ fn test_check_escalation_under_threshold_no_escalation() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let ship_id = sid(&t.env, "ship1");
     create_standard_shipment(
-        &client, &t.env, &ship_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, 1_000_000,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        1_000_000,
     );
 
     client.set_escalation_threshold(&t.buyer, &100u32);
     open_dispute(&t, &client, &ship_id);
 
     // Advance the ledger, but stay under the escalation threshold.
-    t.env.ledger().set_sequence_number(t.env.ledger().sequence() + 50);
+    t.env
+        .ledger()
+        .set_sequence_number(t.env.ledger().sequence() + 50);
 
     client.check_escalation(&ship_id, &0u32);
     // events().all() reflects only the most recent top-level call, so this
@@ -73,8 +88,15 @@ fn test_check_escalation_past_threshold_triggers_event_and_preserves_state() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let ship_id = sid(&t.env, "ship1");
     create_standard_shipment(
-        &client, &t.env, &ship_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, 1_000_000,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        1_000_000,
     );
 
     client.set_escalation_threshold(&t.buyer, &100u32);
@@ -107,13 +129,22 @@ fn test_check_escalation_disabled_by_default_no_event() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let ship_id = sid(&t.env, "ship1");
     create_standard_shipment(
-        &client, &t.env, &ship_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, 1_000_000,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        1_000_000,
     );
 
     // Threshold left at default (0 = disabled).
     open_dispute(&t, &client, &ship_id);
-    t.env.ledger().set_sequence_number(t.env.ledger().sequence() + 1_000_000);
+    t.env
+        .ledger()
+        .set_sequence_number(t.env.ledger().sequence() + 1_000_000);
 
     client.check_escalation(&ship_id, &0u32);
     assert_eq!(t.env.events().all().len(), 0);
@@ -125,12 +156,21 @@ fn test_check_escalation_non_disputed_milestone_no_event() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let ship_id = sid(&t.env, "ship1");
     create_standard_shipment(
-        &client, &t.env, &ship_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, 1_000_000,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        1_000_000,
     );
 
     client.set_escalation_threshold(&t.buyer, &1u32);
-    t.env.ledger().set_sequence_number(t.env.ledger().sequence() + 1000);
+    t.env
+        .ledger()
+        .set_sequence_number(t.env.ledger().sequence() + 1000);
 
     // Milestone 0 is still Pending, never disputed.
     client.check_escalation(&ship_id, &0u32);

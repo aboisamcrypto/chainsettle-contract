@@ -22,8 +22,8 @@ use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 use crate::{
     constants::{TTL_INITIAL_LEDGERS, TTL_MAX_LEDGERS},
-    AuditEntry, CancelPolicy, ContractStats, DisputeEntry, FeeConfig, MultiAdminConfig, ReputationScore, Shipment,
-    ShipmentStatus,
+    AuditEntry, CancelPolicy, ContractStats, DisputeEntry, FeeConfig, MultiAdminConfig,
+    ReputationScore, Shipment, ShipmentStatus,
 };
 
 // ============================================================
@@ -588,9 +588,11 @@ pub fn get_arbiter_fee_tiers(env: &Env) -> Vec<(i128, u32)> {
 pub fn set_arbiter_fee_tiers(env: &Env, tiers: &Vec<(i128, u32)>) {
     let key = crate::DataKeyExt::ArbiterFeeTiers;
     env.storage().persistent().set(&key, tiers);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, crate::constants::TTL_INITIAL_LEDGERS, crate::constants::TTL_MAX_LEDGERS);
+    env.storage().persistent().extend_ttl(
+        &key,
+        crate::constants::TTL_INITIAL_LEDGERS,
+        crate::constants::TTL_MAX_LEDGERS,
+    );
 }
 
 // ============================================================
@@ -607,9 +609,11 @@ pub fn get_arbiter_stats(env: &Env, arbiter: &Address) -> crate::ArbiterStats {
 pub fn set_arbiter_stats(env: &Env, arbiter: &Address, stats: &crate::ArbiterStats) {
     let key = crate::DataKeyExt::ArbiterStats(arbiter.clone());
     env.storage().persistent().set(&key, stats);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, crate::constants::TTL_INITIAL_LEDGERS, crate::constants::TTL_MAX_LEDGERS);
+    env.storage().persistent().extend_ttl(
+        &key,
+        crate::constants::TTL_INITIAL_LEDGERS,
+        crate::constants::TTL_MAX_LEDGERS,
+    );
 }
 
 // ============================================================

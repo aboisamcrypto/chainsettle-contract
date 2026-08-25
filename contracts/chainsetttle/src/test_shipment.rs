@@ -3,11 +3,8 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::{
-    testutils::Address as _,
-    token, String, Symbol, vec,
-};
 use crate::test_common::*;
+use soroban_sdk::{testutils::Address as _, token, vec, String, Symbol};
 
 // ============================================================
 // CORE LIFECYCLE TESTS

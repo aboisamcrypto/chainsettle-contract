@@ -3,11 +3,11 @@
 extern crate std;
 
 use super::*;
+use crate::test_common::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     token, String,
 };
-use crate::test_common::*;
 
 // ============================================================
 // QUERY & READ-ONLY TESTS: COMPLETION PERCENTAGE
