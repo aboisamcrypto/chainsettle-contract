@@ -19,6 +19,7 @@ Contract Functions
 Allowed token list
 Invoice hash
 rebalance_milestones
+Milestone Payee Splits
 Partial Disputes & Escalation Checks
 Advance Payment Lifecycle
 Milestone Amendment History Tracking
