@@ -841,6 +841,65 @@ fn test_three_way_payee_split_on_confirm() {
 }
 
 #[test]
+fn test_payee_split_rounding_remainder_goes_to_last() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let payee2 = Address::generate(&t.env);
+    let payee3 = Address::generate(&t.env);
+    let ship_id = sid(&t.env, "payees_rounding");
+
+    // 1_000_003 does not divide evenly by 100, so a remainder is left over
+    // after the non-last shares are computed via integer division.
+    let single_ms = vec![
+        &t.env,
+        Milestone {
+            name: String::from_str(&t.env, "All"),
+            payment_percent: 100,
+            proof_hash: String::from_str(&t.env, ""),
+            status: MilestoneStatus::Pending,
+            release_after_ledger: 0,
+            proof_submitted_ledger: None,
+            dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+        }
+    ];
+
+    client.create_shipment(
+        &ship_id,
+        &single_buyer_vec(&t.env, &t.buyer),
+        &t.supplier, &t.logistics, &t.arbiter,
+        &t.token_id, &1_000_003i128,
+        &single_ms,
+        &default_options(&t.env),
+    );
+
+    // 50/30/20 split. Expected via integer division:
+    //   supplier (50) = 1_000_003 * 50 / 100 = 500_001
+    //   payee2   (30) = 1_000_003 * 30 / 100 = 300_000
+    //   payee3  (last, 20) = remainder = 1_000_003 - 800_001 = 200_002
+    let payees = vec![
+        &t.env,
+        MilestonePayee { payee: t.supplier.clone(), percent: 50 },
+        MilestonePayee { payee: payee2.clone(),    percent: 30 },
+        MilestonePayee { payee: payee3.clone(),    percent: 20 },
+    ];
+    client.set_milestone_payees(&t.buyer, &ship_id, &0u32, &payees);
+
+    let token_client = soroban_sdk::token::Client::new(&t.env, &t.token_id);
+    let before_s = token_client.balance(&t.supplier);
+    let before_2 = token_client.balance(&payee2);
+    let before_3 = token_client.balance(&payee3);
+
+    client.submit_proof(&t.supplier, &ship_id, &0u32, &sid(&t.env, "h0"), &ipfs(&t.env));
+    client.confirm_milestone(&t.buyer, &ship_id, &0u32);
+
+    assert_eq!(token_client.balance(&t.supplier) - before_s, 500_001i128, "50% (floor)");
+    assert_eq!(token_client.balance(&payee2) - before_2,     300_000i128, "30% (floor)");
+    assert_eq!(token_client.balance(&payee3) - before_3,     200_002i128, "remainder to last payee");
+}
+
+#[test]
 fn test_no_payees_configured_falls_back_to_supplier() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
