@@ -32,7 +32,13 @@ fn test_fee_tier_buyer_below_threshold_uses_default() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     client.set_fee_config(&t.buyer, &100u32, &t.treasury);
-    let tiers = vec![&t.env, FeeTier { min_lifetime_volume: 500_000, fee_bps: 50 }];
+    let tiers = vec![
+        &t.env,
+        FeeTier {
+            min_lifetime_volume: 500_000,
+            fee_bps: 50,
+        },
+    ];
     client.set_fee_tiers(&t.buyer, &tiers);
     // 0 lifetime volume → no tier qualifies
     assert_eq!(client.get_fee_tier(&t.buyer), 100);
@@ -43,9 +49,19 @@ fn test_fee_tier_upgrade_after_volume_accumulation() {
     let t = setup();
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     client.set_fee_config(&t.buyer, &200u32, &t.treasury);
-    let tiers = vec![&t.env, FeeTier { min_lifetime_volume: 100_000, fee_bps: 50 }];
+    let tiers = vec![
+        &t.env,
+        FeeTier {
+            min_lifetime_volume: 100_000,
+            fee_bps: 50,
+        },
+    ];
     client.set_fee_tiers(&t.buyer, &tiers);
-    assert_eq!(client.get_fee_tier(&t.buyer), 200, "below threshold initially");
+    assert_eq!(
+        client.get_fee_tier(&t.buyer),
+        200,
+        "below threshold initially"
+    );
 
     // Confirm a milestone to accumulate volume
     let ship_id = sid(&t.env, "vol1");
@@ -69,15 +85,25 @@ fn test_fee_tier_upgrade_after_volume_accumulation() {
                 dispute_opened_ledger: None,
                 deadline_ledger: 0,
                 penalty_bps_per_ledger: 0,
-            }
+            },
         ],
         &default_options(&t.env),
     );
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &sid(&t.env, "h0"), &ipfs(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &sid(&t.env, "h0"),
+        &ipfs(&t.env),
+    );
     client.confirm_milestone(&t.buyer, &ship_id, &0u32);
 
     // After 400_000 volume, buyer qualifies for 50 bps
-    assert_eq!(client.get_fee_tier(&t.buyer), 50, "should be on reduced tier");
+    assert_eq!(
+        client.get_fee_tier(&t.buyer),
+        50,
+        "should be on reduced tier"
+    );
 }
 
 #[test]
@@ -125,7 +151,13 @@ fn test_invoice_hash_stored_and_retrieved() {
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &sid(&t.env, "h0"), &ipfs(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &sid(&t.env, "h0"),
+        &ipfs(&t.env),
+    );
 
     let hash = BytesN::from_array(&t.env, &[0x11u8; 32]);
     client.attach_invoice_hash(&t.supplier, &ship_id, &0u32, &hash);
@@ -172,7 +204,13 @@ fn test_invoice_hash_immutable_after_first_submission() {
         &build_milestones(&t.env),
         &default_options(&t.env),
     );
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &sid(&t.env, "h0"), &ipfs(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &sid(&t.env, "h0"),
+        &ipfs(&t.env),
+    );
     let hash = BytesN::from_array(&t.env, &[0xAAu8; 32]);
     client.attach_invoice_hash(&t.supplier, &ship_id, &0u32, &hash);
     // Second attach must panic
@@ -197,7 +235,7 @@ fn single_milestone(env: &Env, name: &str) -> soroban_sdk::Vec<Milestone> {
             dispute_opened_ledger: None,
             deadline_ledger: 0,
             penalty_bps_per_ledger: 0,
-        }
+        },
     ]
 }
 
@@ -221,11 +259,27 @@ fn test_amendment_log_entry_on_accepted_amendment() {
     );
 
     // Propose name change keeping same percent (25→25 valid, sum=100)
-    client.propose_amendment(&t.buyer, &ship_id, &0u32, &25u32, &sid(&t.env, "Updated Name"));
-    client.propose_amendment(&t.supplier, &ship_id, &0u32, &25u32, &sid(&t.env, "Updated Name"));
+    client.propose_amendment(
+        &t.buyer,
+        &ship_id,
+        &0u32,
+        &25u32,
+        &sid(&t.env, "Updated Name"),
+    );
+    client.propose_amendment(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &25u32,
+        &sid(&t.env, "Updated Name"),
+    );
 
     let log = client.get_amendment_log(&ship_id, &0u32);
-    assert_eq!(log.len(), 1, "log should have one entry after accepted amendment");
+    assert_eq!(
+        log.len(),
+        1,
+        "log should have one entry after accepted amendment"
+    );
     let e = log.get(0).unwrap();
     assert_eq!(e.old_payment_percent, 25);
     assert_eq!(e.new_payment_percent, 25);
@@ -276,16 +330,30 @@ fn test_amendment_log_chronological_order() {
 
     // First amendment: rename
     client.propose_amendment(&t.buyer, &ship_id, &0u32, &100u32, &sid(&t.env, "Phase2"));
-    client.propose_amendment(&t.supplier, &ship_id, &0u32, &100u32, &sid(&t.env, "Phase2"));
+    client.propose_amendment(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &100u32,
+        &sid(&t.env, "Phase2"),
+    );
 
     // Second amendment: rename again
     client.propose_amendment(&t.buyer, &ship_id, &0u32, &100u32, &sid(&t.env, "Phase3"));
-    client.propose_amendment(&t.supplier, &ship_id, &0u32, &100u32, &sid(&t.env, "Phase3"));
+    client.propose_amendment(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &100u32,
+        &sid(&t.env, "Phase3"),
+    );
 
     let log = client.get_amendment_log(&ship_id, &0u32);
     assert_eq!(log.len(), 2, "two accepted amendments → two log entries");
-    assert!(log.get(0).unwrap().ledger <= log.get(1).unwrap().ledger,
-        "entries should be chronological");
+    assert!(
+        log.get(0).unwrap().ledger <= log.get(1).unwrap().ledger,
+        "entries should be chronological"
+    );
 }
 
 // ============================================================

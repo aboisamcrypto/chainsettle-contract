@@ -8,9 +8,7 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{
-    testutils::Address as _,
-    token, vec, Address, Env, String, Symbol};
+use soroban_sdk::{testutils::Address as _, token, vec, Address, Env, String, Symbol};
 
 // Real WASM bytes — the same binary is used for both v1 and v2 in this test,
 // which isolates the state-persistence concern from any logic change.
@@ -146,19 +144,43 @@ fn test_wasm_upgrade_state_persists() {
     let amount: i128 = 1_000_000;
 
     // --- S1: pure Pending
-    make_shipment(&client, &env, "UPG-001", &buyer, &supplier, &logistics, &arbiter, &token_id, amount);
+    make_shipment(
+        &client, &env, "UPG-001", &buyer, &supplier, &logistics, &arbiter, &token_id, amount,
+    );
 
     // --- S2: milestone 0 Confirmed, milestone 1 ProofSubmitted
-    make_shipment(&client, &env, "UPG-002", &buyer, &supplier, &logistics, &arbiter, &token_id, amount);
+    make_shipment(
+        &client, &env, "UPG-002", &buyer, &supplier, &logistics, &arbiter, &token_id, amount,
+    );
     let id2 = String::from_str(&env, "UPG-002");
-    client.submit_proof(&supplier, &id2, &0, &String::from_str(&env, "ipfs://s2-m0"), &Symbol::new(&env, "ipfs"));
+    client.submit_proof(
+        &supplier,
+        &id2,
+        &0,
+        &String::from_str(&env, "ipfs://s2-m0"),
+        &Symbol::new(&env, "ipfs"),
+    );
     client.confirm_milestone(&buyer, &id2, &0);
-    client.submit_proof(&logistics, &id2, &1, &String::from_str(&env, "ipfs://s2-m1"), &Symbol::new(&env, "ipfs"));
+    client.submit_proof(
+        &logistics,
+        &id2,
+        &1,
+        &String::from_str(&env, "ipfs://s2-m1"),
+        &Symbol::new(&env, "ipfs"),
+    );
 
     // --- S3: milestone 0 Disputed
-    make_shipment(&client, &env, "UPG-003", &buyer, &supplier, &logistics, &arbiter, &token_id, amount);
+    make_shipment(
+        &client, &env, "UPG-003", &buyer, &supplier, &logistics, &arbiter, &token_id, amount,
+    );
     let id3 = String::from_str(&env, "UPG-003");
-    client.submit_proof(&supplier, &id3, &0, &String::from_str(&env, "ipfs://s3-m0"), &Symbol::new(&env, "ipfs"));
+    client.submit_proof(
+        &supplier,
+        &id3,
+        &0,
+        &String::from_str(&env, "ipfs://s3-m0"),
+        &Symbol::new(&env, "ipfs"),
+    );
     client.raise_dispute(&buyer, &id3, &0);
 
     // Snapshot pre-upgrade values
@@ -173,7 +195,11 @@ fn test_wasm_upgrade_state_persists() {
 
     let id1 = String::from_str(&env, "UPG-001");
     let s1_post = client.get_shipment(&id1);
-    assert_eq!(s1_post.status, ShipmentStatus::Active, "S1 status changed across upgrade");
+    assert_eq!(
+        s1_post.status,
+        ShipmentStatus::Active,
+        "S1 status changed across upgrade"
+    );
     assert_eq!(s1_post.total_amount, amount, "S1 total_amount corrupted");
     assert_eq!(s1_post.released_amount, 0, "S1 released_amount corrupted");
     assert_eq!(s1_post.milestones.len(), 2, "S1 milestone count changed");
@@ -189,8 +215,15 @@ fn test_wasm_upgrade_state_persists() {
     );
 
     let s2_post = client.get_shipment(&id2);
-    assert_eq!(s2_post.status, ShipmentStatus::Active, "S2 status changed across upgrade");
-    assert_eq!(s2_post.released_amount, s2_released_pre, "S2 released_amount corrupted");
+    assert_eq!(
+        s2_post.status,
+        ShipmentStatus::Active,
+        "S2 status changed across upgrade"
+    );
+    assert_eq!(
+        s2_post.released_amount, s2_released_pre,
+        "S2 released_amount corrupted"
+    );
     assert_eq!(
         s2_post.milestones.get(0).unwrap().status,
         MilestoneStatus::Confirmed,
@@ -208,7 +241,11 @@ fn test_wasm_upgrade_state_persists() {
     );
 
     let s3_post = client.get_shipment(&id3);
-    assert_eq!(s3_post.status, ShipmentStatus::Active, "S3 status changed across upgrade");
+    assert_eq!(
+        s3_post.status,
+        ShipmentStatus::Active,
+        "S3 status changed across upgrade"
+    );
     assert_eq!(
         s3_post.milestones.get(0).unwrap().status,
         MilestoneStatus::Disputed,
@@ -223,7 +260,10 @@ fn test_wasm_upgrade_state_persists() {
         ShipmentStatus::Completed,
         "S2 should complete after confirming final milestone post-upgrade"
     );
-    assert_eq!(s2_done.released_amount, amount, "S2 released_amount wrong post-upgrade");
+    assert_eq!(
+        s2_done.released_amount, amount,
+        "S2 released_amount wrong post-upgrade"
+    );
     assert_eq!(
         client.get_escrow_balance(&id2),
         0,

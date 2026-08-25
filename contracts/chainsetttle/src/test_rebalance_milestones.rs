@@ -28,8 +28,15 @@ fn test_rebalance_before_any_proof_submission_succeeds() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let ship_id = sid(&t.env, "ship1");
     create_standard_shipment(
-        &client, &t.env, &ship_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, 1_000_000,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        1_000_000,
     );
 
     let new_percents = vec![&t.env, 10u32, 10u32, 80u32];
@@ -48,12 +55,25 @@ fn test_rebalance_rejected_after_milestone_progressed() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let ship_id = sid(&t.env, "ship1");
     create_standard_shipment(
-        &client, &t.env, &ship_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, 1_000_000,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        1_000_000,
     );
 
     // Progress milestone 0 past Pending by submitting proof.
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &proof_hash(&t.env),
+        &proof_type(&t.env),
+    );
 
     let new_percents = vec![&t.env, 10u32, 10u32, 80u32];
     client.rebalance_milestones(&t.buyer, &ship_id, &new_percents);
@@ -65,8 +85,15 @@ fn test_rebalance_percentages_still_sum_to_100() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let ship_id = sid(&t.env, "ship1");
     create_standard_shipment(
-        &client, &t.env, &ship_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, 1_000_000,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        1_000_000,
     );
 
     let new_percents = vec![&t.env, 33u32, 33u32, 34u32];
@@ -87,8 +114,15 @@ fn test_rebalance_rejected_when_sum_not_100() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let ship_id = sid(&t.env, "ship1");
     create_standard_shipment(
-        &client, &t.env, &ship_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, 1_000_000,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        1_000_000,
     );
 
     let new_percents = vec![&t.env, 10u32, 10u32, 70u32];
@@ -102,8 +136,15 @@ fn test_rebalance_rejected_for_non_buyer_caller() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
     let ship_id = sid(&t.env, "ship1");
     create_standard_shipment(
-        &client, &t.env, &ship_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
-        &t.token_id, 1_000_000,
+        &client,
+        &t.env,
+        &ship_id,
+        &t.buyer,
+        &t.supplier,
+        &t.logistics,
+        &t.arbiter,
+        &t.token_id,
+        1_000_000,
     );
 
     let new_percents = vec![&t.env, 10u32, 10u32, 80u32];

@@ -464,7 +464,7 @@ fn test_create_shipment_large_valid_amount_accepted() {
 #[test]
 fn test_boundary_validation_coverage_summary() {
     // This test documents the comprehensive coverage of boundary validation:
-    
+
     // Amount Validation:
     // ✓ Test 1: Zero amount (0) rejected
     // ✓ Test 2: Negative amount (-1) rejected
@@ -472,23 +472,23 @@ fn test_boundary_validation_coverage_summary() {
     // ✓ Test 6: Minimum valid amount (1) accepted
     // ✓ Test 7: Small valid amount (100) accepted
     // ✓ Test 10: Large valid amount accepted
-    
+
     // Milestone Percentage Validation:
     // ✓ Test 4: Single milestone with 0% rejected
     // ✓ Test 5: Multiple milestones with one at 0% rejected
     // ✓ Test 8: Milestone at minimum valid % (5%) accepted
     // ✓ Test 9: Milestone below minimum % (4%) rejected
-    
+
     // Error Messages Verified:
     // ✓ "amount must be greater than zero" for invalid amounts
     // ✓ "InvalidPercentages" for invalid milestone percentages
-    
+
     // Boundary Test Matrix:
     // Zero/Negative: ✓ Covered
     // Minimum Valid: ✓ Covered
     // Valid Range: ✓ Covered
     // Large Values: ✓ Covered
-    
+
     assert_eq!(1, 1); // Trivial assertion; this test documents coverage
 }
 

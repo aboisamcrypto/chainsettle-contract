@@ -5,9 +5,7 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{
-    testutils::Address as _,
-    token, vec, Address, Env, String, Symbol};
+use soroban_sdk::{testutils::Address as _, token, vec, Address, Env, String, Symbol};
 
 // Resolution order: deliberately non-sequential to catch cross-shipment contamination.
 const RESOLUTION_ORDER: [usize; 10] = [5, 2, 8, 1, 6, 0, 9, 3, 7, 4];
@@ -54,8 +52,8 @@ fn three_milestone_vec(env: &Env) -> soroban_sdk::Vec<Milestone> {
 fn ship_id(env: &Env, i: usize) -> String {
     // Fixed IDs so we can reference them by index without allocation trickery.
     let ids = [
-        "CD-000", "CD-001", "CD-002", "CD-003", "CD-004",
-        "CD-005", "CD-006", "CD-007", "CD-008", "CD-009",
+        "CD-000", "CD-001", "CD-002", "CD-003", "CD-004", "CD-005", "CD-006", "CD-007", "CD-008",
+        "CD-009",
     ];
     String::from_str(env, ids[i])
 }
@@ -74,8 +72,14 @@ fn create_and_dispute(
 ) {
     let id = ship_id(env, i);
     client.create_shipment(
-        &id, &vec![env, buyer.clone()], supplier, logistics, arbiter, token_id,
-        &amount, &three_milestone_vec(env),
+        &id,
+        &vec![env, buyer.clone()],
+        supplier,
+        logistics,
+        arbiter,
+        token_id,
+        &amount,
+        &three_milestone_vec(env),
         &ShipmentOptions {
             response_deadline: 0,
             penalty_bps: 0,
@@ -121,7 +125,9 @@ fn test_10_concurrent_disputes_resolved_independently() {
     let client = ChainSettleContractClient::new(&env, &contract_id);
 
     let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
     let token_client = token::Client::new(&env, &token_id);
 
     let buyer = Address::generate(&env);
@@ -137,7 +143,9 @@ fn test_10_concurrent_disputes_resolved_independently() {
 
     // Step 1: Create all 10 shipments and raise disputes in rapid succession
     for i in 0..10 {
-        create_and_dispute(&client, &env, i, &buyer, &supplier, &logistics, &arbiter, &token_id, amount);
+        create_and_dispute(
+            &client, &env, i, &buyer, &supplier, &logistics, &arbiter, &token_id, amount,
+        );
     }
 
     // Confirm all 10 are Disputed before any resolution
@@ -146,7 +154,8 @@ fn test_10_concurrent_disputes_resolved_independently() {
         assert_eq!(
             client.get_milestone(&id, &0).status,
             MilestoneStatus::Disputed,
-            "shipment {} should be disputed before resolution pass", i
+            "shipment {} should be disputed before resolution pass",
+            i
         );
     }
 
@@ -173,17 +182,20 @@ fn test_10_concurrent_disputes_resolved_independently() {
             assert_eq!(
                 shipment.milestones.get(0).unwrap().status,
                 MilestoneStatus::Resolved,
-                "shipment {} milestone 0 should be Resolved", i
+                "shipment {} milestone 0 should be Resolved",
+                i
             );
             assert_eq!(
                 shipment.released_amount, milestone_payment,
-                "shipment {} released_amount wrong after approval", i
+                "shipment {} released_amount wrong after approval",
+                i
             );
             // Escrow = total - released
             assert_eq!(
                 client.get_escrow_balance(&id),
                 amount - milestone_payment,
-                "shipment {} escrow balance wrong after approval", i
+                "shipment {} escrow balance wrong after approval",
+                i
             );
             total_supplier_expected += milestone_payment;
         } else {
@@ -191,23 +203,28 @@ fn test_10_concurrent_disputes_resolved_independently() {
             assert_eq!(
                 shipment.milestones.get(0).unwrap().status,
                 MilestoneStatus::Pending,
-                "shipment {} milestone 0 should be Pending after rejection", i
+                "shipment {} milestone 0 should be Pending after rejection",
+                i
             );
             assert_eq!(
                 shipment.released_amount, 0,
-                "shipment {} released_amount should be 0 after rejection", i
+                "shipment {} released_amount should be 0 after rejection",
+                i
             );
             assert_eq!(
                 client.get_escrow_balance(&id),
                 amount,
-                "shipment {} escrow balance wrong after rejection", i
+                "shipment {} escrow balance wrong after rejection",
+                i
             );
         }
 
         // Shipment must still be Active (one milestone done doesn't complete it)
         assert_eq!(
-            shipment.status, ShipmentStatus::Active,
-            "shipment {} should still be Active", i
+            shipment.status,
+            ShipmentStatus::Active,
+            "shipment {} should still be Active",
+            i
         );
     }
 
@@ -220,10 +237,12 @@ fn test_10_concurrent_disputes_resolved_independently() {
     );
 
     // Step 5: Contract holds the correct remaining escrow for every shipment
-    let expected_contract_balance: i128 = (0..10).map(|i| {
-        let id = ship_id(&env, i);
-        client.get_shipment(&id).total_amount - client.get_shipment(&id).released_amount
-    }).sum();
+    let expected_contract_balance: i128 = (0..10)
+        .map(|i| {
+            let id = ship_id(&env, i);
+            client.get_shipment(&id).total_amount - client.get_shipment(&id).released_amount
+        })
+        .sum();
     assert_eq!(
         token_client.balance(&contract_id),
         expected_contract_balance,
@@ -241,7 +260,9 @@ fn test_dispute_resolution_does_not_cross_contaminate_milestones() {
     let client = ChainSettleContractClient::new(&env, &contract_id);
 
     let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
 
     let buyer = Address::generate(&env);
     let supplier = Address::generate(&env);
@@ -254,7 +275,9 @@ fn test_dispute_resolution_does_not_cross_contaminate_milestones() {
     client.init(&buyer);
 
     for i in 0..10 {
-        create_and_dispute(&client, &env, i, &buyer, &supplier, &logistics, &arbiter, &token_id, amount);
+        create_and_dispute(
+            &client, &env, i, &buyer, &supplier, &logistics, &arbiter, &token_id, amount,
+        );
     }
 
     // Resolve all in shuffled order (all approved this time)
@@ -265,7 +288,9 @@ fn test_dispute_resolution_does_not_cross_contaminate_milestones() {
         // Immediately after resolving shipment i, all OTHER shipments in the
         // pending-resolution set must still be in Disputed state.
         for j in 0..10 {
-            if j == i { continue; }
+            if j == i {
+                continue;
+            }
             let other_id = ship_id(&env, j);
             let other_ship = client.get_shipment(&other_id);
             // Milestones that haven't been resolved yet remain Disputed

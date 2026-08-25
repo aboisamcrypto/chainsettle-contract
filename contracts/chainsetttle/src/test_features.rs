@@ -47,7 +47,15 @@ fn setup() -> Setup {
 
     ChainSettleContractClient::new(&env, &contract_id).init(&buyer);
 
-    Setup { env, contract_id, token_id, buyer, supplier, logistics, arbiter }
+    Setup {
+        env,
+        contract_id,
+        token_id,
+        buyer,
+        supplier,
+        logistics,
+        arbiter,
+    }
 }
 
 fn single_buyer(env: &Env, buyer: &Address) -> soroban_sdk::Vec<Address> {
@@ -55,7 +63,11 @@ fn single_buyer(env: &Env, buyer: &Address) -> soroban_sdk::Vec<Address> {
 }
 
 /// Build a single 100% milestone with an optional deadline_ledger and penalty_bps.
-fn single_milestone(env: &Env, deadline_ledger: u32, penalty_bps_per_ledger: u32) -> soroban_sdk::Vec<Milestone> {
+fn single_milestone(
+    env: &Env,
+    deadline_ledger: u32,
+    penalty_bps_per_ledger: u32,
+) -> soroban_sdk::Vec<Milestone> {
     vec![
         env,
         Milestone {
@@ -149,7 +161,11 @@ fn test_penalty_no_penalty_on_time_submission() {
 
     // Supplier receives full payment — no penalty.
     let supplier_after = token_client.balance(&s.supplier);
-    assert_eq!(supplier_after - supplier_before, total, "no penalty expected for on-time submission");
+    assert_eq!(
+        supplier_after - supplier_before,
+        total,
+        "no penalty expected for on-time submission"
+    );
 }
 
 /// One ledger overdue: penalty = 1 * penalty_bps / 10_000 * payment.
@@ -198,8 +214,16 @@ fn test_penalty_one_ledger_overdue() {
     let supplier_after = token_client.balance(&s.supplier);
     let buyer_after = token_client.balance(&s.buyer);
 
-    assert_eq!(supplier_after - supplier_before, total - expected_penalty, "supplier should receive total minus penalty");
-    assert_eq!(buyer_after - buyer_before, expected_penalty, "penalty returned to buyer");
+    assert_eq!(
+        supplier_after - supplier_before,
+        total - expected_penalty,
+        "supplier should receive total minus penalty"
+    );
+    assert_eq!(
+        buyer_after - buyer_before,
+        expected_penalty,
+        "penalty returned to buyer"
+    );
 }
 
 /// Penalty capped at 50% of milestone payment.
@@ -252,7 +276,11 @@ fn test_penalty_capped_at_50_percent() {
         total - cap,
         "supplier should receive total minus capped penalty"
     );
-    assert_eq!(buyer_after - buyer_before, cap, "buyer receives capped penalty refund");
+    assert_eq!(
+        buyer_after - buyer_before,
+        cap,
+        "buyer receives capped penalty refund"
+    );
 }
 
 /// Zero penalty_bps_per_ledger disables per-milestone penalty; no deduction even when overdue.
@@ -294,7 +322,11 @@ fn test_penalty_zero_bps_baseline_no_penalty() {
     client.confirm_milestone(&s.buyer, &id, &0);
 
     let supplier_after = token_client.balance(&s.supplier);
-    assert_eq!(supplier_after - supplier_before, total, "zero penalty_bps should disable penalty");
+    assert_eq!(
+        supplier_after - supplier_before,
+        total,
+        "zero penalty_bps should disable penalty"
+    );
 }
 
 // ============================================================
@@ -347,7 +379,11 @@ fn test_bonus_early_confirmation_pays_bonus() {
 
     let supplier_after = token_client.balance(&s.supplier);
     // Supplier should get total payment + bonus (1 milestone = 100% of bonus pool).
-    assert_eq!(supplier_after - supplier_before, total + bonus_pool, "supplier should receive payment + bonus");
+    assert_eq!(
+        supplier_after - supplier_before,
+        total + bonus_pool,
+        "supplier should receive payment + bonus"
+    );
 }
 
 /// Late confirmation (after deadline): no bonus paid.
@@ -398,8 +434,16 @@ fn test_bonus_late_confirmation_no_bonus() {
     let buyer_after = token_client.balance(&s.buyer);
 
     // Supplier gets only the milestone payment; unused pool returned to buyer on completion.
-    assert_eq!(supplier_after - supplier_before, total, "no bonus for late confirmation");
-    assert_eq!(buyer_after - buyer_before, bonus_pool, "unused bonus pool returned to buyer");
+    assert_eq!(
+        supplier_after - supplier_before,
+        total,
+        "no bonus for late confirmation"
+    );
+    assert_eq!(
+        buyer_after - buyer_before,
+        bonus_pool,
+        "unused bonus pool returned to buyer"
+    );
 }
 
 /// Unused bonus pool returned to buyer when shipment completes without earning bonuses.
@@ -499,7 +543,11 @@ fn test_bonus_zero_pool_baseline() {
     );
     client.confirm_milestone(&s.buyer, &id, &0);
     let supplier_after = token_client.balance(&s.supplier);
-    assert_eq!(supplier_after - supplier_before, total, "full payment, no bonus");
+    assert_eq!(
+        supplier_after - supplier_before,
+        total,
+        "full payment, no bonus"
+    );
 }
 
 // ============================================================
@@ -546,7 +594,11 @@ fn test_review_window_per_shipment_respected() {
     // claim_auto_confirmation should succeed.
     client.claim_auto_confirmation(&id, &0);
     let m = client.get_milestone(&id, &0);
-    assert_eq!(m.status, MilestoneStatus::Confirmed, "auto-confirm should succeed after per-shipment window");
+    assert_eq!(
+        m.status,
+        MilestoneStatus::Confirmed,
+        "auto-confirm should succeed after per-shipment window"
+    );
 }
 
 /// Global default used when review_window_ledgers is None.
@@ -591,7 +643,11 @@ fn test_review_window_global_fallback() {
 
     client.claim_auto_confirmation(&id, &0);
     let m = client.get_milestone(&id, &0);
-    assert_eq!(m.status, MilestoneStatus::Confirmed, "auto-confirm should use global window as fallback");
+    assert_eq!(
+        m.status,
+        MilestoneStatus::Confirmed,
+        "auto-confirm should use global window as fallback"
+    );
 }
 
 /// review_window_ledgers = Some(0) opts out of auto-confirm even when global is set.

@@ -4,10 +4,7 @@ extern crate std;
 
 use super::*;
 use crate::test_common::{default_options, setup, single_buyer_vec};
-use soroban_sdk::{
-    testutils::Ledger,
-    vec, String, Symbol,
-};
+use soroban_sdk::{testutils::Ledger, vec, String, Symbol};
 
 fn proof_hash(env: &soroban_sdk::Env) -> String {
     String::from_str(env, "ipfs://proof")
@@ -54,11 +51,7 @@ fn create_ship(
     ship_id
 }
 
-fn seed_reputation(
-    t: &crate::test_common::TestSetup,
-    completed: u32,
-    disputed: u32,
-) {
+fn seed_reputation(t: &crate::test_common::TestSetup, completed: u32, disputed: u32) {
     t.env.as_contract(&t.contract_id, || {
         t.env.storage().persistent().set(
             &DataKey::SupplierRep(t.supplier.clone()),
@@ -94,7 +87,13 @@ fn test_fast_track_qualifying_bypasses_cooldown() {
 
     t.env.ledger().set_sequence_number(100);
     let ship_id = create_ship(&client, &t, "ft-ok");
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &proof_hash(&t.env),
+        &proof_type(&t.env),
+    );
     // Immediate confirm — cooldown would normally block until ledger 150.
     client.confirm_milestone(&t.buyer, &ship_id, &0u32);
     assert_eq!(
@@ -115,7 +114,13 @@ fn test_fast_track_non_qualifying_still_gated() {
 
     t.env.ledger().set_sequence_number(100);
     let ship_id = create_ship(&client, &t, "ft-no");
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &proof_hash(&t.env),
+        &proof_type(&t.env),
+    );
     client.confirm_milestone(&t.buyer, &ship_id, &0u32);
 }
 
@@ -140,7 +145,13 @@ fn test_pause_one_sided_request_no_effect() {
     client.request_shipment_pause(&t.buyer, &ship_id);
     assert!(!client.is_shipment_paused(&ship_id));
     // Still mutable.
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &proof_hash(&t.env),
+        &proof_type(&t.env),
+    );
 }
 
 #[test]
@@ -152,7 +163,13 @@ fn test_pause_blocks_proof_after_approval() {
     client.request_shipment_pause(&t.buyer, &ship_id);
     client.approve_shipment_pause(&t.supplier, &ship_id);
     assert!(client.is_shipment_paused(&ship_id));
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &proof_hash(&t.env),
+        &proof_type(&t.env),
+    );
 }
 
 #[test]
@@ -165,11 +182,20 @@ fn test_pause_resume_full_cycle() {
     assert!(client.is_shipment_paused(&ship_id));
 
     client.resume_shipment(&t.buyer, &ship_id);
-    assert!(client.is_shipment_paused(&ship_id), "one-sided resume must not unpause");
+    assert!(
+        client.is_shipment_paused(&ship_id),
+        "one-sided resume must not unpause"
+    );
     client.resume_shipment(&t.supplier, &ship_id);
     assert!(!client.is_shipment_paused(&ship_id));
 
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &proof_hash(&t.env),
+        &proof_type(&t.env),
+    );
     client.confirm_milestone(&t.buyer, &ship_id, &0u32);
 }
 
@@ -183,7 +209,13 @@ fn test_pause_isolation_other_shipment_unaffected() {
     client.approve_shipment_pause(&t.supplier, &a);
     assert!(client.is_shipment_paused(&a));
     assert!(!client.is_shipment_paused(&b));
-    client.submit_proof(&t.supplier, &b, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &b,
+        &0u32,
+        &proof_hash(&t.env),
+        &proof_type(&t.env),
+    );
     client.confirm_milestone(&t.buyer, &b, &0u32);
 }
 
@@ -225,12 +257,7 @@ fn test_milestone_notes_multiparty_and_cap() {
     // Overflow cap (10): oldest dropped.
     for i in 0..10u32 {
         let s = std::format!("n{}", i);
-        client.add_milestone_note(
-            &t.buyer,
-            &ship_id,
-            &0u32,
-            &String::from_str(&t.env, &s),
-        );
+        client.add_milestone_note(&t.buyer, &ship_id, &0u32, &String::from_str(&t.env, &s));
     }
     let notes = client.get_milestone_notes(&ship_id, &0u32);
     assert_eq!(notes.len(), 10);
@@ -270,9 +297,18 @@ fn test_archive_too_young_rejected() {
     client.set_archive_threshold(&t.buyer, &1000u32);
     t.env.ledger().set_sequence_number(10);
     let ship_id = create_ship(&client, &t, "arch-young");
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &proof_hash(&t.env),
+        &proof_type(&t.env),
+    );
     client.confirm_milestone(&t.buyer, &ship_id, &0u32);
-    assert_eq!(client.get_shipment(&ship_id).status, ShipmentStatus::Completed);
+    assert_eq!(
+        client.get_shipment(&ship_id).status,
+        ShipmentStatus::Completed
+    );
     // Only advanced a little past creation.
     t.env.ledger().set_sequence_number(50);
     client.archive_shipment(&t.buyer, &ship_id);
@@ -295,7 +331,13 @@ fn test_archive_success_and_query() {
     client.set_archive_threshold(&t.buyer, &100u32);
     t.env.ledger().set_sequence_number(10);
     let ship_id = create_ship(&client, &t, "arch-ok");
-    client.submit_proof(&t.supplier, &ship_id, &0u32, &proof_hash(&t.env), &proof_type(&t.env));
+    client.submit_proof(
+        &t.supplier,
+        &ship_id,
+        &0u32,
+        &proof_hash(&t.env),
+        &proof_type(&t.env),
+    );
     client.confirm_milestone(&t.buyer, &ship_id, &0u32);
 
     t.env.ledger().set_sequence_number(10 + 100);
