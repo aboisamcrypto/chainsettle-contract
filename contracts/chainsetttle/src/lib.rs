@@ -468,6 +468,34 @@ pub struct ArchivedShipment {
     pub completed_at: u32,
 }
 
+/// #386 – Read-only simulation of exactly how much a milestone confirmation
+/// would pay out, to whom, and after which fees/holdbacks/overrides, without
+/// mutating any state or requiring `confirm_milestone` to actually be called.
+#[contracttype]
+#[derive(Clone)]
+pub struct PayoutPreview {
+    /// Gross payment for this milestone before any deductions.
+    pub gross_amount: i128,
+    /// Approved advance already paid for this milestone, deducted from the transfer.
+    pub advance_deducted: i128,
+    /// Late-delivery penalty deducted (returned to buyer), 0 if not overdue.
+    pub late_penalty_deducted: i128,
+    /// Platform fee taken by the treasury (after any VIP waiver is applied).
+    pub platform_fee: i128,
+    /// Effective fee basis points applied to compute `platform_fee`.
+    pub applied_fee_bps: u32,
+    /// Logistics provider fee, if `logistics_fee_bps` is set.
+    pub logistics_fee: i128,
+    /// Net amount that would be transferred to the supplier (or split across
+    /// configured milestone payees) after all deductions above.
+    pub supplier_net_amount: i128,
+    /// True if confirming this milestone would hold payment (holdback_ledgers > 0)
+    /// rather than transferring immediately.
+    pub would_be_held: bool,
+    /// True if confirming this milestone would complete the shipment.
+    pub is_final_milestone: bool,
+}
+
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct ArbiterStats {
@@ -4787,6 +4815,172 @@ impl ChainSettleContract {
             (Symbol::new(&env, "proof_corrected"), shipment_id.clone()),
             (milestone_index, proof_hash_for_event),
         );
+    }
+
+    // ----------------------------------------------------------
+    // #386 PREVIEW MILESTONE PAYOUT (READ-ONLY)
+    // ----------------------------------------------------------
+
+    /// Simulates exactly what `confirm_milestone` would pay out for
+    /// `milestone_index` right now — gross amount, advance/penalty
+    /// deductions, platform + logistics fees (including any VIP fee waiver),
+    /// and the net amount the supplier would receive — without mutating any
+    /// state or requiring the milestone's proof to actually be confirmed.
+    ///
+    /// Mirrors the deduction order in `confirm_milestone`: gross → advance →
+    /// late penalty → platform fee → logistics fee. Long-hold rebates and
+    /// early-completion bonuses are omitted from `supplier_net_amount` since
+    /// they depend on values only known at actual confirmation time
+    /// (rebate needs the realised fee_amount; bonus is uncapped by holdback).
+    pub fn preview_milestone_payout(
+        env: Env,
+        shipment_id: String,
+        milestone_index: u32,
+    ) -> PayoutPreview {
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+
+        if milestone_index as usize >= shipment.milestones.len() as usize {
+            panic!("invalid milestone index");
+        }
+        let milestone = shipment.milestones.get(milestone_index).unwrap();
+
+        let gross_amount = Self::milestone_gross_payment(&env, &shipment, milestone_index);
+        let mut payment = gross_amount;
+
+        // Peek at any approved-but-unconsumed advance for this milestone
+        // (mirrors consume_advance_for_milestone without removing it).
+        let advance_deducted: i128 = env
+            .storage()
+            .persistent()
+            .get::<DataKey, AdvanceRequest>(&DataKey::AdvanceRequest(
+                shipment_id.clone(),
+                milestone_index,
+            ))
+            .filter(|req| req.approved)
+            .map(|req| req.amount_advanced)
+            .unwrap_or(0);
+
+        // Late-delivery penalty, same formula as confirm_milestone.
+        let mut late_penalty_deducted: i128 = 0;
+        if milestone.deadline_ledger > 0 {
+            let penalty_bps = if milestone.penalty_bps_per_ledger > 0 {
+                milestone.penalty_bps_per_ledger
+            } else {
+                shipment.late_penalty_bps_per_ledger
+            };
+            if penalty_bps > 0 {
+                let proof_ledger = milestone.proof_submitted_ledger.unwrap_or(0);
+                let overdue_ledgers = proof_ledger.saturating_sub(milestone.deadline_ledger);
+                if overdue_ledgers > 0 {
+                    let raw_penalty =
+                        (gross_amount * (penalty_bps as i128 * overdue_ledgers as i128)) / 10_000;
+                    let cap = gross_amount / 2;
+                    late_penalty_deducted = raw_penalty.min(cap);
+                    payment -= late_penalty_deducted;
+                }
+            }
+        }
+
+        let would_be_held = shipment.holdback_ledgers > 0;
+        let is_final_milestone = Self::is_final_milestone(&shipment, milestone_index);
+
+        if would_be_held {
+            // Held milestones release later at face value (minus penalty already
+            // applied above); no fee is deducted until the hold is claimed.
+            return PayoutPreview {
+                gross_amount,
+                advance_deducted,
+                late_penalty_deducted,
+                platform_fee: 0,
+                applied_fee_bps: 0,
+                logistics_fee: 0,
+                supplier_net_amount: payment - advance_deducted,
+                would_be_held,
+                is_final_milestone,
+            };
+        }
+
+        let primary_buyer_for_fee = shipment.buyers.get(0).unwrap();
+        let mut fee_amount: i128 = 0;
+        let (net_payment, applied_fee_bps) = Self::deduct_fee_for_shipment_at_completion_preview(
+            &env,
+            payment,
+            &shipment_id,
+            &primary_buyer_for_fee,
+            is_final_milestone,
+            &mut fee_amount,
+        );
+
+        let mut actual_transfer = net_payment - advance_deducted;
+
+        let mut logistics_fee: i128 = 0;
+        if shipment.logistics_fee_bps > 0 {
+            let candidate_fee = (payment * shipment.logistics_fee_bps as i128) / 10_000;
+            if candidate_fee > 0 && candidate_fee <= actual_transfer {
+                logistics_fee = candidate_fee;
+                actual_transfer -= logistics_fee;
+            }
+        }
+
+        PayoutPreview {
+            gross_amount,
+            advance_deducted,
+            late_penalty_deducted,
+            platform_fee: fee_amount,
+            applied_fee_bps,
+            logistics_fee,
+            supplier_net_amount: actual_transfer,
+            would_be_held,
+            is_final_milestone,
+        }
+    }
+
+    /// Read-only variant of `deduct_fee_for_shipment_at_completion` for
+    /// `preview_milestone_payout` — computes the same fee without performing
+    /// the treasury transfer.
+    fn deduct_fee_for_shipment_at_completion_preview(
+        env: &Env,
+        gross: i128,
+        shipment_id: &String,
+        buyer: &Address,
+        is_final: bool,
+        fee_out: &mut i128,
+    ) -> (i128, u32) {
+        let override_bps: Option<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt::ShipmentFeeOverride(shipment_id.clone()));
+        let locked_bps: Option<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt::ShipmentFeeBps(shipment_id.clone()));
+        if let Some(config) = env
+            .storage()
+            .instance()
+            .get::<DataKey, FeeConfig>(&DataKey::FeeConfig)
+        {
+            let bps = if let Some(o) = override_bps {
+                o
+            } else if is_final {
+                Self::resolve_fee_bps_for(env, buyer)
+            } else {
+                locked_bps.unwrap_or(config.fee_bps)
+            };
+            let waiver_bps = Self::resolve_fee_waiver_bps(env, buyer);
+            let bps = if waiver_bps > 0 {
+                bps - ((bps as u64 * waiver_bps as u64) / 10_000) as u32
+            } else {
+                bps
+            };
+            let fee = (gross * bps as i128) / 10_000;
+            if fee > 0 {
+                *fee_out = fee;
+                return (gross - fee, bps);
+            }
+            return (gross, bps);
+        }
+        let fallback_bps = override_bps.unwrap_or_else(|| locked_bps.unwrap_or(0));
+        (gross, fallback_bps)
     }
 
     // ----------------------------------------------------------
@@ -12027,3 +12221,4 @@ mod test_upgrade_multisig;
 mod test_jurisdiction_tag;
 mod test_max_allowed_tokens;
 mod test_fee_waiver;
+mod test_payout_preview;
