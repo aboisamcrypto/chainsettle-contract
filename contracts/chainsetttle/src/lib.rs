@@ -375,6 +375,11 @@ pub struct ShipmentOptions {
     /// When non-empty (and len >= 3), panel mode is used instead of single-arbiter mode.
     /// The `arbiter` field is ignored for dispute resolution when panel mode is active.
     pub arbiter_panel: Vec<Address>,
+
+    // ── #385 Jurisdiction/compliance tag ──────────────────────────────────────
+    /// Optional jurisdiction/regulatory category (e.g. "US", "EU_MIFID") for
+    /// off-chain compliance filtering. Immutable after creation. None = untagged.
+    pub jurisdiction: Option<Symbol>,
 }
 
 /// Configuration for time-decayed dispute bonds.
@@ -1048,6 +1053,28 @@ pub enum DataKeyExt2 {
     /// pair, in basis points of `to_token` per unit of `from_token`
     /// (10_000 = 1:1). Absent = no route available for that pair.
     ConversionRateBps(Address, Address),
+
+    // ── #385 Jurisdiction/compliance tag per shipment ─────────────────────
+    /// Optional jurisdiction/regulatory tag set at shipment creation; absent
+    /// = untagged. Immutable after creation.
+    ShipmentJurisdiction(String),
+    /// Index of shipment IDs tagged with a given jurisdiction, for
+    /// off-chain compliance filtering via `get_shipments_by_jurisdiction`.
+    JurisdictionShipments(Symbol),
+
+    // ── #387 Configurable maximum allowed-token list size ─────────────────
+    /// Admin-configured cap on the number of entries in the allowed-token
+    /// list (0/unset = no cap).
+    MaxAllowedTokens,
+
+    // ── #388 VIP partner fee waiver via governance vote ───────────────────
+    /// Monotonic counter for fee-waiver proposal ids.
+    FeeWaiverProposalCounter,
+    /// Pending fee-waiver proposal, by id.
+    FeeWaiverProposal(u64),
+    /// Active fee waiver granted to a partner address: (waiver_bps, expires_at
+    /// unix timestamp; 0 = no expiry).
+    FeeWaiver(Address),
 }
 
 /// Partial joint-confirmation progress for a high-value shipment's milestone (#367).
@@ -3066,6 +3093,7 @@ impl ChainSettleContract {
         let backup_arbiter = options.backup_arbiter.clone();
         let confirmation_cooldown_ledgers = options.confirmation_cooldown_ledgers;
         let arbiter_panel = options.arbiter_panel.clone();
+        let jurisdiction = options.jurisdiction.clone();
 
         if buyer_cancel_fee_bps > constants::MAX_FEE_BPS {
             panic!("buyer_cancel_fee_bps cannot exceed 1000 (10%)");
@@ -3460,6 +3488,36 @@ impl ChainSettleContract {
             env.storage().persistent().set(
                 &DataKeyExt::ShipmentFeeBps(shipment_id.clone()),
                 &effective_bps,
+            );
+        }
+
+        // #385: Store the jurisdiction/compliance tag and index it for
+        // off-chain compliance filtering when provided.
+        if let Some(jurisdiction_tag) = jurisdiction.clone() {
+            env.storage().persistent().set(
+                &DataKeyExt2::ShipmentJurisdiction(shipment_id.clone()),
+                &jurisdiction_tag,
+            );
+            env.storage().persistent().extend_ttl(
+                &DataKeyExt2::ShipmentJurisdiction(shipment_id.clone()),
+                constants::TTL_INITIAL_LEDGERS,
+                constants::TTL_MAX_LEDGERS,
+            );
+
+            let index_key = DataKeyExt2::JurisdictionShipments(jurisdiction_tag);
+            let mut jurisdiction_shipments: Vec<String> = env
+                .storage()
+                .persistent()
+                .get(&index_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            jurisdiction_shipments.push_back(shipment_id.clone());
+            env.storage()
+                .persistent()
+                .set(&index_key, &jurisdiction_shipments);
+            env.storage().persistent().extend_ttl(
+                &index_key,
+                constants::TTL_INITIAL_LEDGERS,
+                constants::TTL_MAX_LEDGERS,
             );
         }
 
@@ -9755,6 +9813,23 @@ impl ChainSettleContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// #385: Returns the jurisdiction/compliance tag for a shipment, or None if untagged.
+    pub fn get_shipment_jurisdiction(env: Env, shipment_id: String) -> Option<Symbol> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::ShipmentJurisdiction(shipment_id))
+    }
+
+    /// #385: Returns all shipment IDs tagged with `jurisdiction`, for off-chain
+    /// compliance tooling to filter or report on shipments subject to a
+    /// specific regulatory regime.
+    pub fn get_shipments_by_jurisdiction(env: Env, jurisdiction: Symbol) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::JurisdictionShipments(jurisdiction))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
     /// Returns the total number of shipments associated with `address` as buyer or supplier.
     /// Shipments where the address holds both roles are counted once.
     pub fn get_shipment_count(env: Env, address: Address) -> u32 {
@@ -11736,3 +11811,4 @@ mod test_proof_validation;
 mod test_supplier_collateral;
 mod test_supplier_tiering;
 mod test_upgrade_multisig;
+mod test_jurisdiction_tag;
