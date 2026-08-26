@@ -550,6 +550,20 @@ pub struct UpgradeProposal {
     pub approvals: Vec<Address>,
 }
 
+/// #388 – Pending VIP partner fee-waiver proposal, gated by the routine
+/// `MultiAdminConfig.threshold` (same bar as `propose_admin_action`).
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub struct FeeWaiverProposal {
+    pub partner: Address,
+    /// Basis points of the platform fee waived (10_000 = full waiver).
+    pub waiver_bps: u32,
+    /// Unix timestamp after which the waiver no longer applies (0 = no expiry).
+    pub expires_at: u64,
+    /// Distinct admin keys that have approved so far.
+    pub approvals: Vec<Address>,
+}
+
 /// #402 – Pending emergency freeze/unfreeze proposal gated by a supermajority
 /// of `MultiAdminConfig.admins` (stricter than the standard action threshold).
 #[contracttype]
@@ -1750,6 +1764,162 @@ impl ChainSettleContract {
         env.storage()
             .persistent()
             .get(&DataKeyExt2::EmergencyUnfreezeProposal(proposal_id))
+    }
+
+    // ----------------------------------------------------------
+    // #388 VIP PARTNER FEE WAIVER (GOVERNANCE VOTE)
+    // ----------------------------------------------------------
+    // Grants a full or partial platform-fee waiver to a strategic partner
+    // address, routed through the same multisig admin-action machinery used
+    // elsewhere (#166 upgrade multisig, #402 emergency freeze): any
+    // registered multisig admin may propose, and the routine
+    // `MultiAdminConfig.threshold` of distinct admin approvals executes it.
+    // Requires multisig admin governance to be configured — unlike the
+    // freeze feature there is no single-admin fallback, since a fee waiver
+    // is a standing financial concession rather than a routine pause.
+
+    /// Propose a fee waiver for `partner`. `waiver_bps` is the basis points
+    /// of the platform fee to waive (10_000 = fully waived); `expires_at` is
+    /// a Unix timestamp after which the waiver no longer applies (0 = no
+    /// expiry). The proposer's own approval is recorded immediately.
+    pub fn propose_fee_waiver(
+        env: Env,
+        admin: Address,
+        partner: Address,
+        waiver_bps: u32,
+        expires_at: u64,
+    ) -> u64 {
+        admin.require_auth();
+        if waiver_bps > 10_000 {
+            panic!("waiver_bps cannot exceed 10000 (100%)");
+        }
+        let config = Self::require_multisig_config(&env);
+        Self::assert_multisig_admin(&config, &admin);
+
+        let proposal_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::FeeWaiverProposalCounter)
+            .unwrap_or(0)
+            + 1;
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::FeeWaiverProposalCounter, &proposal_id);
+
+        let mut approvals: Vec<Address> = Vec::new(&env);
+        approvals.push_back(admin.clone());
+        let proposal = FeeWaiverProposal {
+            partner: partner.clone(),
+            waiver_bps,
+            expires_at,
+            approvals,
+        };
+        let key = DataKeyExt2::FeeWaiverProposal(proposal_id);
+        env.storage().persistent().set(&key, &proposal);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "fee_waiver_proposed"), proposal_id),
+            (admin, partner, waiver_bps, 1u32),
+        );
+
+        if config.threshold <= 1 {
+            Self::execute_fee_waiver_proposal(&env, proposal_id);
+        }
+
+        proposal_id
+    }
+
+    /// Approve a pending fee-waiver proposal. Grants the waiver once the
+    /// routine `MultiAdminConfig.threshold` of distinct admins have approved.
+    pub fn approve_fee_waiver(env: Env, admin: Address, proposal_id: u64) {
+        admin.require_auth();
+        let config = Self::require_multisig_config(&env);
+        Self::assert_multisig_admin(&config, &admin);
+
+        let key = DataKeyExt2::FeeWaiverProposal(proposal_id);
+        let mut proposal: FeeWaiverProposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("fee waiver proposal not found"));
+
+        for i in 0..proposal.approvals.len() {
+            if proposal.approvals.get(i).unwrap() == admin {
+                panic!("already approved by this admin");
+            }
+        }
+        proposal.approvals.push_back(admin.clone());
+        let approvals_count = proposal.approvals.len() as u32;
+        env.storage().persistent().set(&key, &proposal);
+
+        env.events().publish(
+            (Symbol::new(&env, "fee_waiver_approved"), proposal_id),
+            (admin, approvals_count),
+        );
+
+        if approvals_count >= config.threshold {
+            Self::execute_fee_waiver_proposal(&env, proposal_id);
+        }
+    }
+
+    fn execute_fee_waiver_proposal(env: &Env, proposal_id: u64) {
+        let key = DataKeyExt2::FeeWaiverProposal(proposal_id);
+        let proposal: FeeWaiverProposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("fee waiver proposal not found"));
+        env.storage().persistent().remove(&key);
+
+        let grant_key = DataKeyExt2::FeeWaiver(proposal.partner.clone());
+        env.storage()
+            .persistent()
+            .set(&grant_key, &(proposal.waiver_bps, proposal.expires_at));
+        env.storage().persistent().extend_ttl(
+            &grant_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+
+        env.events().publish(
+            (Symbol::new(env, "fee_waiver_granted"), proposal_id),
+            (proposal.partner, proposal.waiver_bps, proposal.expires_at),
+        );
+    }
+
+    /// Returns a pending fee-waiver proposal, or None if it never existed or
+    /// has already executed.
+    pub fn get_fee_waiver_proposal(env: Env, proposal_id: u64) -> Option<FeeWaiverProposal> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::FeeWaiverProposal(proposal_id))
+    }
+
+    /// Returns the active fee waiver for `partner` as (waiver_bps, expires_at),
+    /// or None if no waiver has been granted or a granted waiver has expired.
+    pub fn get_fee_waiver(env: Env, partner: Address) -> Option<(u32, u64)> {
+        let grant: (u32, u64) = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt2::FeeWaiver(partner))?;
+        let (_, expires_at) = grant;
+        if expires_at != 0 && env.ledger().timestamp() >= expires_at {
+            return None;
+        }
+        Some(grant)
+    }
+
+    /// Resolves the effective fee-waiver basis points currently active for
+    /// `address` (0 if none granted or the grant has expired).
+    fn resolve_fee_waiver_bps(env: &Env, address: &Address) -> u32 {
+        Self::get_fee_waiver(env.clone(), address.clone())
+            .map(|(bps, _)| bps)
+            .unwrap_or(0)
     }
 
     // ----------------------------------------------------------
@@ -11291,6 +11461,14 @@ impl ChainSettleContract {
             } else {
                 locked_bps.unwrap_or(config.fee_bps)
             };
+            // #388: Apply any governance-granted VIP partner fee waiver on top
+            // of the resolved bps (waiver_bps of the *fee*, not of gross).
+            let waiver_bps = Self::resolve_fee_waiver_bps(env, buyer);
+            let bps = if waiver_bps > 0 {
+                bps - ((bps as u64 * waiver_bps as u64) / 10_000) as u32
+            } else {
+                bps
+            };
             let fee = (gross * bps as i128) / 10_000;
             if fee > 0 {
                 let token_client = token::Client::new(env, token);
@@ -11848,3 +12026,4 @@ mod test_supplier_tiering;
 mod test_upgrade_multisig;
 mod test_jurisdiction_tag;
 mod test_max_allowed_tokens;
+mod test_fee_waiver;
