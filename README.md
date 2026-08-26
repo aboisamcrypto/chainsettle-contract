@@ -1031,6 +1031,99 @@ ChainSettle supports an active pool of trusted arbiters, allowing for automatic 
 `remove_arbiter_from_pool(admin, arbiter: Address)`: Admin-only. Removes an arbiter from the active pool.
 `get_arbiter_pool() → Vec<Address>` (read-only): Returns the current list of active arbiters in the pool.
 When creating a shipment, a buyer must specify an arbiter. By querying `get_arbiter_pool()`, a frontend or backend service can automatically select an arbiter using a round-robin assignment strategy. This ensures that disputes are evenly distributed among all trusted arbiters in the pool rather than overloading a single resolver.
+
+### Arbiter Rotation & Recusal
+
+ChainSettle provides two distinct paths for replacing a shipment's assigned arbiter mid-flight: **mutual rotation** (buyer + supplier both agree on a specific replacement) and **self-recusal** (the current arbiter voluntarily steps down and is automatically replaced from the pool).
+
+#### `propose_arbiter_rotation(caller, shipment_id, new_arbiter)`
+
+Buyer or supplier proposes to replace the current arbiter with a specific `new_arbiter` address. The rotation only takes effect once **both** the buyer and the supplier have proposed the same replacement address — neither party can change the arbiter unilaterally.
+
+**Who may call:** The shipment's registered buyer or supplier. Logistics, the current arbiter, and unrelated addresses are rejected with `"unauthorized"`.
+
+**Preconditions:**
+- The shipment must be `Active`.
+- The contract must not be paused.
+
+**Proposal mechanics (mutual-consent model):**
+
+The proposal state is stored in temporary storage keyed to the shipment. Each call records the caller's agreement to the given `new_arbiter`:
+
+1. If no proposal exists yet, a new one is created with only the caller's agreement flag set.
+2. If a proposal already exists for the **same** `new_arbiter`, the caller's agreement flag is set on the existing proposal.
+3. If the existing proposal names a **different** arbiter, it is discarded entirely and a fresh proposal is created with only the caller's agreement flag set — changing the proposed arbiter resets consent from scratch.
+
+The `arbiter_rotation_proposed` event is emitted on every call regardless of whether the rotation has completed.
+
+**Execution:** When both `buyer_agreed` and `supplier_agreed` are `true` for the same `new_arbiter` in the same call, the rotation executes automatically:
+- `shipment.arbiter` is updated to `new_arbiter`.
+- The pending proposal is removed from temporary storage.
+- An `arbiter_rotated` event is emitted.
+- An admin audit entry is appended with action `"arbiter_rotated"`.
+
+There is no separate approval function — the second matching `propose_arbiter_rotation` call **is** the approval.
+
+```bash
+# Step 1 — buyer proposes a new arbiter
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source buyer-account \
+  --network testnet \
+  -- propose_arbiter_rotation \
+  --caller <BUYER_ADDRESS> \
+  --shipment_id "SHIP-001" \
+  --new_arbiter <NEW_ARBITER_ADDRESS>
+
+# Step 2 — supplier agrees to the same new arbiter → rotation executes immediately
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source supplier-account \
+  --network testnet \
+  -- propose_arbiter_rotation \
+  --caller <SUPPLIER_ADDRESS> \
+  --shipment_id "SHIP-001" \
+  --new_arbiter <NEW_ARBITER_ADDRESS>
+```
+
+#### `recuse_arbiter(arbiter, shipment_id)`
+
+The current arbiter voluntarily steps down from a shipment. The contract immediately and automatically reassigns a replacement from the active arbiter pool using round-robin selection — no buyer or supplier involvement is required.
+
+**Who may call:** Only the shipment's currently assigned arbiter. Any other caller panics with `"only the current arbiter can recuse"`.
+
+**Preconditions:**
+- The shipment must be `Active`.
+- The contract must not be paused.
+- The arbiter pool must contain at least one address other than the recusing arbiter, otherwise the call panics with `"no available arbiter for reassignment"`.
+
+**Behavior:**
+1. The contract walks the pool starting at its current round-robin index, skipping the recusing arbiter's own address.
+2. The first eligible candidate becomes the new arbiter and `shipment.arbiter` is updated immediately.
+3. The pool index advances so the next recusal or auto-assignment starts from after the chosen candidate.
+4. An `arbiter_recused` event is emitted with `(old_arbiter, new_arbiter)`.
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source arbiter-account \
+  --network testnet \
+  -- recuse_arbiter \
+  --arbiter <ARBITER_ADDRESS> \
+  --shipment_id "SHIP-001"
+```
+
+#### How rotation differs from recusal
+
+| | `propose_arbiter_rotation` | `recuse_arbiter` |
+|---|---|---|
+| **Initiator** | Buyer or supplier | Current arbiter |
+| **Replacement** | Caller-specified address | Auto-selected from arbiter pool |
+| **Consent required** | Both buyer **and** supplier must agree | None — arbiter acts alone |
+| **Pool dependency** | No (any address may be proposed) | Yes — pool must have another eligible arbiter |
+| **Storage used** | Temporary (cleared on execution) | None (immediate state change) |
+| **Typical use case** | Parties want a specific trusted arbiter | Arbiter has a conflict of interest or cannot serve |
+
 Supplier Payout Batching
 By default, every milestone payment (confirmation, dispute resolution,
 advance approval) transfers tokens to the supplier immediately in the same
@@ -1359,6 +1452,9 @@ Event name	Payload	When
 `upgrade_approved`	`(admin, approvals_count)`	Multisig WASM upgrade approved by an admin
 `upgrade_cancelled`	`admin`	Multisig WASM upgrade proposal cancelled
 `upgrade_executed`	`new_wasm_hash`	Multisig WASM upgrade executed after threshold reached
+`arbiter_rotation_proposed`	`(shipment_id)` topic, `new_arbiter` data	Buyer or supplier proposed an arbiter rotation (emitted on every call, even before both parties agree)
+`arbiter_rotated`	`(shipment_id)` topic, `new_arbiter` data	Both parties agreed — arbiter replaced with `new_arbiter`
+`arbiter_recused`	`(shipment_id)` topic, `(old_arbiter, new_arbiter)` data	Arbiter voluntarily stepped down; replacement auto-assigned from pool
 
 Event name Payload When
 `shipment_created` `shipment_id` New shipment created
@@ -1379,6 +1475,9 @@ Event name Payload When
 `upgrade_approved` `(admin, approvals_count)` Multisig WASM upgrade approved by an admin
 `upgrade_cancelled` `admin` Multisig WASM upgrade proposal cancelled
 `upgrade_executed` `new_wasm_hash` Multisig WASM upgrade executed after threshold reached
+`arbiter_rotation_proposed` `(shipment_id)` topic, `new_arbiter` data Buyer or supplier proposed an arbiter rotation (emitted on every call, even before both parties agree)
+`arbiter_rotated` `(shipment_id)` topic, `new_arbiter` data Both parties agreed — arbiter replaced with `new_arbiter`
+`arbiter_recused` `(shipment_id)` topic, `(old_arbiter, new_arbiter)` data Arbiter voluntarily stepped down; replacement auto-assigned from pool
 
 The backend service (`chainsetttle-backend`) listens for these events and
 sends push notifications to the relevant parties.
