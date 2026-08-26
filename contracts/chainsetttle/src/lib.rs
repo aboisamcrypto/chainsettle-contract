@@ -2829,22 +2829,57 @@ impl ChainSettleContract {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic!("unauthorized"));
         admin.require_auth();
-        Self::append_admin_action(
-            &env,
-            Symbol::new(&env, "add_allowed_token"),
-            Symbol::new(&env, "allowed_token_added"),
-        );
         let mut allowed: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::AllowedTokens)
             .unwrap_or_else(|| Vec::new(&env));
+
+        // #387: Reject once the whitelist is at the admin-configured cap
+        // (0/unset = no cap) so an unbounded allowlist can't inflate the
+        // cost of functions that iterate it (e.g. create_shipment).
+        let max_allowed: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::MaxAllowedTokens)
+            .unwrap_or(0);
+        if max_allowed > 0 && allowed.len() >= max_allowed {
+            panic!("MaxAllowedTokensReached");
+        }
+
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "add_allowed_token"),
+            Symbol::new(&env, "allowed_token_added"),
+        );
         allowed.push_back(token.clone());
         env.storage()
             .instance()
             .set(&DataKey::AllowedTokens, &allowed);
         env.events()
             .publish((Symbol::new(&env, "allowed_token_added"),), token);
+    }
+
+    /// #387: Set the maximum number of entries allowed in the allowed-token
+    /// whitelist (0 = no cap). Existing lists larger than a newly lowered cap
+    /// remain valid — the cap is only enforced by `add_allowed_token`.
+    pub fn set_max_allowed_tokens(env: Env, admin: Address, max_allowed: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::MaxAllowedTokens, &max_allowed);
+        env.events()
+            .publish((Symbol::new(&env, "max_allowed_tokens_set"),), max_allowed);
+    }
+
+    /// #387: Read the currently configured maximum allowed-token list size
+    /// (0 = no cap, the default).
+    pub fn get_max_allowed_tokens(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt2::MaxAllowedTokens)
+            .unwrap_or(0)
     }
 
     pub fn remove_allowed_token(env: Env, token: Address) {
@@ -11812,3 +11847,4 @@ mod test_supplier_collateral;
 mod test_supplier_tiering;
 mod test_upgrade_multisig;
 mod test_jurisdiction_tag;
+mod test_max_allowed_tokens;
