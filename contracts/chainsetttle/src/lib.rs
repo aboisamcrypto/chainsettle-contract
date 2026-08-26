@@ -354,6 +354,7 @@ pub struct ShipmentOptions {
     // ── #164 Per-milestone timestamp deadlines ────────────────
     /// Unix timestamp deadlines per milestone (0 = no deadline for that milestone).
     /// Empty Vec = no timestamp deadlines. Non-empty length must match milestones.
+    /// Empty Vec = no timestamp deadlines. Non-empty length must match milestones.
     pub deadlines: Vec<u64>,
 
     // ── #165 Dispute auto-resolution timeout ──────────────────
@@ -374,7 +375,8 @@ pub struct ShipmentOptions {
     /// Optional panel of arbiters for N-of-M dispute resolution.
     /// When non-empty (and len >= 3), panel mode is used instead of single-arbiter mode.
     /// The `arbiter` field is ignored for dispute resolution when panel mode is active.
-    pub arbiter_panel: Vec<Address>,
+    /// The `arbiter` field is ignored for dispute resolution when panel mode is active.
+   pub arbiter_panel: Vec<Address>,
 }
 
 /// Configuration for time-decayed dispute bonds.
@@ -432,6 +434,7 @@ pub struct ReputationFastTrack {
     pub max_disputed_ratio_bps: u32,
 }
 
+/// Pending mutual-consent pause or resume request for a single shipment.
 /// Pending mutual-consent pause or resume request for a single shipment.
 #[contracttype]
 #[derive(Clone)]
