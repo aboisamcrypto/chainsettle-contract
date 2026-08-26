@@ -300,6 +300,15 @@ pub struct FeeRecipient {
     pub share_bps: u32,
 }
 
+/// #413 – Time-boxed, contract-wide promotional window during which the
+/// protocol fee is waived for all shipments completed within [start_ledger, end_ledger].
+#[contracttype]
+#[derive(Clone)]
+pub struct FeeHoliday {
+    pub start_ledger: u32,
+    pub end_ledger: u32,
+}
+
 /// Buyer reliability tracking for supplier decision-making.
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -1086,6 +1095,11 @@ pub enum DataKeyExt2 {
     /// Pending or decided appeal filed by a blacklisted address against
     /// its blacklisting, keyed by the appellant's address.
     BlacklistAppeal(Address),
+
+    // ── #413 Fee holiday ───────────────────────────────────────────────────
+    /// Admin-configured (start_ledger, end_ledger) window during which the
+    /// protocol fee is waived for all shipments. Absent = no holiday scheduled.
+    FeeHoliday,
 }
 
 /// Partial joint-confirmation progress for a high-value shipment's milestone (#367).
@@ -2142,6 +2156,50 @@ impl ChainSettleContract {
         env.storage()
             .instance()
             .set(&DataKey::FeeConfig, &FeeConfig { fee_bps, treasury });
+    }
+
+    /// #413: Schedule a time-boxed, contract-wide fee holiday. Admin only.
+    /// While `start_ledger <= env.ledger().sequence() <= end_ledger`, the protocol
+    /// fee is waived (deduct_fee* return the full gross amount) for all shipments.
+    pub fn schedule_fee_holiday(env: Env, admin: Address, start_ledger: u32, end_ledger: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        if end_ledger < start_ledger {
+            panic!("end_ledger must be >= start_ledger");
+        }
+        env.storage().instance().set(
+            &DataKeyExt2::FeeHoliday,
+            &FeeHoliday {
+                start_ledger,
+                end_ledger,
+            },
+        );
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "schedule_fee_holiday"),
+            Symbol::new(&env, "fee_holiday_scheduled"),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "fee_holiday_scheduled"),),
+            (start_ledger, end_ledger),
+        );
+    }
+
+    /// #413: Cancel any scheduled/active fee holiday. Admin only.
+    pub fn cancel_fee_holiday(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage().instance().remove(&DataKeyExt2::FeeHoliday);
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "cancel_fee_holiday"),
+            Symbol::new(&env, "fee_holiday_cancelled"),
+        );
+    }
+
+    /// #413: Whether a fee holiday is currently active. Read-only.
+    pub fn is_fee_holiday_active(env: Env) -> bool {
+        Self::fee_holiday_active(&env)
     }
 
     /// Set multiple fee recipients with basis-point shares. Admin only.
@@ -11275,9 +11333,25 @@ impl ChainSettleContract {
         true
     }
 
+    /// #413: True while a scheduled fee holiday covers the current ledger.
+    fn fee_holiday_active(env: &Env) -> bool {
+        if let Some(holiday) = env
+            .storage()
+            .instance()
+            .get::<DataKeyExt2, FeeHoliday>(&DataKeyExt2::FeeHoliday)
+        {
+            let now = env.ledger().sequence();
+            return now >= holiday.start_ledger && now <= holiday.end_ledger;
+        }
+        false
+    }
+
     /// Deducts the platform fee from `gross_payment` and transfers it to the treasury.
     /// Returns the net amount after fee. Updates `fee_out` with the fee taken.
     fn deduct_fee(env: &Env, gross: i128, token: &Address, fee_out: &mut i128) -> i128 {
+        if Self::fee_holiday_active(env) {
+            return gross;
+        }
         if let Some(config) = env
             .storage()
             .instance()
@@ -11357,6 +11431,9 @@ impl ChainSettleContract {
         shipment_id: &String,
         fee_out: &mut i128,
     ) -> i128 {
+        if Self::fee_holiday_active(env) {
+            return gross;
+        }
         let override_bps: Option<u32> = env
             .storage()
             .persistent()
@@ -11453,6 +11530,9 @@ impl ChainSettleContract {
         is_final: bool,
         fee_out: &mut i128,
     ) -> (i128, u32) {
+        if Self::fee_holiday_active(env) {
+            return (gross, 0);
+        }
         let override_bps: Option<u32> = env
             .storage()
             .persistent()

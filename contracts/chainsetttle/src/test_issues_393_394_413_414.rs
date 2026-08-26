@@ -164,3 +164,77 @@ fn test_blacklist_appeal_only_one_pending() {
     client.appeal_blacklist(&target, &String::from_str(&t.env, "ipfs://evidence"));
     client.appeal_blacklist(&target, &String::from_str(&t.env, "ipfs://evidence2"));
 }
+
+// ============================================================
+// #413 — Fee holiday
+// ============================================================
+
+#[test]
+fn test_fee_holiday_waives_fee_during_window() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    client.set_fee_config(&t.buyer, &500, &t.treasury);
+
+    let now = t.env.ledger().sequence();
+    client.schedule_fee_holiday(&t.buyer, &now, &(now + 1000));
+    assert!(client.is_fee_holiday_active());
+
+    let shipment_id = String::from_str(&t.env, "SHIP-413-A");
+    create_standard_shipment(
+        &client, &t.env, &shipment_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
+        &t.token_id, 1_000_000_000,
+    );
+
+    let token_client = soroban_sdk::token::Client::new(&t.env, &t.token_id);
+    let treasury_before = token_client.balance(&t.treasury);
+
+    client.submit_proof(
+        &t.supplier, &shipment_id, &0,
+        &String::from_str(&t.env, "ipfs://d"), &Symbol::new(&t.env, "ipfs"),
+    );
+    client.confirm_milestone(&t.buyer, &shipment_id, &0);
+
+    let treasury_after = token_client.balance(&t.treasury);
+    assert_eq!(treasury_before, treasury_after);
+}
+
+#[test]
+fn test_fee_holiday_charges_fee_outside_window() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    client.set_fee_config(&t.buyer, &500, &t.treasury);
+
+    let now = t.env.ledger().sequence();
+    // Schedule a holiday entirely in the future.
+    client.schedule_fee_holiday(&t.buyer, &(now + 500), &(now + 1000));
+    assert!(!client.is_fee_holiday_active());
+
+    let shipment_id = String::from_str(&t.env, "SHIP-413-B");
+    create_standard_shipment(
+        &client, &t.env, &shipment_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
+        &t.token_id, 1_000_000_000,
+    );
+
+    let token_client = soroban_sdk::token::Client::new(&t.env, &t.token_id);
+    let treasury_before = token_client.balance(&t.treasury);
+
+    client.submit_proof(
+        &t.supplier, &shipment_id, &0,
+        &String::from_str(&t.env, "ipfs://d"), &Symbol::new(&t.env, "ipfs"),
+    );
+    client.confirm_milestone(&t.buyer, &shipment_id, &0);
+
+    let treasury_after = token_client.balance(&t.treasury);
+    assert!(treasury_after > treasury_before);
+}
+
+#[test]
+fn test_cancel_fee_holiday() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let now = t.env.ledger().sequence();
+    client.schedule_fee_holiday(&t.buyer, &now, &(now + 1000));
+    assert!(client.is_fee_holiday_active());
+    client.cancel_fee_holiday(&t.buyer);
+    assert!(!client.is_fee_holiday_active());
+}
