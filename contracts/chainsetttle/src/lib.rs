@@ -1100,6 +1100,12 @@ pub enum DataKeyExt2 {
     /// Admin-configured (start_ledger, end_ledger) window during which the
     /// protocol fee is waived for all shipments. Absent = no holiday scheduled.
     FeeHoliday,
+
+    // ── #394 Shipment-level custom metadata key-value store ──────────────
+    /// Buyer/supplier-set custom metadata value for (shipment_id, key).
+    ShipmentMetadata(String, Symbol),
+    /// Index of metadata keys set on a shipment, for listing.
+    ShipmentMetadataKeys(String),
 }
 
 /// Partial joint-confirmation progress for a high-value shipment's milestone (#367).
@@ -9713,6 +9719,65 @@ impl ChainSettleContract {
         env.storage()
             .persistent()
             .get(&DataKeyExt::MilestoneNotes(shipment_id, milestone_index))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    // ----------------------------------------------------------
+    // #394: SHIPMENT-LEVEL CUSTOM METADATA KEY-VALUE STORE
+    // ----------------------------------------------------------
+
+    /// Buyer or supplier attaches/updates a small piece of structured data on
+    /// a shipment (e.g. a PO number, cost center, or internal reference code)
+    /// beyond the single IPFS metadata hash captured at creation.
+    pub fn set_shipment_metadata(env: Env, caller: Address, shipment_id: String, key: Symbol, value: String) {
+        Self::assert_not_paused(&env);
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+        Self::assert_buyer_or_supplier(&shipment, &caller);
+        caller.require_auth();
+
+        let meta_key = DataKeyExt2::ShipmentMetadata(shipment_id.clone(), key.clone());
+        let is_new = !env.storage().persistent().has(&meta_key);
+        env.storage().persistent().set(&meta_key, &value);
+        env.storage().persistent().extend_ttl(
+            &meta_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+
+        if is_new {
+            let keys_index_key = DataKeyExt2::ShipmentMetadataKeys(shipment_id.clone());
+            let mut keys: Vec<Symbol> = env
+                .storage()
+                .persistent()
+                .get(&keys_index_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            keys.push_back(key.clone());
+            env.storage().persistent().set(&keys_index_key, &keys);
+            env.storage().persistent().extend_ttl(
+                &keys_index_key,
+                constants::TTL_INITIAL_LEDGERS,
+                constants::TTL_MAX_LEDGERS,
+            );
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "shipment_metadata_set"), shipment_id),
+            (caller, key, value),
+        );
+    }
+
+    /// Read a single custom metadata value for a shipment. Read-only.
+    pub fn get_shipment_metadata(env: Env, shipment_id: String, key: Symbol) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::ShipmentMetadata(shipment_id, key))
+    }
+
+    /// List all custom metadata keys set on a shipment. Read-only.
+    pub fn get_shipment_metadata_keys(env: Env, shipment_id: String) -> Vec<Symbol> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::ShipmentMetadataKeys(shipment_id))
             .unwrap_or_else(|| Vec::new(&env))
     }
 

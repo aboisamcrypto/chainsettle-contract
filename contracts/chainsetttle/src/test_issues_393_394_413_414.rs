@@ -238,3 +238,66 @@ fn test_cancel_fee_holiday() {
     client.cancel_fee_holiday(&t.buyer);
     assert!(!client.is_fee_holiday_active());
 }
+
+// ============================================================
+// #394 — Shipment-level custom metadata key-value store
+// ============================================================
+
+#[test]
+fn test_shipment_metadata_set_and_get() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let shipment_id = String::from_str(&t.env, "SHIP-394-A");
+    create_standard_shipment(
+        &client, &t.env, &shipment_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
+        &t.token_id, 1_000_000_000,
+    );
+
+    let key = Symbol::new(&t.env, "po_number");
+    let value = String::from_str(&t.env, "PO-12345");
+    client.set_shipment_metadata(&t.buyer, &shipment_id, &key, &value);
+
+    assert_eq!(client.get_shipment_metadata(&shipment_id, &key), Some(value));
+    let keys = client.get_shipment_metadata_keys(&shipment_id);
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys.get(0).unwrap(), key);
+}
+
+#[test]
+fn test_shipment_metadata_supplier_can_update() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let shipment_id = String::from_str(&t.env, "SHIP-394-B");
+    create_standard_shipment(
+        &client, &t.env, &shipment_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
+        &t.token_id, 1_000_000_000,
+    );
+
+    let key = Symbol::new(&t.env, "cost_center");
+    client.set_shipment_metadata(&t.buyer, &shipment_id, &key, &String::from_str(&t.env, "CC-1"));
+    client.set_shipment_metadata(&t.supplier, &shipment_id, &key, &String::from_str(&t.env, "CC-2"));
+
+    assert_eq!(
+        client.get_shipment_metadata(&shipment_id, &key),
+        Some(String::from_str(&t.env, "CC-2"))
+    );
+    // Overwriting an existing key must not duplicate the keys index.
+    assert_eq!(client.get_shipment_metadata_keys(&shipment_id).len(), 1);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_shipment_metadata_rejects_unrelated_caller() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let shipment_id = String::from_str(&t.env, "SHIP-394-C");
+    create_standard_shipment(
+        &client, &t.env, &shipment_id, &t.buyer, &t.supplier, &t.logistics, &t.arbiter,
+        &t.token_id, 1_000_000_000,
+    );
+
+    let stranger = Address::generate(&t.env);
+    client.set_shipment_metadata(
+        &stranger, &shipment_id, &Symbol::new(&t.env, "k"), &String::from_str(&t.env, "v"),
+    );
+}
