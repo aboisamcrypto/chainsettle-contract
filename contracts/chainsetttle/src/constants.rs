@@ -5,9 +5,6 @@ pub const TTL_INITIAL_LEDGERS: u32 = 100_000;
 /// 6_300_000 ≈ 5s × 86_400s/day × 365 days.
 pub const TTL_MAX_LEDGERS: u32 = 6_300_000;
 
-/// Maximum number of milestones allowed per shipment.
-pub const MAX_MILESTONES: u32 = 20;
-
 /// Minimum shipment amount in token base units (stroops). Must be > 0.
 pub const MIN_SHIPMENT_AMOUNT: i128 = 1;
 
@@ -26,3 +23,9 @@ pub const SHIPMENT_AUDIT_LOG_MAX_ENTRIES: usize = 20;
 
 /// Maximum shipments returned per page in list_shipments.
 pub const LIST_SHIPMENTS_MAX_PAGE: u32 = 50;
+
+/// Default maximum number of milestones allowed per shipment when the admin
+/// has not configured an override (#364). Chosen well above any milestone
+/// count exercised by existing tests/benchmarks so default behaviour is
+/// unchanged until an admin opts in to a different cap.
+pub const DEFAULT_MAX_MILESTONE_COUNT: u32 = 50;

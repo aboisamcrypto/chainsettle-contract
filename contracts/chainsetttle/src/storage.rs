@@ -1,9 +1,29 @@
+//! Storage abstraction layer for the ChainSettle contract.
+//!
+//! This module is the **single source of truth** for all persistent, instance,
+//! and temporary storage access. Every read and write to contract state MUST go
+//! through the typed accessor functions defined here.
+//!
+//! Design notes:
+//! - All [`DataKey`] variants are versioned with a `V1` prefix so that a future
+//!   upgrade can introduce `V2_*` keys and run [`migrate_v1_to_v2`] without
+//!   clobbering live state.
+//! - TTL extension is centralised inside each `set_*` helper so callers never
+//!   need to remember to extend manually.
+//! - Extended/feature keys that are not yet covered by `V1DataKey` live in
+//!   [`crate::DataKeyExt`] (defined in `lib.rs`) and are accessed inline; they
+//!   will be migrated to this module incrementally.
+//!
+//! Resolves issue #220 — this file was previously unreachable because `mod storage;`
+//! was absent from `lib.rs`. The declaration has been restored and this module is
+//! now the canonical storage layer for all production code.
+
 use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 use crate::{
     constants::{TTL_INITIAL_LEDGERS, TTL_MAX_LEDGERS},
-    AuditEntry, CancelPolicy, ContractStats, DisputeEntry, FeeConfig, MultiAdminConfig, Shipment,
-    ShipmentStatus,
+    AuditEntry, CancelPolicy, ContractStats, DisputeEntry, FeeConfig, MultiAdminConfig,
+    ReputationScore, Shipment, ShipmentStatus,
 };
 
 // ============================================================
@@ -552,6 +572,48 @@ pub fn remove_arbiter_rotation(env: &Env, shipment_id: &String) {
     env.storage()
         .temporary()
         .remove(&DataKey::V1ArbiterRotation(shipment_id.clone()));
+}
+
+// ============================================================
+// ARBITER FEE TIERS
+// ============================================================
+
+pub fn get_arbiter_fee_tiers(env: &Env) -> Vec<(i128, u32)> {
+    env.storage()
+        .persistent()
+        .get(&crate::DataKeyExt::ArbiterFeeTiers)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_arbiter_fee_tiers(env: &Env, tiers: &Vec<(i128, u32)>) {
+    let key = crate::DataKeyExt::ArbiterFeeTiers;
+    env.storage().persistent().set(&key, tiers);
+    env.storage().persistent().extend_ttl(
+        &key,
+        crate::constants::TTL_INITIAL_LEDGERS,
+        crate::constants::TTL_MAX_LEDGERS,
+    );
+}
+
+// ============================================================
+// ARBITER STATS
+// ============================================================
+
+pub fn get_arbiter_stats(env: &Env, arbiter: &Address) -> crate::ArbiterStats {
+    env.storage()
+        .persistent()
+        .get(&crate::DataKeyExt::ArbiterStats(arbiter.clone()))
+        .unwrap_or_default()
+}
+
+pub fn set_arbiter_stats(env: &Env, arbiter: &Address, stats: &crate::ArbiterStats) {
+    let key = crate::DataKeyExt::ArbiterStats(arbiter.clone());
+    env.storage().persistent().set(&key, stats);
+    env.storage().persistent().extend_ttl(
+        &key,
+        crate::constants::TTL_INITIAL_LEDGERS,
+        crate::constants::TTL_MAX_LEDGERS,
+    );
 }
 
 // ============================================================

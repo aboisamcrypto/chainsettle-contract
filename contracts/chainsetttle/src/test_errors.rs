@@ -9,7 +9,7 @@
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
-    token, vec, Address, Env, String,
+    token, vec, Address, BytesN, Env, String,
 };
 
 // ============================================================
@@ -69,6 +69,10 @@ fn milestones(env: &Env) -> soroban_sdk::Vec<Milestone> {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
         Milestone {
             name: String::from_str(env, "M1"),
@@ -78,6 +82,10 @@ fn milestones(env: &Env) -> soroban_sdk::Vec<Milestone> {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
     ]
 }
@@ -92,6 +100,19 @@ fn opts(env: &Env) -> ShipmentOptions {
         late_penalty_bps_per_ledger: 0,
         auto_confirm_ledgers: 0,
         dispute_bond_amount: 0,
+        arbiter_fee_bps: 0,
+        logistics_fee_bps: 0,
+        supplier_collateral: 0,
+        expires_at_ledger: None,
+
+        metadata_hash: Some(BytesN::from_array(env, &[0u8; 32])),
+
+        metadata_hash: None,
+        referrer: None,
+        buyer_cancel_fee_bps: 0,
+        early_bonus_pool: 0,
+        review_window_ledgers: None,
+
     }
 }
 
@@ -158,7 +179,7 @@ fn test_err_shipment_already_exists_after_proof_submitted() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
 
     let sid = make_shipment(&client, &t, "SHIP-DUP2");
-    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"));
+    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"), &Symbol::new(&t.env, "ipfs"));
 
     // Attempt to re-create the same shipment.
     client.create_shipment(
@@ -198,7 +219,8 @@ fn test_err_shipment_not_found_submit_proof() {
         &String::from_str(&t.env, "GHOST"),
         &0,
         &String::from_str(&t.env, "ipfs://x"),
-    );
+    
+        &Symbol::new(&t.env, "ipfs"),);
 }
 
 /// confirm_milestone on a non-existent shipment must panic.
@@ -222,7 +244,7 @@ fn test_err_unauthorized_confirm_milestone_non_buyer() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
 
     let sid = make_shipment(&client, &t, "SHIP-UNAUTH-CONF");
-    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"));
+    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"), &Symbol::new(&t.env, "ipfs"));
 
     // State before.
     let before = client.get_milestone(&sid, &0);
@@ -244,7 +266,7 @@ fn test_err_unauthorized_submit_proof_wrong_caller() {
     let sid = make_shipment(&client, &t, "SHIP-UNAUTH-PROOF");
 
     // Buyer is not supplier or logistics.
-    client.submit_proof(&t.buyer, &sid, &0, &String::from_str(&t.env, "ipfs://x"));
+    client.submit_proof(&t.buyer, &sid, &0, &String::from_str(&t.env, "ipfs://x"), &Symbol::new(&t.env, "ipfs"));
 }
 
 /// Non-arbiter calling resolve_dispute must panic.
@@ -255,7 +277,7 @@ fn test_err_unauthorized_resolve_dispute_non_arbiter() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
 
     let sid = make_shipment(&client, &t, "SHIP-UNAUTH-RESOLVE");
-    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"));
+    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"), &Symbol::new(&t.env, "ipfs"));
     client.raise_dispute(&t.buyer, &sid, &0);
 
     let before = client.get_milestone(&sid, &0);
@@ -287,7 +309,8 @@ fn test_err_invalid_milestone_index_submit_proof() {
         &sid,
         &99,
         &String::from_str(&t.env, "ipfs://x"),
-    );
+    
+        &Symbol::new(&t.env, "ipfs"),);
 
     // Idempotency: shipment unchanged.
     assert_eq!(
@@ -357,12 +380,12 @@ fn test_err_invalid_milestone_status_submit_proof_already_submitted() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
 
     let sid = make_shipment(&client, &t, "SHIP-STATUS-PROOF");
-    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"));
+    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"), &Symbol::new(&t.env, "ipfs"));
 
     let before = client.get_milestone(&sid, &0);
 
     // Second submit on same milestone must panic.
-    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://y"));
+    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://y"), &Symbol::new(&t.env, "ipfs"));
 
     // Idempotency: proof_hash unchanged.
     assert_eq!(client.get_milestone(&sid, &0).proof_hash, before.proof_hash);
@@ -395,7 +418,7 @@ fn test_err_invalid_milestone_status_resolve_non_disputed() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
 
     let sid = make_shipment(&client, &t, "SHIP-STATUS-RESOLVE");
-    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"));
+    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"), &Symbol::new(&t.env, "ipfs"));
 
     let before = client.get_milestone(&sid, &0);
 
@@ -421,7 +444,7 @@ fn test_err_shipment_not_active_submit_proof_after_cancel() {
 
     let before = client.get_shipment(&sid);
 
-    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"));
+    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"), &Symbol::new(&t.env, "ipfs"));
 
     assert_eq!(client.get_shipment(&sid).status, before.status);
 }
@@ -437,7 +460,7 @@ fn test_err_shipment_not_active_confirm_after_completion() {
 
     // Complete the shipment.
     for i in 0u32..2u32 {
-        client.submit_proof(&t.supplier, &sid, &i, &String::from_str(&t.env, "ipfs://x"));
+        client.submit_proof(&t.supplier, &sid, &i, &String::from_str(&t.env, "ipfs://x"), &Symbol::new(&t.env, "ipfs"));
         client.confirm_milestone(&t.buyer, &sid, &i);
     }
     assert_eq!(client.get_shipment(&sid).status, ShipmentStatus::Completed);
@@ -491,6 +514,10 @@ fn test_err_invalid_percentages_sum_not_100() {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
         Milestone {
             name: String::from_str(&t.env, "B"),
@@ -500,6 +527,10 @@ fn test_err_invalid_percentages_sum_not_100() {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
     ];
 
@@ -537,6 +568,10 @@ fn test_err_invalid_percentages_sum_over_100() {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
         Milestone {
             name: String::from_str(&t.env, "B"),
@@ -546,6 +581,10 @@ fn test_err_invalid_percentages_sum_over_100() {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
     ];
 
@@ -580,6 +619,10 @@ fn test_err_invalid_percentages_below_min_threshold() {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
         Milestone {
             name: String::from_str(&t.env, "Big"),
@@ -589,6 +632,10 @@ fn test_err_invalid_percentages_below_min_threshold() {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         },
     ];
 
@@ -680,8 +727,8 @@ fn test_err_dispute_already_open_second_dispute() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
 
     let sid = make_shipment(&client, &t, "SHIP-DISP-DUP");
-    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"));
-    client.submit_proof(&t.supplier, &sid, &1, &String::from_str(&t.env, "ipfs://y"));
+    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"), &Symbol::new(&t.env, "ipfs"));
+    client.submit_proof(&t.supplier, &sid, &1, &String::from_str(&t.env, "ipfs://y"), &Symbol::new(&t.env, "ipfs"));
 
     client.raise_dispute(&t.buyer, &sid, &0);
 
@@ -706,8 +753,8 @@ fn test_err_dispute_already_open_before_resolution() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
 
     let sid = make_shipment(&client, &t, "SHIP-DISP-BEFORE-RES");
-    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"));
-    client.submit_proof(&t.supplier, &sid, &1, &String::from_str(&t.env, "ipfs://y"));
+    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"), &Symbol::new(&t.env, "ipfs"));
+    client.submit_proof(&t.supplier, &sid, &1, &String::from_str(&t.env, "ipfs://y"), &Symbol::new(&t.env, "ipfs"));
 
     // Open dispute on milestone 0.
     client.raise_dispute(&t.buyer, &sid, &0);
@@ -725,7 +772,7 @@ fn test_err_dispute_already_open_slot_freed_after_resolution() {
     let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
 
     let sid = make_shipment(&client, &t, "SHIP-DISP-FREED");
-    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"));
+    client.submit_proof(&t.supplier, &sid, &0, &String::from_str(&t.env, "ipfs://x"), &Symbol::new(&t.env, "ipfs"));
     client.raise_dispute(&t.buyer, &sid, &0);
     assert_eq!(client.get_shipment(&sid).open_dispute_count, 1);
 
@@ -734,7 +781,7 @@ fn test_err_dispute_already_open_slot_freed_after_resolution() {
     assert_eq!(client.get_shipment(&sid).open_dispute_count, 0);
 
     // Now a new dispute on milestone 1 must succeed.
-    client.submit_proof(&t.supplier, &sid, &1, &String::from_str(&t.env, "ipfs://y"));
+    client.submit_proof(&t.supplier, &sid, &1, &String::from_str(&t.env, "ipfs://y"), &Symbol::new(&t.env, "ipfs"));
     client.raise_dispute(&t.buyer, &sid, &1);
     assert_eq!(client.get_shipment(&sid).open_dispute_count, 1);
 }

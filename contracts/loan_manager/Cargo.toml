@@ -1,15 +1,17 @@
 [package]
-name = "chainsetttle"
+name = "loan_manager"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "ChainSettle - Milestone-based supply chain escrow contract on Stellar Soroban"
+description = "Loan Manager - Soroban lending pool with a robust liquidation engine (oracle failover, bad-debt socialization, dynamic liquidator incentives, partial liquidation, penalty caps)"
 authors = ["ChainSettle Team"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 doctest = false
 
+[features]
+testutils = []
 
 [dependencies]
 soroban-sdk = { workspace = true }
@@ -17,6 +19,3 @@ soroban-sdk = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 proptest = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }

@@ -5,7 +5,7 @@ extern crate std;
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
-    token, vec, Address, Env, String as SorobanString,
+    token, vec, Address, BytesN, Env, String as SorobanString, Symbol,
 };
 use std::fs;
 use std::path::Path;
@@ -88,6 +88,8 @@ fn build_milestones_n(env: &Env, count: u32) -> soroban_sdk::Vec<Milestone> {
             release_after_ledger: 0,
             proof_submitted_ledger: None,
             dispute_opened_ledger: None,
+            deadline_ledger: 0,
+            penalty_bps_per_ledger: 0,
         });
     }
 
@@ -108,6 +110,22 @@ fn default_options(_env: &Env) -> ShipmentOptions {
         late_penalty_bps_per_ledger: 0,
         auto_confirm_ledgers: 0,
         dispute_bond_amount: 0,
+        arbiter_fee_bps: 0,
+        logistics_fee_bps: 0,
+        supplier_collateral: 0,
+        expires_at_ledger: None,
+        metadata_hash: None,
+        referrer: None,
+        buyer_cancel_fee_bps: 0,
+        early_bonus_pool: 0,
+        review_window_ledgers: None,
+        milestone_splits: vec![_env],
+        deadlines: vec![_env],
+        dispute_timeout_seconds: 0,
+        default_resolution: Resolution::Buyer,
+        backup_arbiter: None,
+        confirmation_cooldown_ledgers: None,
+        arbiter_panel: vec![_env],
     }
 }
 
@@ -207,7 +225,13 @@ fn benchmark_submit_proof(milestone_count: u32) -> BenchmarkResult {
     let proof_hash = SorobanString::from_str(&setup.env, "ipfs://QmTest123");
 
     let instructions = measure_instructions(&setup.env, || {
-        client.submit_proof(&setup.supplier, &shipment_id, &0, &proof_hash);
+        client.submit_proof(
+            &setup.supplier,
+            &shipment_id,
+            &0,
+            &proof_hash,
+            &Symbol::new(&setup.env, "ipfs"),
+        );
     });
 
     BenchmarkResult {
@@ -242,7 +266,13 @@ fn benchmark_confirm_milestone(milestone_count: u32) -> BenchmarkResult {
     );
 
     let proof_hash = SorobanString::from_str(&setup.env, "ipfs://QmTest123");
-    client.submit_proof(&setup.supplier, &shipment_id, &0, &proof_hash);
+    client.submit_proof(
+        &setup.supplier,
+        &shipment_id,
+        &0,
+        &proof_hash,
+        &Symbol::new(&setup.env, "ipfs"),
+    );
 
     let instructions = measure_instructions(&setup.env, || {
         client.confirm_milestone(&setup.buyer, &shipment_id, &0);
@@ -280,7 +310,13 @@ fn benchmark_raise_dispute(milestone_count: u32) -> BenchmarkResult {
     );
 
     let proof_hash = SorobanString::from_str(&setup.env, "ipfs://QmTest123");
-    client.submit_proof(&setup.supplier, &shipment_id, &0, &proof_hash);
+    client.submit_proof(
+        &setup.supplier,
+        &shipment_id,
+        &0,
+        &proof_hash,
+        &Symbol::new(&setup.env, "ipfs"),
+    );
 
     let instructions = measure_instructions(&setup.env, || {
         client.raise_dispute(&setup.buyer, &shipment_id, &0);
@@ -318,7 +354,13 @@ fn benchmark_resolve_dispute(milestone_count: u32) -> BenchmarkResult {
     );
 
     let proof_hash = SorobanString::from_str(&setup.env, "ipfs://QmTest123");
-    client.submit_proof(&setup.supplier, &shipment_id, &0, &proof_hash);
+    client.submit_proof(
+        &setup.supplier,
+        &shipment_id,
+        &0,
+        &proof_hash,
+        &Symbol::new(&setup.env, "ipfs"),
+    );
     client.raise_dispute(&setup.buyer, &shipment_id, &0);
 
     let instructions = measure_instructions(&setup.env, || {
