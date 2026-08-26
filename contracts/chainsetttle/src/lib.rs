@@ -76,6 +76,10 @@ pub enum MilestoneStatus {
     Resolved,
     /// Confirmed but payment held until release_after_ledger
     ConfirmedHeld,
+    /// #393: Dispute resolved in the supplier's favor but funds are held
+    /// until release_after_ledger so the buyer has a brief re-review window
+    /// to catch an arbiter error before finalize_dispute_resolution pays out.
+    ResolvedPendingFinality,
 }
 
 /// Controls whether milestones must be completed in order (Sequential)
@@ -1048,6 +1052,12 @@ pub enum DataKeyExt2 {
     /// pair, in basis points of `to_token` per unit of `from_token`
     /// (10_000 = 1:1). Absent = no route available for that pair.
     ConversionRateBps(Address, Address),
+
+    // ── #393 Milestone proof re-review window after dispute denial ───────
+    /// Admin-configured delay (in ledgers) after `resolve_dispute` rules for
+    /// the supplier before funds actually move, giving the buyer a brief
+    /// window to catch an arbiter error (0 = disabled, funds release immediately).
+    ResolutionFinalityDelayLedgers,
 }
 
 /// Partial joint-confirmation progress for a high-value shipment's milestone (#367).
@@ -1816,6 +1826,36 @@ impl ChainSettleContract {
         env.storage()
             .instance()
             .get(&DataKeyExt2::AppealWindowLedgers)
+            .unwrap_or(0)
+    }
+
+    // ----------------------------------------------------------
+    // ADMIN: RESOLUTION FINALITY DELAY (#393)
+    // ----------------------------------------------------------
+
+    /// Set the ledger delay after `resolve_dispute` rules for the supplier
+    /// before funds actually move (0 = disabled, funds release immediately).
+    pub fn set_finality_delay_ledgers(env: Env, admin: Address, ledgers: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::ResolutionFinalityDelayLedgers, &ledgers);
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "set_finality_delay_ledgers"),
+            Symbol::new(&env, "resolution_finality_delay_ledgers_set"),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "resolution_finality_delay_ledgers_set"),),
+            ledgers,
+        );
+    }
+
+    pub fn get_finality_delay_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt2::ResolutionFinalityDelayLedgers)
             .unwrap_or(0)
     }
 
@@ -5798,7 +5838,20 @@ impl ChainSettleContract {
 
         let token_client = token::Client::new(&env, &shipment.token);
 
-        if approve {
+        // #393: When an admin-configured finality delay is active, a supplier-favor
+        // ruling does not move funds immediately. Instead the milestone is parked in
+        // ResolvedPendingFinality for the delay window, giving the buyer a brief
+        // re-review chance (e.g. via appeal_dispute) before finalize_dispute_resolution
+        // can be called to actually release the payment.
+        let finality_delay: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::ResolutionFinalityDelayLedgers)
+            .unwrap_or(0);
+        if approve && finality_delay > 0 {
+            milestone.status = MilestoneStatus::ResolvedPendingFinality;
+            milestone.release_after_ledger = env.ledger().sequence() + finality_delay;
+        } else if approve {
             // Deduct any approved advance (only relevant for full disputes; partial disputes
             // block advance approval at raise time).
             let advance_deducted = Self::consume_advance_for_milestone(
@@ -6116,6 +6169,132 @@ impl ChainSettleContract {
                 approve,
             );
         }
+    }
+
+    // ----------------------------------------------------------
+    // RESOLUTION FINALITY DELAY (#393)
+    // ----------------------------------------------------------
+
+    /// Anyone may call once the finality delay set by `resolve_dispute` has
+    /// elapsed, to actually pay out a dispute that was ruled in the supplier's
+    /// favor. Mirrors the fund-movement portion of `resolve_dispute`'s approve
+    /// branch. If the buyer catches an arbiter error during the delay window,
+    /// they should call `appeal_dispute` before this is called — a milestone
+    /// reopened as Disputed by an appeal is no longer ResolvedPendingFinality
+    /// and this call will simply fail with "milestone is not pending finality".
+    pub fn finalize_dispute_resolution(env: Env, shipment_id: String, milestone_index: u32) {
+        Self::assert_not_paused(&env);
+
+        let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
+        if shipment.status != ShipmentStatus::Active {
+            panic!("shipment is not active");
+        }
+
+        let mut milestone = shipment.milestones.get(milestone_index).unwrap();
+        if milestone.status != MilestoneStatus::ResolvedPendingFinality {
+            panic!("milestone is not pending finality");
+        }
+        if env.ledger().sequence() < milestone.release_after_ledger {
+            panic!("finality delay has not yet elapsed");
+        }
+
+        let payment = Self::milestone_gross_payment(&env, &shipment, milestone_index);
+        let token_client = token::Client::new(&env, &shipment.token);
+
+        let advance_deducted = Self::consume_advance_for_milestone(
+            &env,
+            &mut shipment,
+            &shipment_id,
+            milestone_index,
+        );
+
+        let mut fee_amount: i128 = 0;
+        let net_payment = Self::deduct_fee(&env, payment, &shipment.token, &mut fee_amount);
+
+        Self::check_circuit_breaker(&env, payment);
+        Self::check_address_outflow(&env, &shipment.supplier, payment);
+
+        let fee_bps = Self::applicable_arbiter_fee_bps(&env, payment, shipment.arbiter_fee_bps);
+        let arbiter_fee = (payment * fee_bps as i128) / 10_000;
+        if arbiter_fee > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &shipment.arbiter,
+                &arbiter_fee,
+            );
+        }
+
+        shipment.released_amount += payment;
+
+        let actual_transfer = (net_payment - advance_deducted - arbiter_fee).max(0);
+        if actual_transfer > 0 {
+            Self::pay_milestone_to_payees(
+                &env,
+                &shipment_id,
+                milestone_index,
+                actual_transfer,
+                &shipment.supplier,
+                &token_client,
+            );
+        }
+
+        if shipment.dispute_bond_amount > 0 {
+            let primary_buyer = shipment.buyers.get(0).unwrap();
+            token_client.transfer(
+                &env.current_contract_address(),
+                &primary_buyer,
+                &shipment.dispute_bond_amount,
+            );
+        }
+
+        milestone.status = MilestoneStatus::Resolved;
+        milestone.release_after_ledger = 0;
+        shipment.milestones.set(milestone_index, milestone);
+
+        if Self::all_milestones_done(&shipment) {
+            shipment.status = ShipmentStatus::Completed;
+            let mut stats: ContractStats = env
+                .storage()
+                .instance()
+                .get(&DataKey::ContractStats)
+                .unwrap_or(ContractStats {
+                    total_shipments: 0,
+                    total_volume: 0,
+                    total_disputes: 0,
+                    completed_shipments: 0,
+                });
+            stats.completed_shipments += 1;
+            env.storage()
+                .instance()
+                .set(&DataKey::ContractStats, &stats);
+            Self::increment_reputation_internal(&env, &shipment.supplier, 1, 0, 0);
+            Self::move_shipment_status_index(
+                &env,
+                ShipmentStatus::Active,
+                ShipmentStatus::Completed,
+                &shipment_id,
+            );
+            Self::emit_shipment_completed(&env, &shipment_id, shipment.released_amount);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "dispute_resolution_finalized"),
+                shipment_id.clone(),
+            ),
+            (milestone_index, payment, fee_amount),
+        );
+        Self::emit_dispute_resolved(
+            &env,
+            &shipment_id,
+            milestone_index,
+            Symbol::new(&env, "supplier"),
+            &shipment.arbiter,
+        );
     }
 
     // ----------------------------------------------------------
@@ -11736,3 +11915,4 @@ mod test_proof_validation;
 mod test_supplier_collateral;
 mod test_supplier_tiering;
 mod test_upgrade_multisig;
+mod test_issues_393_394_413_414;
