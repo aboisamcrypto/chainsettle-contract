@@ -587,6 +587,83 @@ dispute-resolution payouts (`resolve_dispute`) move funds without decrementing
 it. Indexers should treat the aggregate as an approximation of locked supply and
 reconcile against per-shipment balances when exact accounting is required.
 
+Shipment Listing & Queries
+These read-only functions let callers enumerate shipments stored on the contract. No authorization is required.
+
+`list_shipments(cursor, limit, status_filter) → (Vec<String>, Option<u32>)` (read-only)
+
+Returns a page of shipment IDs, with cursor-based pagination so callers can walk the full list incrementally without loading everything at once.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `cursor` | `Option<u32>` | Index to start reading from. Pass `None` (or `0`) to begin at the first shipment. |
+| `limit` | `u32` | Maximum number of IDs to return per page. Capped at `50` (`LIST_SHIPMENTS_MAX_PAGE`); larger values are silently clamped. |
+| `status_filter` | `Option<ShipmentStatus>` | When `Some(status)`, only IDs of shipments in that status are returned (`Active`, `Completed`, or `Cancelled`). `None` returns IDs across all statuses. |
+
+Return value — a tuple `(ids, next_cursor)`:
+- `ids` — the shipment IDs for this page (up to `limit`).
+- `next_cursor` — `Some(index)` when more results exist; pass this value as `cursor` in the next call to fetch the following page. `None` means the last page has been reached.
+
+Pagination example — walk all active shipments in pages of 10:
+
+```bash
+# First page
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  -- list_shipments \
+  --cursor null \
+  --limit 10 \
+  --status_filter '{"Active": null}'
+
+# If next_cursor = 10, fetch the next page
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  -- list_shipments \
+  --cursor 10 \
+  --limit 10 \
+  --status_filter '{"Active": null}'
+```
+
+`get_shipments_by_supplier(supplier) → Vec<String>` (read-only)
+
+Returns all shipment IDs where `supplier` is the registered supplier. The list is maintained automatically as shipments are created — callers receive every shipment the address has ever participated in as a supplier, regardless of status.
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  -- get_shipments_by_supplier \
+  --supplier <SUPPLIER_ADDRESS>
+```
+
+`get_shipments_by_buyer(buyer) → Vec<String>` (read-only)
+
+Returns all shipment IDs where `buyer` is the registered buyer. Equivalent to `get_shipments_by_supplier` but scoped to the buyer role.
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  -- get_shipments_by_buyer \
+  --buyer <BUYER_ADDRESS>
+```
+
+`get_shipment_count(address) → u32` (read-only)
+
+Returns the total number of distinct shipments associated with `address` in either the buyer or supplier role. If the address holds both roles on the same shipment (buyer and supplier are the same address), that shipment is counted only once — duplicates are deduplicated before the count is returned.
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  -- get_shipment_count \
+  --address <ADDRESS>
+```
+
+---
+
 Milestone Deadline Extensions
 Suppliers can ask for more ledger time on an active shipment milestone,
 and buyers decide whether to accept that new deadline. The flow is
@@ -1032,40 +1109,25 @@ ChainSettle supports an active pool of trusted arbiters, allowing for automatic 
 `get_arbiter_pool() → Vec<Address>` (read-only): Returns the current list of active arbiters in the pool.
 When creating a shipment, a buyer must specify an arbiter. By querying `get_arbiter_pool()`, a frontend or backend service can automatically select an arbiter using a round-robin assignment strategy. This ensures that disputes are evenly distributed among all trusted arbiters in the pool rather than overloading a single resolver.
 
-### Arbiter Rotation & Recusal
+Arbiter Rotation
+When both the buyer and supplier lose confidence in the assigned arbiter, they can agree to replace them using `propose_arbiter_rotation()`. Unlike `recuse_arbiter()` (which is an arbiter-initiated voluntary step-down), rotation is initiated and controlled entirely by the two trading parties.
 
-ChainSettle provides two distinct paths for replacing a shipment's assigned arbiter mid-flight: **mutual rotation** (buyer + supplier both agree on a specific replacement) and **self-recusal** (the current arbiter voluntarily steps down and is automatically replaced from the pool).
+`propose_arbiter_rotation(caller, shipment_id, new_arbiter)`
 
-#### `propose_arbiter_rotation(caller, shipment_id, new_arbiter)`
+Either the buyer or supplier calls this to nominate a replacement arbiter. The proposal is stored in temporary storage keyed to the shipment.
 
-Buyer or supplier proposes to replace the current arbiter with a specific `new_arbiter` address. The rotation only takes effect once **both** the buyer and the supplier have proposed the same replacement address — neither party can change the arbiter unilaterally.
+Mutual-consent model — both parties must agree on the **same** address:
+- The first caller records their agreement (`buyer_agreed` or `supplier_agreed`) and emits `arbiter_rotation_proposed`.
+- The second party calls `propose_arbiter_rotation` with the **same** `new_arbiter` address, which sets their flag and triggers automatic execution in that same transaction.
+- If either party calls the function with a **different** `new_arbiter` than the one currently stored, the pending proposal is reset and both agreement flags are cleared — changing the nominated address effectively restarts the consent process from scratch.
 
-**Who may call:** The shipment's registered buyer or supplier. Logistics, the current arbiter, and unrelated addresses are rejected with `"unauthorized"`.
-
-**Preconditions:**
-- The shipment must be `Active`.
-- The contract must not be paused.
-
-**Proposal mechanics (mutual-consent model):**
-
-The proposal state is stored in temporary storage keyed to the shipment. Each call records the caller's agreement to the given `new_arbiter`:
-
-1. If no proposal exists yet, a new one is created with only the caller's agreement flag set.
-2. If a proposal already exists for the **same** `new_arbiter`, the caller's agreement flag is set on the existing proposal.
-3. If the existing proposal names a **different** arbiter, it is discarded entirely and a fresh proposal is created with only the caller's agreement flag set — changing the proposed arbiter resets consent from scratch.
-
-The `arbiter_rotation_proposed` event is emitted on every call regardless of whether the rotation has completed.
-
-**Execution:** When both `buyer_agreed` and `supplier_agreed` are `true` for the same `new_arbiter` in the same call, the rotation executes automatically:
-- `shipment.arbiter` is updated to `new_arbiter`.
-- The pending proposal is removed from temporary storage.
-- An `arbiter_rotated` event is emitted.
-- An admin audit entry is appended with action `"arbiter_rotated"`.
-
-There is no separate approval function — the second matching `propose_arbiter_rotation` call **is** the approval.
+When both `buyer_agreed` and `supplier_agreed` are `true`:
+1. The shipment's `arbiter` field is updated to the new address immediately.
+2. The temporary proposal is removed from storage.
+3. An `arbiter_rotated` event is emitted and the change is recorded in the admin audit trail.
 
 ```bash
-# Step 1 — buyer proposes a new arbiter
+# Buyer proposes a new arbiter
 stellar contract invoke \
   --id <CONTRACT_ID> \
   --source buyer-account \
@@ -1075,7 +1137,7 @@ stellar contract invoke \
   --shipment_id "SHIP-001" \
   --new_arbiter <NEW_ARBITER_ADDRESS>
 
-# Step 2 — supplier agrees to the same new arbiter → rotation executes immediately
+# Supplier agrees with the same address — rotation executes immediately
 stellar contract invoke \
   --id <CONTRACT_ID> \
   --source supplier-account \
@@ -1086,43 +1148,17 @@ stellar contract invoke \
   --new_arbiter <NEW_ARBITER_ADDRESS>
 ```
 
-#### `recuse_arbiter(arbiter, shipment_id)`
+How it differs from `recuse_arbiter()`:
 
-The current arbiter voluntarily steps down from a shipment. The contract immediately and automatically reassigns a replacement from the active arbiter pool using round-robin selection — no buyer or supplier involvement is required.
-
-**Who may call:** Only the shipment's currently assigned arbiter. Any other caller panics with `"only the current arbiter can recuse"`.
-
-**Preconditions:**
-- The shipment must be `Active`.
-- The contract must not be paused.
-- The arbiter pool must contain at least one address other than the recusing arbiter, otherwise the call panics with `"no available arbiter for reassignment"`.
-
-**Behavior:**
-1. The contract walks the pool starting at its current round-robin index, skipping the recusing arbiter's own address.
-2. The first eligible candidate becomes the new arbiter and `shipment.arbiter` is updated immediately.
-3. The pool index advances so the next recusal or auto-assignment starts from after the chosen candidate.
-4. An `arbiter_recused` event is emitted with `(old_arbiter, new_arbiter)`.
-
-```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  --source arbiter-account \
-  --network testnet \
-  -- recuse_arbiter \
-  --arbiter <ARBITER_ADDRESS> \
-  --shipment_id "SHIP-001"
-```
-
-#### How rotation differs from recusal
-
-| | `propose_arbiter_rotation` | `recuse_arbiter` |
+| | `propose_arbiter_rotation()` | `recuse_arbiter()` |
 |---|---|---|
-| **Initiator** | Buyer or supplier | Current arbiter |
-| **Replacement** | Caller-specified address | Auto-selected from arbiter pool |
-| **Consent required** | Both buyer **and** supplier must agree | None — arbiter acts alone |
-| **Pool dependency** | No (any address may be proposed) | Yes — pool must have another eligible arbiter |
-| **Storage used** | Temporary (cleared on execution) | None (immediate state change) |
-| **Typical use case** | Parties want a specific trusted arbiter | Arbiter has a conflict of interest or cannot serve |
+| Who initiates | Buyer **and** supplier (must both agree) | Current arbiter only |
+| Trigger | Parties lose confidence in the arbiter | Arbiter voluntarily steps down |
+| New arbiter | Explicitly nominated by the parties | Auto-assigned from the arbiter pool (round-robin) |
+| Requires pool | No | Yes — panics with `"no available arbiter"` if pool is empty |
+| Authorization | Buyer or supplier signature | Arbiter's own signature |
+
+Both functions require the shipment to be `Active` and are blocked by the emergency pause.
 
 Supplier Payout Batching
 By default, every milestone payment (confirmation, dispute resolution,
