@@ -547,6 +547,7 @@ pub struct UpgradeProposal {
 
 /// #402 – Pending emergency freeze/unfreeze proposal gated by a supermajority
 /// of `MultiAdminConfig.admins` (stricter than the standard action threshold).
+/// of `MultiAdminConfig.admins` (stricter than the standard action threshold).
 #[contracttype]
 #[derive(Clone)]
 pub struct EmergencyFreezeProposal {
