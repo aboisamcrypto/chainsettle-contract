@@ -587,6 +587,83 @@ dispute-resolution payouts (`resolve_dispute`) move funds without decrementing
 it. Indexers should treat the aggregate as an approximation of locked supply and
 reconcile against per-shipment balances when exact accounting is required.
 
+Shipment Listing & Queries
+These read-only functions let callers enumerate shipments stored on the contract. No authorization is required.
+
+`list_shipments(cursor, limit, status_filter) → (Vec<String>, Option<u32>)` (read-only)
+
+Returns a page of shipment IDs, with cursor-based pagination so callers can walk the full list incrementally without loading everything at once.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `cursor` | `Option<u32>` | Index to start reading from. Pass `None` (or `0`) to begin at the first shipment. |
+| `limit` | `u32` | Maximum number of IDs to return per page. Capped at `50` (`LIST_SHIPMENTS_MAX_PAGE`); larger values are silently clamped. |
+| `status_filter` | `Option<ShipmentStatus>` | When `Some(status)`, only IDs of shipments in that status are returned (`Active`, `Completed`, or `Cancelled`). `None` returns IDs across all statuses. |
+
+Return value — a tuple `(ids, next_cursor)`:
+- `ids` — the shipment IDs for this page (up to `limit`).
+- `next_cursor` — `Some(index)` when more results exist; pass this value as `cursor` in the next call to fetch the following page. `None` means the last page has been reached.
+
+Pagination example — walk all active shipments in pages of 10:
+
+```bash
+# First page
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  -- list_shipments \
+  --cursor null \
+  --limit 10 \
+  --status_filter '{"Active": null}'
+
+# If next_cursor = 10, fetch the next page
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  -- list_shipments \
+  --cursor 10 \
+  --limit 10 \
+  --status_filter '{"Active": null}'
+```
+
+`get_shipments_by_supplier(supplier) → Vec<String>` (read-only)
+
+Returns all shipment IDs where `supplier` is the registered supplier. The list is maintained automatically as shipments are created — callers receive every shipment the address has ever participated in as a supplier, regardless of status.
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  -- get_shipments_by_supplier \
+  --supplier <SUPPLIER_ADDRESS>
+```
+
+`get_shipments_by_buyer(buyer) → Vec<String>` (read-only)
+
+Returns all shipment IDs where `buyer` is the registered buyer. Equivalent to `get_shipments_by_supplier` but scoped to the buyer role.
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  -- get_shipments_by_buyer \
+  --buyer <BUYER_ADDRESS>
+```
+
+`get_shipment_count(address) → u32` (read-only)
+
+Returns the total number of distinct shipments associated with `address` in either the buyer or supplier role. If the address holds both roles on the same shipment (buyer and supplier are the same address), that shipment is counted only once — duplicates are deduplicated before the count is returned.
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --network testnet \
+  -- get_shipment_count \
+  --address <ADDRESS>
+```
+
+---
+
 Milestone Deadline Extensions
 Suppliers can ask for more ledger time on an active shipment milestone,
 and buyers decide whether to accept that new deadline. The flow is
