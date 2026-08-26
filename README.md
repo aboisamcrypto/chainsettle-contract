@@ -1031,6 +1031,58 @@ ChainSettle supports an active pool of trusted arbiters, allowing for automatic 
 `remove_arbiter_from_pool(admin, arbiter: Address)`: Admin-only. Removes an arbiter from the active pool.
 `get_arbiter_pool() → Vec<Address>` (read-only): Returns the current list of active arbiters in the pool.
 When creating a shipment, a buyer must specify an arbiter. By querying `get_arbiter_pool()`, a frontend or backend service can automatically select an arbiter using a round-robin assignment strategy. This ensures that disputes are evenly distributed among all trusted arbiters in the pool rather than overloading a single resolver.
+
+Arbiter Rotation
+When both the buyer and supplier lose confidence in the assigned arbiter, they can agree to replace them using `propose_arbiter_rotation()`. Unlike `recuse_arbiter()` (which is an arbiter-initiated voluntary step-down), rotation is initiated and controlled entirely by the two trading parties.
+
+`propose_arbiter_rotation(caller, shipment_id, new_arbiter)`
+
+Either the buyer or supplier calls this to nominate a replacement arbiter. The proposal is stored in temporary storage keyed to the shipment.
+
+Mutual-consent model — both parties must agree on the **same** address:
+- The first caller records their agreement (`buyer_agreed` or `supplier_agreed`) and emits `arbiter_rotation_proposed`.
+- The second party calls `propose_arbiter_rotation` with the **same** `new_arbiter` address, which sets their flag and triggers automatic execution in that same transaction.
+- If either party calls the function with a **different** `new_arbiter` than the one currently stored, the pending proposal is reset and both agreement flags are cleared — changing the nominated address effectively restarts the consent process from scratch.
+
+When both `buyer_agreed` and `supplier_agreed` are `true`:
+1. The shipment's `arbiter` field is updated to the new address immediately.
+2. The temporary proposal is removed from storage.
+3. An `arbiter_rotated` event is emitted and the change is recorded in the admin audit trail.
+
+```bash
+# Buyer proposes a new arbiter
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source buyer-account \
+  --network testnet \
+  -- propose_arbiter_rotation \
+  --caller <BUYER_ADDRESS> \
+  --shipment_id "SHIP-001" \
+  --new_arbiter <NEW_ARBITER_ADDRESS>
+
+# Supplier agrees with the same address — rotation executes immediately
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source supplier-account \
+  --network testnet \
+  -- propose_arbiter_rotation \
+  --caller <SUPPLIER_ADDRESS> \
+  --shipment_id "SHIP-001" \
+  --new_arbiter <NEW_ARBITER_ADDRESS>
+```
+
+How it differs from `recuse_arbiter()`:
+
+| | `propose_arbiter_rotation()` | `recuse_arbiter()` |
+|---|---|---|
+| Who initiates | Buyer **and** supplier (must both agree) | Current arbiter only |
+| Trigger | Parties lose confidence in the arbiter | Arbiter voluntarily steps down |
+| New arbiter | Explicitly nominated by the parties | Auto-assigned from the arbiter pool (round-robin) |
+| Requires pool | No | Yes — panics with `"no available arbiter"` if pool is empty |
+| Authorization | Buyer or supplier signature | Arbiter's own signature |
+
+Both functions require the shipment to be `Active` and are blocked by the emergency pause.
+
 Supplier Payout Batching
 By default, every milestone payment (confirmation, dispute resolution,
 advance approval) transfers tokens to the supplier immediately in the same
