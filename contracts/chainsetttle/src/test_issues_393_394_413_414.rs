@@ -106,3 +106,61 @@ fn test_finality_delay_buyer_can_still_appeal_before_finalize() {
     assert_eq!(milestone.status, MilestoneStatus::Disputed);
     assert_eq!(shipment.released_amount, 0);
 }
+
+// ============================================================
+// #414 — Blacklist appeal
+// ============================================================
+
+#[test]
+fn test_blacklist_appeal_approved_removes_blacklist() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let target = Address::generate(&t.env);
+
+    client.blacklist_address(&t.buyer, &target, &soroban_sdk::BytesN::from_array(&t.env, &[1u8; 32]));
+    assert!(client.is_blacklisted(&target));
+
+    client.appeal_blacklist(&target, &String::from_str(&t.env, "ipfs://evidence"));
+    let appeal = client.get_blacklist_appeal(&target).unwrap();
+    assert_eq!(appeal.status, BlacklistAppealStatus::Pending);
+
+    client.review_blacklist_appeal(&t.buyer, &target, &true);
+    assert!(!client.is_blacklisted(&target));
+    let appeal = client.get_blacklist_appeal(&target).unwrap();
+    assert_eq!(appeal.status, BlacklistAppealStatus::Approved);
+}
+
+#[test]
+fn test_blacklist_appeal_rejected_keeps_blacklist() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let target = Address::generate(&t.env);
+
+    client.blacklist_address(&t.buyer, &target, &soroban_sdk::BytesN::from_array(&t.env, &[1u8; 32]));
+    client.appeal_blacklist(&target, &String::from_str(&t.env, "ipfs://evidence"));
+    client.review_blacklist_appeal(&t.buyer, &target, &false);
+
+    assert!(client.is_blacklisted(&target));
+    let appeal = client.get_blacklist_appeal(&target).unwrap();
+    assert_eq!(appeal.status, BlacklistAppealStatus::Rejected);
+}
+
+#[test]
+#[should_panic(expected = "address is not blacklisted")]
+fn test_blacklist_appeal_requires_blacklisted_address() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let target = Address::generate(&t.env);
+    client.appeal_blacklist(&target, &String::from_str(&t.env, "ipfs://evidence"));
+}
+
+#[test]
+#[should_panic(expected = "an appeal is already pending")]
+fn test_blacklist_appeal_only_one_pending() {
+    let t = setup();
+    let client = ChainSettleContractClient::new(&t.env, &t.contract_id);
+    let target = Address::generate(&t.env);
+    client.blacklist_address(&t.buyer, &target, &soroban_sdk::BytesN::from_array(&t.env, &[1u8; 32]));
+    client.appeal_blacklist(&target, &String::from_str(&t.env, "ipfs://evidence"));
+    client.appeal_blacklist(&target, &String::from_str(&t.env, "ipfs://evidence2"));
+}

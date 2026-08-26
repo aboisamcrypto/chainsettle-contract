@@ -662,6 +662,29 @@ pub struct DisputeEvidence {
 }
 
 // ============================================================
+// #414 — SUPPLIER BLACKLIST APPEAL
+// ============================================================
+
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum BlacklistAppealStatus {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+/// An appeal filed by a blacklisted address contesting its blacklisting.
+#[contracttype]
+#[derive(Clone)]
+pub struct BlacklistAppeal {
+    /// IPFS CID or other off-chain evidence pointer supporting the appeal.
+    pub evidence_hash: String,
+    pub status: BlacklistAppealStatus,
+    /// Ledger sequence at which the appeal was filed.
+    pub filed_ledger: u32,
+}
+
+// ============================================================
 // STORAGE KEYS
 // ============================================================
 
@@ -1058,6 +1081,11 @@ pub enum DataKeyExt2 {
     /// the supplier before funds actually move, giving the buyer a brief
     /// window to catch an arbiter error (0 = disabled, funds release immediately).
     ResolutionFinalityDelayLedgers,
+
+    // ── #414 Supplier blacklist appeal ────────────────────────────────────
+    /// Pending or decided appeal filed by a blacklisted address against
+    /// its blacklisting, keyed by the appellant's address.
+    BlacklistAppeal(Address),
 }
 
 /// Partial joint-confirmation progress for a high-value shipment's milestone (#367).
@@ -2502,6 +2530,91 @@ impl ChainSettleContract {
             .instance()
             .get::<DataKey, soroban_sdk::BytesN<32>>(&DataKey::Blacklisted(address))
             .is_some()
+    }
+
+    // ----------------------------------------------------------
+    // #414: BLACKLIST APPEAL
+    // ----------------------------------------------------------
+
+    /// Callable only by a currently blacklisted address. Records a pending
+    /// appeal for admin review. Only one open appeal is allowed at a time.
+    pub fn appeal_blacklist(env: Env, address: Address, evidence_hash: String) {
+        address.require_auth();
+        if !Self::is_blacklisted(env.clone(), address.clone()) {
+            panic!("address is not blacklisted");
+        }
+        let key = DataKeyExt2::BlacklistAppeal(address.clone());
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<DataKeyExt2, BlacklistAppeal>(&key)
+        {
+            if existing.status == BlacklistAppealStatus::Pending {
+                panic!("an appeal is already pending for this address");
+            }
+        }
+        let appeal = BlacklistAppeal {
+            evidence_hash,
+            status: BlacklistAppealStatus::Pending,
+            filed_ledger: env.ledger().sequence(),
+        };
+        env.storage().persistent().set(&key, &appeal);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+        env.events().publish(
+            (Symbol::new(&env, "blacklist_appeal_filed"), address),
+            appeal.filed_ledger,
+        );
+    }
+
+    /// Read the current appeal (if any) filed by `address`. Read-only.
+    pub fn get_blacklist_appeal(env: Env, address: Address) -> Option<BlacklistAppeal> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::BlacklistAppeal(address))
+    }
+
+    /// Admin reviews a pending appeal. When `approve` is true the address is
+    /// removed from the blacklist; either way the appeal is marked decided.
+    pub fn review_blacklist_appeal(env: Env, admin: Address, address: Address, approve: bool) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+
+        let key = DataKeyExt2::BlacklistAppeal(address.clone());
+        let mut appeal: BlacklistAppeal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("no appeal found for this address"));
+        if appeal.status != BlacklistAppealStatus::Pending {
+            panic!("appeal has already been decided");
+        }
+
+        appeal.status = if approve {
+            BlacklistAppealStatus::Approved
+        } else {
+            BlacklistAppealStatus::Rejected
+        };
+        env.storage().persistent().set(&key, &appeal);
+
+        if approve {
+            env.storage()
+                .instance()
+                .remove(&DataKey::Blacklisted(address.clone()));
+        }
+
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "review_blacklist_appeal"),
+            Symbol::new(&env, "blacklist_appeal_reviewed"),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "blacklist_appeal_reviewed"), address),
+            approve,
+        );
     }
 
     // ----------------------------------------------------------
