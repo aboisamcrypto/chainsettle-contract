@@ -76,6 +76,10 @@ pub enum MilestoneStatus {
     Resolved,
     /// Confirmed but payment held until release_after_ledger
     ConfirmedHeld,
+    /// #393: Dispute resolved in the supplier's favor but funds are held
+    /// until release_after_ledger so the buyer has a brief re-review window
+    /// to catch an arbiter error before finalize_dispute_resolution pays out.
+    ResolvedPendingFinality,
 }
 
 /// Controls whether milestones must be completed in order (Sequential)
@@ -294,6 +298,15 @@ pub struct FeeConfig {
 pub struct FeeRecipient {
     pub recipient: Address,
     pub share_bps: u32,
+}
+
+/// #413 – Time-boxed, contract-wide promotional window during which the
+/// protocol fee is waived for all shipments completed within [start_ledger, end_ledger].
+#[contracttype]
+#[derive(Clone)]
+pub struct FeeHoliday {
+    pub start_ledger: u32,
+    pub end_ledger: u32,
 }
 
 /// Buyer reliability tracking for supplier decision-making.
@@ -702,6 +715,29 @@ pub struct DisputeEvidence {
     pub evidence_type: Symbol,
     /// Ledger sequence at submission time.
     pub submitted_ledger: u32,
+}
+
+// ============================================================
+// #414 — SUPPLIER BLACKLIST APPEAL
+// ============================================================
+
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum BlacklistAppealStatus {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+/// An appeal filed by a blacklisted address contesting its blacklisting.
+#[contracttype]
+#[derive(Clone)]
+pub struct BlacklistAppeal {
+    /// IPFS CID or other off-chain evidence pointer supporting the appeal.
+    pub evidence_hash: String,
+    pub status: BlacklistAppealStatus,
+    /// Ledger sequence at which the appeal was filed.
+    pub filed_ledger: u32,
 }
 
 // ============================================================
@@ -2045,6 +2081,36 @@ impl ChainSettleContract {
     }
 
     // ----------------------------------------------------------
+    // ADMIN: RESOLUTION FINALITY DELAY (#393)
+    // ----------------------------------------------------------
+
+    /// Set the ledger delay after `resolve_dispute` rules for the supplier
+    /// before funds actually move (0 = disabled, funds release immediately).
+    pub fn set_finality_delay_ledgers(env: Env, admin: Address, ledgers: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::ResolutionFinalityDelayLedgers, &ledgers);
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "set_finality_delay_ledgers"),
+            Symbol::new(&env, "resolution_finality_delay_ledgers_set"),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "resolution_finality_delay_ledgers_set"),),
+            ledgers,
+        );
+    }
+
+    pub fn get_finality_delay_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt2::ResolutionFinalityDelayLedgers)
+            .unwrap_or(0)
+    }
+
+    // ----------------------------------------------------------
     // ADMIN: MAX SHIPMENT VALUE
     // ----------------------------------------------------------
 
@@ -2299,6 +2365,50 @@ impl ChainSettleContract {
         env.storage()
             .instance()
             .set(&DataKey::FeeConfig, &FeeConfig { fee_bps, treasury });
+    }
+
+    /// #413: Schedule a time-boxed, contract-wide fee holiday. Admin only.
+    /// While `start_ledger <= env.ledger().sequence() <= end_ledger`, the protocol
+    /// fee is waived (deduct_fee* return the full gross amount) for all shipments.
+    pub fn schedule_fee_holiday(env: Env, admin: Address, start_ledger: u32, end_ledger: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        if end_ledger < start_ledger {
+            panic!("end_ledger must be >= start_ledger");
+        }
+        env.storage().instance().set(
+            &DataKeyExt2::FeeHoliday,
+            &FeeHoliday {
+                start_ledger,
+                end_ledger,
+            },
+        );
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "schedule_fee_holiday"),
+            Symbol::new(&env, "fee_holiday_scheduled"),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "fee_holiday_scheduled"),),
+            (start_ledger, end_ledger),
+        );
+    }
+
+    /// #413: Cancel any scheduled/active fee holiday. Admin only.
+    pub fn cancel_fee_holiday(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage().instance().remove(&DataKeyExt2::FeeHoliday);
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "cancel_fee_holiday"),
+            Symbol::new(&env, "fee_holiday_cancelled"),
+        );
+    }
+
+    /// #413: Whether a fee holiday is currently active. Read-only.
+    pub fn is_fee_holiday_active(env: Env) -> bool {
+        Self::fee_holiday_active(&env)
     }
 
     /// Set multiple fee recipients with basis-point shares. Admin only.
@@ -2687,6 +2797,91 @@ impl ChainSettleContract {
             .instance()
             .get::<DataKey, soroban_sdk::BytesN<32>>(&DataKey::Blacklisted(address))
             .is_some()
+    }
+
+    // ----------------------------------------------------------
+    // #414: BLACKLIST APPEAL
+    // ----------------------------------------------------------
+
+    /// Callable only by a currently blacklisted address. Records a pending
+    /// appeal for admin review. Only one open appeal is allowed at a time.
+    pub fn appeal_blacklist(env: Env, address: Address, evidence_hash: String) {
+        address.require_auth();
+        if !Self::is_blacklisted(env.clone(), address.clone()) {
+            panic!("address is not blacklisted");
+        }
+        let key = DataKeyExt2::BlacklistAppeal(address.clone());
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<DataKeyExt2, BlacklistAppeal>(&key)
+        {
+            if existing.status == BlacklistAppealStatus::Pending {
+                panic!("an appeal is already pending for this address");
+            }
+        }
+        let appeal = BlacklistAppeal {
+            evidence_hash,
+            status: BlacklistAppealStatus::Pending,
+            filed_ledger: env.ledger().sequence(),
+        };
+        env.storage().persistent().set(&key, &appeal);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+        env.events().publish(
+            (Symbol::new(&env, "blacklist_appeal_filed"), address),
+            appeal.filed_ledger,
+        );
+    }
+
+    /// Read the current appeal (if any) filed by `address`. Read-only.
+    pub fn get_blacklist_appeal(env: Env, address: Address) -> Option<BlacklistAppeal> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::BlacklistAppeal(address))
+    }
+
+    /// Admin reviews a pending appeal. When `approve` is true the address is
+    /// removed from the blacklist; either way the appeal is marked decided.
+    pub fn review_blacklist_appeal(env: Env, admin: Address, address: Address, approve: bool) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+
+        let key = DataKeyExt2::BlacklistAppeal(address.clone());
+        let mut appeal: BlacklistAppeal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("no appeal found for this address"));
+        if appeal.status != BlacklistAppealStatus::Pending {
+            panic!("appeal has already been decided");
+        }
+
+        appeal.status = if approve {
+            BlacklistAppealStatus::Approved
+        } else {
+            BlacklistAppealStatus::Rejected
+        };
+        env.storage().persistent().set(&key, &appeal);
+
+        if approve {
+            env.storage()
+                .instance()
+                .remove(&DataKey::Blacklisted(address.clone()));
+        }
+
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "review_blacklist_appeal"),
+            Symbol::new(&env, "blacklist_appeal_reviewed"),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "blacklist_appeal_reviewed"), address),
+            approve,
+        );
     }
 
     // ----------------------------------------------------------
@@ -6255,7 +6450,20 @@ impl ChainSettleContract {
 
         let token_client = token::Client::new(&env, &shipment.token);
 
-        if approve {
+        // #393: When an admin-configured finality delay is active, a supplier-favor
+        // ruling does not move funds immediately. Instead the milestone is parked in
+        // ResolvedPendingFinality for the delay window, giving the buyer a brief
+        // re-review chance (e.g. via appeal_dispute) before finalize_dispute_resolution
+        // can be called to actually release the payment.
+        let finality_delay: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::ResolutionFinalityDelayLedgers)
+            .unwrap_or(0);
+        if approve && finality_delay > 0 {
+            milestone.status = MilestoneStatus::ResolvedPendingFinality;
+            milestone.release_after_ledger = env.ledger().sequence() + finality_delay;
+        } else if approve {
             // Deduct any approved advance (only relevant for full disputes; partial disputes
             // block advance approval at raise time).
             let advance_deducted = Self::consume_advance_for_milestone(
@@ -6573,6 +6781,132 @@ impl ChainSettleContract {
                 approve,
             );
         }
+    }
+
+    // ----------------------------------------------------------
+    // RESOLUTION FINALITY DELAY (#393)
+    // ----------------------------------------------------------
+
+    /// Anyone may call once the finality delay set by `resolve_dispute` has
+    /// elapsed, to actually pay out a dispute that was ruled in the supplier's
+    /// favor. Mirrors the fund-movement portion of `resolve_dispute`'s approve
+    /// branch. If the buyer catches an arbiter error during the delay window,
+    /// they should call `appeal_dispute` before this is called — a milestone
+    /// reopened as Disputed by an appeal is no longer ResolvedPendingFinality
+    /// and this call will simply fail with "milestone is not pending finality".
+    pub fn finalize_dispute_resolution(env: Env, shipment_id: String, milestone_index: u32) {
+        Self::assert_not_paused(&env);
+
+        let mut shipment = Self::get_shipment_internal(&env, &shipment_id);
+        if shipment.status != ShipmentStatus::Active {
+            panic!("shipment is not active");
+        }
+
+        let mut milestone = shipment.milestones.get(milestone_index).unwrap();
+        if milestone.status != MilestoneStatus::ResolvedPendingFinality {
+            panic!("milestone is not pending finality");
+        }
+        if env.ledger().sequence() < milestone.release_after_ledger {
+            panic!("finality delay has not yet elapsed");
+        }
+
+        let payment = Self::milestone_gross_payment(&env, &shipment, milestone_index);
+        let token_client = token::Client::new(&env, &shipment.token);
+
+        let advance_deducted = Self::consume_advance_for_milestone(
+            &env,
+            &mut shipment,
+            &shipment_id,
+            milestone_index,
+        );
+
+        let mut fee_amount: i128 = 0;
+        let net_payment = Self::deduct_fee(&env, payment, &shipment.token, &mut fee_amount);
+
+        Self::check_circuit_breaker(&env, payment);
+        Self::check_address_outflow(&env, &shipment.supplier, payment);
+
+        let fee_bps = Self::applicable_arbiter_fee_bps(&env, payment, shipment.arbiter_fee_bps);
+        let arbiter_fee = (payment * fee_bps as i128) / 10_000;
+        if arbiter_fee > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &shipment.arbiter,
+                &arbiter_fee,
+            );
+        }
+
+        shipment.released_amount += payment;
+
+        let actual_transfer = (net_payment - advance_deducted - arbiter_fee).max(0);
+        if actual_transfer > 0 {
+            Self::pay_milestone_to_payees(
+                &env,
+                &shipment_id,
+                milestone_index,
+                actual_transfer,
+                &shipment.supplier,
+                &token_client,
+            );
+        }
+
+        if shipment.dispute_bond_amount > 0 {
+            let primary_buyer = shipment.buyers.get(0).unwrap();
+            token_client.transfer(
+                &env.current_contract_address(),
+                &primary_buyer,
+                &shipment.dispute_bond_amount,
+            );
+        }
+
+        milestone.status = MilestoneStatus::Resolved;
+        milestone.release_after_ledger = 0;
+        shipment.milestones.set(milestone_index, milestone);
+
+        if Self::all_milestones_done(&shipment) {
+            shipment.status = ShipmentStatus::Completed;
+            let mut stats: ContractStats = env
+                .storage()
+                .instance()
+                .get(&DataKey::ContractStats)
+                .unwrap_or(ContractStats {
+                    total_shipments: 0,
+                    total_volume: 0,
+                    total_disputes: 0,
+                    completed_shipments: 0,
+                });
+            stats.completed_shipments += 1;
+            env.storage()
+                .instance()
+                .set(&DataKey::ContractStats, &stats);
+            Self::increment_reputation_internal(&env, &shipment.supplier, 1, 0, 0);
+            Self::move_shipment_status_index(
+                &env,
+                ShipmentStatus::Active,
+                ShipmentStatus::Completed,
+                &shipment_id,
+            );
+            Self::emit_shipment_completed(&env, &shipment_id, shipment.released_amount);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Shipment(shipment_id.clone()), &shipment);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "dispute_resolution_finalized"),
+                shipment_id.clone(),
+            ),
+            (milestone_index, payment, fee_amount),
+        );
+        Self::emit_dispute_resolved(
+            &env,
+            &shipment_id,
+            milestone_index,
+            Symbol::new(&env, "supplier"),
+            &shipment.arbiter,
+        );
     }
 
     // ----------------------------------------------------------
@@ -9824,6 +10158,65 @@ impl ChainSettleContract {
     }
 
     // ----------------------------------------------------------
+    // #394: SHIPMENT-LEVEL CUSTOM METADATA KEY-VALUE STORE
+    // ----------------------------------------------------------
+
+    /// Buyer or supplier attaches/updates a small piece of structured data on
+    /// a shipment (e.g. a PO number, cost center, or internal reference code)
+    /// beyond the single IPFS metadata hash captured at creation.
+    pub fn set_shipment_metadata(env: Env, caller: Address, shipment_id: String, key: Symbol, value: String) {
+        Self::assert_not_paused(&env);
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+        Self::assert_buyer_or_supplier(&shipment, &caller);
+        caller.require_auth();
+
+        let meta_key = DataKeyExt2::ShipmentMetadata(shipment_id.clone(), key.clone());
+        let is_new = !env.storage().persistent().has(&meta_key);
+        env.storage().persistent().set(&meta_key, &value);
+        env.storage().persistent().extend_ttl(
+            &meta_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+
+        if is_new {
+            let keys_index_key = DataKeyExt2::ShipmentMetadataKeys(shipment_id.clone());
+            let mut keys: Vec<Symbol> = env
+                .storage()
+                .persistent()
+                .get(&keys_index_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            keys.push_back(key.clone());
+            env.storage().persistent().set(&keys_index_key, &keys);
+            env.storage().persistent().extend_ttl(
+                &keys_index_key,
+                constants::TTL_INITIAL_LEDGERS,
+                constants::TTL_MAX_LEDGERS,
+            );
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "shipment_metadata_set"), shipment_id),
+            (caller, key, value),
+        );
+    }
+
+    /// Read a single custom metadata value for a shipment. Read-only.
+    pub fn get_shipment_metadata(env: Env, shipment_id: String, key: Symbol) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::ShipmentMetadata(shipment_id, key))
+    }
+
+    /// List all custom metadata keys set on a shipment. Read-only.
+    pub fn get_shipment_metadata_keys(env: Env, shipment_id: String) -> Vec<Symbol> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::ShipmentMetadataKeys(shipment_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    // ----------------------------------------------------------
     // SHIPMENT ARCHIVAL
     // ----------------------------------------------------------
 
@@ -11457,9 +11850,25 @@ impl ChainSettleContract {
         true
     }
 
+    /// #413: True while a scheduled fee holiday covers the current ledger.
+    fn fee_holiday_active(env: &Env) -> bool {
+        if let Some(holiday) = env
+            .storage()
+            .instance()
+            .get::<DataKeyExt2, FeeHoliday>(&DataKeyExt2::FeeHoliday)
+        {
+            let now = env.ledger().sequence();
+            return now >= holiday.start_ledger && now <= holiday.end_ledger;
+        }
+        false
+    }
+
     /// Deducts the platform fee from `gross_payment` and transfers it to the treasury.
     /// Returns the net amount after fee. Updates `fee_out` with the fee taken.
     fn deduct_fee(env: &Env, gross: i128, token: &Address, fee_out: &mut i128) -> i128 {
+        if Self::fee_holiday_active(env) {
+            return gross;
+        }
         if let Some(config) = env
             .storage()
             .instance()
@@ -11539,6 +11948,9 @@ impl ChainSettleContract {
         shipment_id: &String,
         fee_out: &mut i128,
     ) -> i128 {
+        if Self::fee_holiday_active(env) {
+            return gross;
+        }
         let override_bps: Option<u32> = env
             .storage()
             .persistent()
@@ -11635,6 +12047,9 @@ impl ChainSettleContract {
         is_final: bool,
         fee_out: &mut i128,
     ) -> (i128, u32) {
+        if Self::fee_holiday_active(env) {
+            return (gross, 0);
+        }
         let override_bps: Option<u32> = env
             .storage()
             .persistent()
