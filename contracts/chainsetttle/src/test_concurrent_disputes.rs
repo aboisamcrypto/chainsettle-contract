@@ -106,6 +106,7 @@ fn create_and_dispute(
             backup_arbiter: None,
             confirmation_cooldown_ledgers: None,
             arbiter_panel: vec![env],
+            jurisdiction: None,
         },
     );
     let proof = String::from_str(env, "ipfs://concurrent-proof");

@@ -127,6 +127,7 @@ fn default_options(_env: &Env) -> ShipmentOptions {
         backup_arbiter: None,
         confirmation_cooldown_ledgers: None,
         arbiter_panel: vec![_env],
+        jurisdiction: None,
     }
 }
 

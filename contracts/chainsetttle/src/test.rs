@@ -133,6 +133,7 @@ fn default_options(_env: &Env) -> ShipmentOptions {
         backup_arbiter: None,
         confirmation_cooldown_ledgers: None,
         arbiter_panel: vec![_env],
+        jurisdiction: None,
     }
 }
 
@@ -1314,6 +1315,7 @@ fn test_dispute_cooldown_enforced() {
             backup_arbiter: None,
             confirmation_cooldown_ledgers: None,
             arbiter_panel: vec![&t.env],
+            jurisdiction: None,
         },
     );
 
@@ -1397,6 +1399,7 @@ fn test_dispute_cooldown_blocks_early_redispute() {
             backup_arbiter: None,
             confirmation_cooldown_ledgers: None,
             arbiter_panel: vec![&t.env],
+            jurisdiction: None,
         },
     );
 
@@ -1510,6 +1513,7 @@ fn test_cooldown_updated_on_resolve() {
             backup_arbiter: None,
             confirmation_cooldown_ledgers: None,
             arbiter_panel: vec![&t.env],
+            jurisdiction: None,
         },
     );
 
@@ -1915,6 +1919,7 @@ fn test_non_whitelisted_token_rejected() {
             backup_arbiter: None,
             confirmation_cooldown_ledgers: None,
             arbiter_panel: vec![&t.env],
+            jurisdiction: None,
         },
     );
 }
@@ -2055,6 +2060,7 @@ fn test_holdback_happy_path() {
             backup_arbiter: None,
             confirmation_cooldown_ledgers: None,
             arbiter_panel: vec![&t.env],
+            jurisdiction: None,
         },
     );
 
@@ -2160,6 +2166,7 @@ fn test_holdback_early_dispute_cancels_hold() {
             backup_arbiter: None,
             confirmation_cooldown_ledgers: None,
             arbiter_panel: vec![&t.env],
+            jurisdiction: None,
         },
     );
 
@@ -2235,6 +2242,7 @@ fn test_holdback_early_release_rejected() {
             backup_arbiter: None,
             confirmation_cooldown_ledgers: None,
             arbiter_panel: vec![&t.env],
+            jurisdiction: None,
         },
     );
 
@@ -2455,6 +2463,7 @@ fn test_multisig_both_buyers_must_confirm() {
             backup_arbiter: None,
             confirmation_cooldown_ledgers: None,
             arbiter_panel: vec![&t.env],
+            jurisdiction: None,
         },
     );
 
@@ -2549,6 +2558,7 @@ fn test_multisig_minority_veto_dispute() {
             backup_arbiter: None,
             confirmation_cooldown_ledgers: None,
             arbiter_panel: vec![&t.env],
+            jurisdiction: None,
         },
     );
 
@@ -2952,6 +2962,7 @@ fn test_deadline_cancellation_success() {
             backup_arbiter: None,
             confirmation_cooldown_ledgers: None,
             arbiter_panel: vec![&t.env],
+            jurisdiction: None,
         },
     );
 
@@ -3025,6 +3036,7 @@ fn test_deadline_cancellation_too_early() {
             backup_arbiter: None,
             confirmation_cooldown_ledgers: None,
             arbiter_panel: vec![&t.env],
+            jurisdiction: None,
         },
     );
 

@@ -334,6 +334,7 @@ mod contract_prop_tests {
                 backup_arbiter: None,
                 confirmation_cooldown_ledgers: None,
                 arbiter_panel: vec![env],
+                jurisdiction: None,
             },
         );
     }
@@ -640,6 +641,7 @@ mod milestone_percent_fuzz {
                 backup_arbiter: None,
                 confirmation_cooldown_ledgers: None,
                 arbiter_panel: vec![env],
+                jurisdiction: None,
             }
         }
 

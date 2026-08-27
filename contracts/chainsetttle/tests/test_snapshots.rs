@@ -27,6 +27,7 @@ enum SnapshotMilestoneStatus {
     Disputed,
     Resolved,
     ConfirmedHeld,
+    ResolvedPendingFinality,
 }
 
 #[derive(Serialize)]
@@ -127,6 +128,9 @@ impl SnapshotShipment {
                         MilestoneStatus::Disputed => SnapshotMilestoneStatus::Disputed,
                         MilestoneStatus::Resolved => SnapshotMilestoneStatus::Resolved,
                         MilestoneStatus::ConfirmedHeld => SnapshotMilestoneStatus::ConfirmedHeld,
+                        MilestoneStatus::ResolvedPendingFinality => {
+                            SnapshotMilestoneStatus::ResolvedPendingFinality
+                        }
                     },
                     release_after_ledger: milestone.release_after_ledger,
                     proof_submitted_ledger: milestone.proof_submitted_ledger,
