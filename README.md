@@ -1510,6 +1510,9 @@ Event name	Payload	When
 `upgrade_approved`	`(admin, approvals_count)`	Multisig WASM upgrade approved by an admin
 `upgrade_cancelled`	`admin`	Multisig WASM upgrade proposal cancelled
 `upgrade_executed`	`new_wasm_hash`	Multisig WASM upgrade executed after threshold reached
+`arbiter_rotation_proposed`	`(shipment_id)` topic, `new_arbiter` data	Buyer or supplier proposed an arbiter rotation (emitted on every call, even before both parties agree)
+`arbiter_rotated`	`(shipment_id)` topic, `new_arbiter` data	Both parties agreed — arbiter replaced with `new_arbiter`
+`arbiter_recused`	`(shipment_id)` topic, `(old_arbiter, new_arbiter)` data	Arbiter voluntarily stepped down; replacement auto-assigned from pool
 
 Event name Payload When
 `shipment_created` `shipment_id` New shipment created
@@ -1530,6 +1533,9 @@ Event name Payload When
 `upgrade_approved` `(admin, approvals_count)` Multisig WASM upgrade approved by an admin
 `upgrade_cancelled` `admin` Multisig WASM upgrade proposal cancelled
 `upgrade_executed` `new_wasm_hash` Multisig WASM upgrade executed after threshold reached
+`arbiter_rotation_proposed` `(shipment_id)` topic, `new_arbiter` data Buyer or supplier proposed an arbiter rotation (emitted on every call, even before both parties agree)
+`arbiter_rotated` `(shipment_id)` topic, `new_arbiter` data Both parties agreed — arbiter replaced with `new_arbiter`
+`arbiter_recused` `(shipment_id)` topic, `(old_arbiter, new_arbiter)` data Arbiter voluntarily stepped down; replacement auto-assigned from pool
 
 The backend service (`chainsetttle-backend`) listens for these events and
 sends push notifications to the relevant parties.
