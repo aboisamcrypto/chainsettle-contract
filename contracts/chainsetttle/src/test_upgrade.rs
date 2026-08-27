@@ -92,6 +92,7 @@ fn make_shipment(
             backup_arbiter: None,
             confirmation_cooldown_ledgers: None,
             arbiter_panel: vec![env],
+            jurisdiction: None,
         },
     );
 }
