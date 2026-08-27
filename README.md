@@ -504,6 +504,28 @@ Returns the supplier's cumulative `completed`, `disputed`, and `cancelled`
 shipment counters. The call requires no authorization and returns zeroes when
 the supplier has no recorded activity; it does not calculate or persist a
 separate weighted rating.
+`get_shipment_risk(shipment_id) → ShipmentRisk` (read-only)
+Returns a risk snapshot for the shipment based on milestone deadlines and
+dispute history.
+```
+Fields:
+  late_milestones     u32 — milestones past their deadline that are not yet
+                            Confirmed or Resolved
+  disputed_milestones u32 — milestones currently in Disputed or Resolved state
+  total_milestones    u32 — total milestones defined for the shipment
+```
+Inputs that feed the risk score:
+- `shipment_id` — identifies the shipment to evaluate
+- Current ledger sequence — compared against each milestone's stored deadline
+- Milestone status — determines whether a milestone counts as late or disputed
+
+How to interpret the returned value:
+- `late_milestones / total_milestones` indicates schedule risk (higher = more
+  milestones are behind deadline).
+- `disputed_milestones / total_milestones` indicates dispute exposure (higher =
+  a larger share of milestones have been contested or resolved through dispute).
+- A shipment with `late_milestones = 0` and `disputed_milestones = 0` is
+  currently on schedule with no dispute history.
 `get_escrow_balance(shipment_id) → i128` (read-only)
 Returns the amount of USDC still locked in escrow.
 
@@ -1488,6 +1510,9 @@ Event name	Payload	When
 `upgrade_approved`	`(admin, approvals_count)`	Multisig WASM upgrade approved by an admin
 `upgrade_cancelled`	`admin`	Multisig WASM upgrade proposal cancelled
 `upgrade_executed`	`new_wasm_hash`	Multisig WASM upgrade executed after threshold reached
+`arbiter_rotation_proposed`	`(shipment_id)` topic, `new_arbiter` data	Buyer or supplier proposed an arbiter rotation (emitted on every call, even before both parties agree)
+`arbiter_rotated`	`(shipment_id)` topic, `new_arbiter` data	Both parties agreed — arbiter replaced with `new_arbiter`
+`arbiter_recused`	`(shipment_id)` topic, `(old_arbiter, new_arbiter)` data	Arbiter voluntarily stepped down; replacement auto-assigned from pool
 
 Event name Payload When
 `shipment_created` `shipment_id` New shipment created
@@ -1508,6 +1533,9 @@ Event name Payload When
 `upgrade_approved` `(admin, approvals_count)` Multisig WASM upgrade approved by an admin
 `upgrade_cancelled` `admin` Multisig WASM upgrade proposal cancelled
 `upgrade_executed` `new_wasm_hash` Multisig WASM upgrade executed after threshold reached
+`arbiter_rotation_proposed` `(shipment_id)` topic, `new_arbiter` data Buyer or supplier proposed an arbiter rotation (emitted on every call, even before both parties agree)
+`arbiter_rotated` `(shipment_id)` topic, `new_arbiter` data Both parties agreed — arbiter replaced with `new_arbiter`
+`arbiter_recused` `(shipment_id)` topic, `(old_arbiter, new_arbiter)` data Arbiter voluntarily stepped down; replacement auto-assigned from pool
 
 The backend service (`chainsetttle-backend`) listens for these events and
 sends push notifications to the relevant parties.
