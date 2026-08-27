@@ -157,6 +157,7 @@ fn exec(
                 backup_arbiter: None,
                 confirmation_cooldown_ledgers: None,
                 arbiter_panel: vec![env],
+                jurisdiction: None,
             };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 client.create_shipment(

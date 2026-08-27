@@ -388,6 +388,11 @@ pub struct ShipmentOptions {
     /// When non-empty (and len >= 3), panel mode is used instead of single-arbiter mode.
     /// The `arbiter` field is ignored for dispute resolution when panel mode is active.
     pub arbiter_panel: Vec<Address>,
+
+    // ── #385 Jurisdiction/compliance tag ──────────────────────────────────────
+    /// Optional jurisdiction/regulatory category (e.g. "US", "EU_MIFID") for
+    /// off-chain compliance filtering. Immutable after creation. None = untagged.
+    pub jurisdiction: Option<Symbol>,
 }
 
 /// Configuration for time-decayed dispute bonds.
@@ -476,6 +481,34 @@ pub struct ArchivedShipment {
     pub completed_at: u32,
 }
 
+/// #386 – Read-only simulation of exactly how much a milestone confirmation
+/// would pay out, to whom, and after which fees/holdbacks/overrides, without
+/// mutating any state or requiring `confirm_milestone` to actually be called.
+#[contracttype]
+#[derive(Clone)]
+pub struct PayoutPreview {
+    /// Gross payment for this milestone before any deductions.
+    pub gross_amount: i128,
+    /// Approved advance already paid for this milestone, deducted from the transfer.
+    pub advance_deducted: i128,
+    /// Late-delivery penalty deducted (returned to buyer), 0 if not overdue.
+    pub late_penalty_deducted: i128,
+    /// Platform fee taken by the treasury (after any VIP waiver is applied).
+    pub platform_fee: i128,
+    /// Effective fee basis points applied to compute `platform_fee`.
+    pub applied_fee_bps: u32,
+    /// Logistics provider fee, if `logistics_fee_bps` is set.
+    pub logistics_fee: i128,
+    /// Net amount that would be transferred to the supplier (or split across
+    /// configured milestone payees) after all deductions above.
+    pub supplier_net_amount: i128,
+    /// True if confirming this milestone would hold payment (holdback_ledgers > 0)
+    /// rather than transferring immediately.
+    pub would_be_held: bool,
+    /// True if confirming this milestone would complete the shipment.
+    pub is_final_milestone: bool,
+}
+
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct ArbiterStats {
@@ -555,6 +588,20 @@ pub struct DelegateConfig {
 pub struct UpgradeProposal {
     pub new_wasm_hash: BytesN<32>,
     /// Distinct admin keys (from `MultiAdminConfig.admins`) that have approved so far.
+    pub approvals: Vec<Address>,
+}
+
+/// #388 – Pending VIP partner fee-waiver proposal, gated by the routine
+/// `MultiAdminConfig.threshold` (same bar as `propose_admin_action`).
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub struct FeeWaiverProposal {
+    pub partner: Address,
+    /// Basis points of the platform fee waived (10_000 = full waiver).
+    pub waiver_bps: u32,
+    /// Unix timestamp after which the waiver no longer applies (0 = no expiry).
+    pub expires_at: u64,
+    /// Distinct admin keys that have approved so far.
     pub approvals: Vec<Address>,
 }
 
@@ -1085,27 +1132,27 @@ pub enum DataKeyExt2 {
     /// (10_000 = 1:1). Absent = no route available for that pair.
     ConversionRateBps(Address, Address),
 
-    // ── #393 Milestone proof re-review window after dispute denial ───────
-    /// Admin-configured delay (in ledgers) after `resolve_dispute` rules for
-    /// the supplier before funds actually move, giving the buyer a brief
-    /// window to catch an arbiter error (0 = disabled, funds release immediately).
-    ResolutionFinalityDelayLedgers,
+    // ── #385 Jurisdiction/compliance tag per shipment ─────────────────────
+    /// Optional jurisdiction/regulatory tag set at shipment creation; absent
+    /// = untagged. Immutable after creation.
+    ShipmentJurisdiction(String),
+    /// Index of shipment IDs tagged with a given jurisdiction, for
+    /// off-chain compliance filtering via `get_shipments_by_jurisdiction`.
+    JurisdictionShipments(Symbol),
 
-    // ── #414 Supplier blacklist appeal ────────────────────────────────────
-    /// Pending or decided appeal filed by a blacklisted address against
-    /// its blacklisting, keyed by the appellant's address.
-    BlacklistAppeal(Address),
+    // ── #387 Configurable maximum allowed-token list size ─────────────────
+    /// Admin-configured cap on the number of entries in the allowed-token
+    /// list (0/unset = no cap).
+    MaxAllowedTokens,
 
-    // ── #413 Fee holiday ───────────────────────────────────────────────────
-    /// Admin-configured (start_ledger, end_ledger) window during which the
-    /// protocol fee is waived for all shipments. Absent = no holiday scheduled.
-    FeeHoliday,
-
-    // ── #394 Shipment-level custom metadata key-value store ──────────────
-    /// Buyer/supplier-set custom metadata value for (shipment_id, key).
-    ShipmentMetadata(String, Symbol),
-    /// Index of metadata keys set on a shipment, for listing.
-    ShipmentMetadataKeys(String),
+    // ── #388 VIP partner fee waiver via governance vote ───────────────────
+    /// Monotonic counter for fee-waiver proposal ids.
+    FeeWaiverProposalCounter,
+    /// Pending fee-waiver proposal, by id.
+    FeeWaiverProposal(u64),
+    /// Active fee waiver granted to a partner address: (waiver_bps, expires_at
+    /// unix timestamp; 0 = no expiry).
+    FeeWaiver(Address),
 }
 
 /// Partial joint-confirmation progress for a high-value shipment's milestone (#367).
@@ -1781,6 +1828,162 @@ impl ChainSettleContract {
         env.storage()
             .persistent()
             .get(&DataKeyExt2::EmergencyUnfreezeProposal(proposal_id))
+    }
+
+    // ----------------------------------------------------------
+    // #388 VIP PARTNER FEE WAIVER (GOVERNANCE VOTE)
+    // ----------------------------------------------------------
+    // Grants a full or partial platform-fee waiver to a strategic partner
+    // address, routed through the same multisig admin-action machinery used
+    // elsewhere (#166 upgrade multisig, #402 emergency freeze): any
+    // registered multisig admin may propose, and the routine
+    // `MultiAdminConfig.threshold` of distinct admin approvals executes it.
+    // Requires multisig admin governance to be configured — unlike the
+    // freeze feature there is no single-admin fallback, since a fee waiver
+    // is a standing financial concession rather than a routine pause.
+
+    /// Propose a fee waiver for `partner`. `waiver_bps` is the basis points
+    /// of the platform fee to waive (10_000 = fully waived); `expires_at` is
+    /// a Unix timestamp after which the waiver no longer applies (0 = no
+    /// expiry). The proposer's own approval is recorded immediately.
+    pub fn propose_fee_waiver(
+        env: Env,
+        admin: Address,
+        partner: Address,
+        waiver_bps: u32,
+        expires_at: u64,
+    ) -> u64 {
+        admin.require_auth();
+        if waiver_bps > 10_000 {
+            panic!("waiver_bps cannot exceed 10000 (100%)");
+        }
+        let config = Self::require_multisig_config(&env);
+        Self::assert_multisig_admin(&config, &admin);
+
+        let proposal_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::FeeWaiverProposalCounter)
+            .unwrap_or(0)
+            + 1;
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::FeeWaiverProposalCounter, &proposal_id);
+
+        let mut approvals: Vec<Address> = Vec::new(&env);
+        approvals.push_back(admin.clone());
+        let proposal = FeeWaiverProposal {
+            partner: partner.clone(),
+            waiver_bps,
+            expires_at,
+            approvals,
+        };
+        let key = DataKeyExt2::FeeWaiverProposal(proposal_id);
+        env.storage().persistent().set(&key, &proposal);
+        env.storage().persistent().extend_ttl(
+            &key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "fee_waiver_proposed"), proposal_id),
+            (admin, partner, waiver_bps, 1u32),
+        );
+
+        if config.threshold <= 1 {
+            Self::execute_fee_waiver_proposal(&env, proposal_id);
+        }
+
+        proposal_id
+    }
+
+    /// Approve a pending fee-waiver proposal. Grants the waiver once the
+    /// routine `MultiAdminConfig.threshold` of distinct admins have approved.
+    pub fn approve_fee_waiver(env: Env, admin: Address, proposal_id: u64) {
+        admin.require_auth();
+        let config = Self::require_multisig_config(&env);
+        Self::assert_multisig_admin(&config, &admin);
+
+        let key = DataKeyExt2::FeeWaiverProposal(proposal_id);
+        let mut proposal: FeeWaiverProposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("fee waiver proposal not found"));
+
+        for i in 0..proposal.approvals.len() {
+            if proposal.approvals.get(i).unwrap() == admin {
+                panic!("already approved by this admin");
+            }
+        }
+        proposal.approvals.push_back(admin.clone());
+        let approvals_count = proposal.approvals.len() as u32;
+        env.storage().persistent().set(&key, &proposal);
+
+        env.events().publish(
+            (Symbol::new(&env, "fee_waiver_approved"), proposal_id),
+            (admin, approvals_count),
+        );
+
+        if approvals_count >= config.threshold {
+            Self::execute_fee_waiver_proposal(&env, proposal_id);
+        }
+    }
+
+    fn execute_fee_waiver_proposal(env: &Env, proposal_id: u64) {
+        let key = DataKeyExt2::FeeWaiverProposal(proposal_id);
+        let proposal: FeeWaiverProposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("fee waiver proposal not found"));
+        env.storage().persistent().remove(&key);
+
+        let grant_key = DataKeyExt2::FeeWaiver(proposal.partner.clone());
+        env.storage()
+            .persistent()
+            .set(&grant_key, &(proposal.waiver_bps, proposal.expires_at));
+        env.storage().persistent().extend_ttl(
+            &grant_key,
+            constants::TTL_INITIAL_LEDGERS,
+            constants::TTL_MAX_LEDGERS,
+        );
+
+        env.events().publish(
+            (Symbol::new(env, "fee_waiver_granted"), proposal_id),
+            (proposal.partner, proposal.waiver_bps, proposal.expires_at),
+        );
+    }
+
+    /// Returns a pending fee-waiver proposal, or None if it never existed or
+    /// has already executed.
+    pub fn get_fee_waiver_proposal(env: Env, proposal_id: u64) -> Option<FeeWaiverProposal> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::FeeWaiverProposal(proposal_id))
+    }
+
+    /// Returns the active fee waiver for `partner` as (waiver_bps, expires_at),
+    /// or None if no waiver has been granted or a granted waiver has expired.
+    pub fn get_fee_waiver(env: Env, partner: Address) -> Option<(u32, u64)> {
+        let grant: (u32, u64) = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt2::FeeWaiver(partner))?;
+        let (_, expires_at) = grant;
+        if expires_at != 0 && env.ledger().timestamp() >= expires_at {
+            return None;
+        }
+        Some(grant)
+    }
+
+    /// Resolves the effective fee-waiver basis points currently active for
+    /// `address` (0 if none granted or the grant has expired).
+    fn resolve_fee_waiver_bps(env: &Env, address: &Address) -> u32 {
+        Self::get_fee_waiver(env.clone(), address.clone())
+            .map(|(bps, _)| bps)
+            .unwrap_or(0)
     }
 
     // ----------------------------------------------------------
@@ -3019,22 +3222,57 @@ impl ChainSettleContract {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic!("unauthorized"));
         admin.require_auth();
-        Self::append_admin_action(
-            &env,
-            Symbol::new(&env, "add_allowed_token"),
-            Symbol::new(&env, "allowed_token_added"),
-        );
         let mut allowed: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::AllowedTokens)
             .unwrap_or_else(|| Vec::new(&env));
+
+        // #387: Reject once the whitelist is at the admin-configured cap
+        // (0/unset = no cap) so an unbounded allowlist can't inflate the
+        // cost of functions that iterate it (e.g. create_shipment).
+        let max_allowed: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKeyExt2::MaxAllowedTokens)
+            .unwrap_or(0);
+        if max_allowed > 0 && allowed.len() >= max_allowed {
+            panic!("MaxAllowedTokensReached");
+        }
+
+        Self::append_admin_action(
+            &env,
+            Symbol::new(&env, "add_allowed_token"),
+            Symbol::new(&env, "allowed_token_added"),
+        );
         allowed.push_back(token.clone());
         env.storage()
             .instance()
             .set(&DataKey::AllowedTokens, &allowed);
         env.events()
             .publish((Symbol::new(&env, "allowed_token_added"),), token);
+    }
+
+    /// #387: Set the maximum number of entries allowed in the allowed-token
+    /// whitelist (0 = no cap). Existing lists larger than a newly lowered cap
+    /// remain valid — the cap is only enforced by `add_allowed_token`.
+    pub fn set_max_allowed_tokens(env: Env, admin: Address, max_allowed: u32) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKeyExt2::MaxAllowedTokens, &max_allowed);
+        env.events()
+            .publish((Symbol::new(&env, "max_allowed_tokens_set"),), max_allowed);
+    }
+
+    /// #387: Read the currently configured maximum allowed-token list size
+    /// (0 = no cap, the default).
+    pub fn get_max_allowed_tokens(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKeyExt2::MaxAllowedTokens)
+            .unwrap_or(0)
     }
 
     pub fn remove_allowed_token(env: Env, token: Address) {
@@ -3283,6 +3521,7 @@ impl ChainSettleContract {
         let backup_arbiter = options.backup_arbiter.clone();
         let confirmation_cooldown_ledgers = options.confirmation_cooldown_ledgers;
         let arbiter_panel = options.arbiter_panel.clone();
+        let jurisdiction = options.jurisdiction.clone();
 
         if buyer_cancel_fee_bps > constants::MAX_FEE_BPS {
             panic!("buyer_cancel_fee_bps cannot exceed 1000 (10%)");
@@ -3677,6 +3916,36 @@ impl ChainSettleContract {
             env.storage().persistent().set(
                 &DataKeyExt::ShipmentFeeBps(shipment_id.clone()),
                 &effective_bps,
+            );
+        }
+
+        // #385: Store the jurisdiction/compliance tag and index it for
+        // off-chain compliance filtering when provided.
+        if let Some(jurisdiction_tag) = jurisdiction.clone() {
+            env.storage().persistent().set(
+                &DataKeyExt2::ShipmentJurisdiction(shipment_id.clone()),
+                &jurisdiction_tag,
+            );
+            env.storage().persistent().extend_ttl(
+                &DataKeyExt2::ShipmentJurisdiction(shipment_id.clone()),
+                constants::TTL_INITIAL_LEDGERS,
+                constants::TTL_MAX_LEDGERS,
+            );
+
+            let index_key = DataKeyExt2::JurisdictionShipments(jurisdiction_tag);
+            let mut jurisdiction_shipments: Vec<String> = env
+                .storage()
+                .persistent()
+                .get(&index_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            jurisdiction_shipments.push_back(shipment_id.clone());
+            env.storage()
+                .persistent()
+                .set(&index_key, &jurisdiction_shipments);
+            env.storage().persistent().extend_ttl(
+                &index_key,
+                constants::TTL_INITIAL_LEDGERS,
+                constants::TTL_MAX_LEDGERS,
             );
         }
 
@@ -4741,6 +5010,172 @@ impl ChainSettleContract {
             (Symbol::new(&env, "proof_corrected"), shipment_id.clone()),
             (milestone_index, proof_hash_for_event),
         );
+    }
+
+    // ----------------------------------------------------------
+    // #386 PREVIEW MILESTONE PAYOUT (READ-ONLY)
+    // ----------------------------------------------------------
+
+    /// Simulates exactly what `confirm_milestone` would pay out for
+    /// `milestone_index` right now — gross amount, advance/penalty
+    /// deductions, platform + logistics fees (including any VIP fee waiver),
+    /// and the net amount the supplier would receive — without mutating any
+    /// state or requiring the milestone's proof to actually be confirmed.
+    ///
+    /// Mirrors the deduction order in `confirm_milestone`: gross → advance →
+    /// late penalty → platform fee → logistics fee. Long-hold rebates and
+    /// early-completion bonuses are omitted from `supplier_net_amount` since
+    /// they depend on values only known at actual confirmation time
+    /// (rebate needs the realised fee_amount; bonus is uncapped by holdback).
+    pub fn preview_milestone_payout(
+        env: Env,
+        shipment_id: String,
+        milestone_index: u32,
+    ) -> PayoutPreview {
+        let shipment = Self::get_shipment_internal(&env, &shipment_id);
+
+        if milestone_index as usize >= shipment.milestones.len() as usize {
+            panic!("invalid milestone index");
+        }
+        let milestone = shipment.milestones.get(milestone_index).unwrap();
+
+        let gross_amount = Self::milestone_gross_payment(&env, &shipment, milestone_index);
+        let mut payment = gross_amount;
+
+        // Peek at any approved-but-unconsumed advance for this milestone
+        // (mirrors consume_advance_for_milestone without removing it).
+        let advance_deducted: i128 = env
+            .storage()
+            .persistent()
+            .get::<DataKey, AdvanceRequest>(&DataKey::AdvanceRequest(
+                shipment_id.clone(),
+                milestone_index,
+            ))
+            .filter(|req| req.approved)
+            .map(|req| req.amount_advanced)
+            .unwrap_or(0);
+
+        // Late-delivery penalty, same formula as confirm_milestone.
+        let mut late_penalty_deducted: i128 = 0;
+        if milestone.deadline_ledger > 0 {
+            let penalty_bps = if milestone.penalty_bps_per_ledger > 0 {
+                milestone.penalty_bps_per_ledger
+            } else {
+                shipment.late_penalty_bps_per_ledger
+            };
+            if penalty_bps > 0 {
+                let proof_ledger = milestone.proof_submitted_ledger.unwrap_or(0);
+                let overdue_ledgers = proof_ledger.saturating_sub(milestone.deadline_ledger);
+                if overdue_ledgers > 0 {
+                    let raw_penalty =
+                        (gross_amount * (penalty_bps as i128 * overdue_ledgers as i128)) / 10_000;
+                    let cap = gross_amount / 2;
+                    late_penalty_deducted = raw_penalty.min(cap);
+                    payment -= late_penalty_deducted;
+                }
+            }
+        }
+
+        let would_be_held = shipment.holdback_ledgers > 0;
+        let is_final_milestone = Self::is_final_milestone(&shipment, milestone_index);
+
+        if would_be_held {
+            // Held milestones release later at face value (minus penalty already
+            // applied above); no fee is deducted until the hold is claimed.
+            return PayoutPreview {
+                gross_amount,
+                advance_deducted,
+                late_penalty_deducted,
+                platform_fee: 0,
+                applied_fee_bps: 0,
+                logistics_fee: 0,
+                supplier_net_amount: payment - advance_deducted,
+                would_be_held,
+                is_final_milestone,
+            };
+        }
+
+        let primary_buyer_for_fee = shipment.buyers.get(0).unwrap();
+        let mut fee_amount: i128 = 0;
+        let (net_payment, applied_fee_bps) = Self::deduct_fee_for_shipment_at_completion_preview(
+            &env,
+            payment,
+            &shipment_id,
+            &primary_buyer_for_fee,
+            is_final_milestone,
+            &mut fee_amount,
+        );
+
+        let mut actual_transfer = net_payment - advance_deducted;
+
+        let mut logistics_fee: i128 = 0;
+        if shipment.logistics_fee_bps > 0 {
+            let candidate_fee = (payment * shipment.logistics_fee_bps as i128) / 10_000;
+            if candidate_fee > 0 && candidate_fee <= actual_transfer {
+                logistics_fee = candidate_fee;
+                actual_transfer -= logistics_fee;
+            }
+        }
+
+        PayoutPreview {
+            gross_amount,
+            advance_deducted,
+            late_penalty_deducted,
+            platform_fee: fee_amount,
+            applied_fee_bps,
+            logistics_fee,
+            supplier_net_amount: actual_transfer,
+            would_be_held,
+            is_final_milestone,
+        }
+    }
+
+    /// Read-only variant of `deduct_fee_for_shipment_at_completion` for
+    /// `preview_milestone_payout` — computes the same fee without performing
+    /// the treasury transfer.
+    fn deduct_fee_for_shipment_at_completion_preview(
+        env: &Env,
+        gross: i128,
+        shipment_id: &String,
+        buyer: &Address,
+        is_final: bool,
+        fee_out: &mut i128,
+    ) -> (i128, u32) {
+        let override_bps: Option<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt::ShipmentFeeOverride(shipment_id.clone()));
+        let locked_bps: Option<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKeyExt::ShipmentFeeBps(shipment_id.clone()));
+        if let Some(config) = env
+            .storage()
+            .instance()
+            .get::<DataKey, FeeConfig>(&DataKey::FeeConfig)
+        {
+            let bps = if let Some(o) = override_bps {
+                o
+            } else if is_final {
+                Self::resolve_fee_bps_for(env, buyer)
+            } else {
+                locked_bps.unwrap_or(config.fee_bps)
+            };
+            let waiver_bps = Self::resolve_fee_waiver_bps(env, buyer);
+            let bps = if waiver_bps > 0 {
+                bps - ((bps as u64 * waiver_bps as u64) / 10_000) as u32
+            } else {
+                bps
+            };
+            let fee = (gross * bps as i128) / 10_000;
+            if fee > 0 {
+                *fee_out = fee;
+                return (gross - fee, bps);
+            }
+            return (gross, bps);
+        }
+        let fallback_bps = override_bps.unwrap_or_else(|| locked_bps.unwrap_or(0));
+        (gross, fallback_bps)
     }
 
     // ----------------------------------------------------------
@@ -10170,6 +10605,23 @@ impl ChainSettleContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// #385: Returns the jurisdiction/compliance tag for a shipment, or None if untagged.
+    pub fn get_shipment_jurisdiction(env: Env, shipment_id: String) -> Option<Symbol> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::ShipmentJurisdiction(shipment_id))
+    }
+
+    /// #385: Returns all shipment IDs tagged with `jurisdiction`, for off-chain
+    /// compliance tooling to filter or report on shipments subject to a
+    /// specific regulatory regime.
+    pub fn get_shipments_by_jurisdiction(env: Env, jurisdiction: Symbol) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKeyExt2::JurisdictionShipments(jurisdiction))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
     /// Returns the total number of shipments associated with `address` as buyer or supplier.
     /// Shipments where the address holds both roles are counted once.
     pub fn get_shipment_count(env: Env, address: Address) -> u32 {
@@ -11618,6 +12070,14 @@ impl ChainSettleContract {
             } else {
                 locked_bps.unwrap_or(config.fee_bps)
             };
+            // #388: Apply any governance-granted VIP partner fee waiver on top
+            // of the resolved bps (waiver_bps of the *fee*, not of gross).
+            let waiver_bps = Self::resolve_fee_waiver_bps(env, buyer);
+            let bps = if waiver_bps > 0 {
+                bps - ((bps as u64 * waiver_bps as u64) / 10_000) as u32
+            } else {
+                bps
+            };
             let fee = (gross * bps as i128) / 10_000;
             if fee > 0 {
                 let token_client = token::Client::new(env, token);
@@ -12173,4 +12633,7 @@ mod test_proof_validation;
 mod test_supplier_collateral;
 mod test_supplier_tiering;
 mod test_upgrade_multisig;
-mod test_issues_393_394_413_414;
+mod test_jurisdiction_tag;
+mod test_max_allowed_tokens;
+mod test_fee_waiver;
+mod test_payout_preview;
