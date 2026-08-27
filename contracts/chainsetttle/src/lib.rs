@@ -367,6 +367,7 @@ pub struct ShipmentOptions {
     // ── #164 Per-milestone timestamp deadlines ────────────────
     /// Unix timestamp deadlines per milestone (0 = no deadline for that milestone).
     /// Empty Vec = no timestamp deadlines. Non-empty length must match milestones.
+    /// Empty Vec = no timestamp deadlines. Non-empty length must match milestones.
     pub deadlines: Vec<u64>,
 
     // ── #165 Dispute auto-resolution timeout ──────────────────
@@ -450,6 +451,7 @@ pub struct ReputationFastTrack {
     pub max_disputed_ratio_bps: u32,
 }
 
+/// Pending mutual-consent pause or resume request for a single shipment.
 /// Pending mutual-consent pause or resume request for a single shipment.
 #[contracttype]
 #[derive(Clone)]
